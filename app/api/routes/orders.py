@@ -12,7 +12,7 @@ router = APIRouter()
 @router.post("/orders", response_model=OrderResponse)
 async def create_order(
     order_payload: OrderCreate = Body(...), 
-    authorization: str = Header(..., description="Token de sesión del cliente web"),
+    authorization: str = Header(None, alias="Authorization", description="Token de sesión del cliente web"),
     db: AsyncSession = Depends(get_db),
     _ : str = Depends(validate_api_key)
 ):
@@ -47,7 +47,7 @@ async def create_order(
             order_payload=order_payload_dict,
             client_token=valid_client_token,
             branch_id=branch_id, 
-            products_data=products_data
+            products_data=order_payload_dict["ecOrderDto"]["products"]
         )
         return sicar_response
         
