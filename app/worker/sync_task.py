@@ -4,6 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from app.models.product import Product
+from datetime import datetime
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 
@@ -149,7 +150,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         stmt = (
                             update(Product)
                             .where(Product.sicar_uuid.in_(batch))
-                            .values(is_deleted=True)
+                            .values(is_deleted=True,
+                                    eliminated_at=datetime.now())
                         )
                         await db.execute(stmt)
                         
