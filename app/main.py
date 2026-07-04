@@ -26,7 +26,6 @@ app.add_middleware(
 
 # Router para conseguir detalles de productos desde Sicar X y guardarlos en la base de datos local
 app.include_router(products.router,
-                   prefix="/products",
                    tags=["Products Catalog and Details"])
 
 # Router para crear pedidos en Sicar X y descontar stock local
