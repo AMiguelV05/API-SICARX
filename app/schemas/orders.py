@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List
 
 class ProductItem(BaseModel):
     uuid: str = Field(..., description="UUID del producto en Sicar")
