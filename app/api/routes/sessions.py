@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Header, Depends
-from app.services.session_services import get_or_refresh_customer_session
+from app.services.session_service import get_or_refresh_customer_session
 from app.core.security import validate_api_key
 
 router = APIRouter(prefix="/session", tags=["Session"])
