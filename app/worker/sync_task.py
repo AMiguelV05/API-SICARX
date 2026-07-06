@@ -3,6 +3,7 @@ import asyncio
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
+from uuid import uuid4
 from app.models.product import Product
 from datetime import datetime, timezone
 from app.core.config import settings
@@ -29,7 +30,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     print("Iniciando sincronización paginada con Sicar X...")
     price_key = PRICE_LIST_ID.split("-")[-1]
 
-    synced_uuids = set()
+    current_sync_id = str(uuid4())
     sync_completed_successfully = False
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -84,12 +85,12 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         print(f"Respuesta de Sicar: {response.text}")
                         print(f"{len(items)} items procesados hasta ahora.")
                         retry_count += 1
-                        await asyncio.sleep(2 * retry_count) # Backoff
+                        await asyncio.sleep(2 ** retry_count) # Backoff
                         
                 except httpx.RequestError as e:
                     print(f"Error de red en bloque {offset}: {e}. Reintento {retry_count + 1}/{MAX_RETRIES}")
                     retry_count += 1
-                    await asyncio.sleep(2 * retry_count)
+                    await asyncio.sleep(2 ** retry_count)
 
             # Si después de X intentos falló, abortamos este ciclo de sincronización para proteger el backend
             if not success:
@@ -98,16 +99,16 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
 
             if not items:
                 has_more_products = False
+                break
 
             # Lógica de Inserción/Actualización en PostgreSQL
+            product_values = []
             for p in items:
                 prices_obj = p.get("prices") or {}
-                product_uuid = p.get("uuid")
-                if product_uuid:
-                    synced_uuids.add(product_uuid)
+                
 
-                values = {
-                    "sicar_uuid": product_uuid,
+                product_values.append({
+                    "sicar_uuid": p.get("uuid"),
                     "sku": p.get("sku", ""),
                     "name": p.get("description", "Sin Nombre"),
                     "image_url": p.get("imageUrl"),
@@ -116,20 +117,21 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "is_bulk": p.get("bulk", False),
                     "is_active": not p.get("hidden", False), 
                     "price": prices_obj.get(price_key, 0.0), 
-                    "stock": p.get("stock", 0.0)
-                }
+                    "stock": p.get("stock", 0.0),
+                    "last_sync_id": current_sync_id
+                })
+            if product_values:
+                stmt = insert(Product)
 
-                stmt = insert(Product).values(**values)
                 update_dict = {c.name: c for c in stmt.excluded if not c.primary_key}
-                
                 stmt = stmt.on_conflict_do_update(
                     index_elements=['sicar_uuid'], 
                     set_=update_dict
                 )
                 
-                await db.execute(stmt)
+                await db.execute(stmt, product_values)
+                await db.commit()
 
-            await db.commit()
             total_procesados += len(items)
             print(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
             
@@ -137,47 +139,28 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         
     # Fase de limpieza
     if sync_completed_successfully:
-        print(f"Iniciando barrido de productos eliminados en Sicar...")
+        print("Iniciando limpieza de productos eliminados...")
         try:
-            if synced_uuids:
-                # Le pedimos a Postgres solo los UUIDs que localmente están activos
-                result = await db.execute(select(Product.sicar_uuid).where(Product.is_deleted == False))
-                local_undeleted_uuids = set(result.scalars().all())
+            # Filtramos por is_deleted == False para no actualizar registros que ya estaban borrados previamente.
+            stmt = (
+                update(Product)
+                .where(Product.last_sync_id != current_sync_id)
+                .where(Product.last_sync_id.is_not(None))
+                .where(Product.is_deleted == False)
+                .values(
+                    is_deleted=True,
+                    deleted_at=datetime.now(timezone.utc)
+                )
+            )
+            
+            result = await db.execute(stmt)
+            await db.commit()
 
-                # Productos que están en la base de datos local pero no en Sicar
-                uuids_to_deactivate = list(local_undeleted_uuids - synced_uuids)
-                print(f"{len(synced_uuids)} productos activos en Sicar. {len(local_undeleted_uuids)} productos activos en la base de datos local.")
-
-                if uuids_to_deactivate:
-                    print(f"Se encontraron {len(uuids_to_deactivate)} productos fantasma. Desactivando en lotes...")
-
-                    # Mandamos la actualización por lotes para no romper el límite de Postgres
-                    batch_size = 10000
-                    for i in range(0, len(uuids_to_deactivate), batch_size):
-                        batch = uuids_to_deactivate[i:i + batch_size]
-                        
-                        stmt = (
-                            update(Product)
-                            .where(Product.sicar_uuid.in_(batch))
-                            .values(is_deleted=True,
-                                    deleted_at=datetime.now(timezone.utc))
-                        )
-                        await db.execute(stmt)
-                        
-                    await db.commit()
-                    print(f"Limpieza completada. {len(uuids_to_deactivate)} productos fueron desactivados.")
-                else:
-                    print("El catálogo local ya está idéntico al de Sicar. No hay basura que limpiar.")
-            else:
-                print("Advertencia: Catálogo de Sicar vacío. Se aborta la limpieza por seguridad.")
+            print(f"Limpieza completada. {result.rowcount} productos fueron desactivados.")
                 
         except Exception as e:
             await db.rollback()
             print(f"Error de base de datos durante la limpieza: {e}")
-            
-    else:
-        print("La sincronización no terminó correctamente. Se omite la limpieza para evitar falsos borrados.")
-
 
 """
 Testeo manual de la función de sincronización.
