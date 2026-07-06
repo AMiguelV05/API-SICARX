@@ -91,7 +91,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 break 
 
             if not items:
-                continue  # No hay items en este bloque, pasamos al siguiente
+                has_more_products = False
 
             # Lógica de Inserción/Actualización en PostgreSQL
             for p in items:
