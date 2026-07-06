@@ -4,7 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from app.models.product import Product
-from datetime import datetime
+from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 
@@ -19,6 +19,12 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     items_per_page = 300
     total_procesados = 0
     has_more_products = True
+    timeout = httpx.Timeout(
+        connect=5.0,
+        read=10.0,
+        write=5.0,
+        pool=5.0
+    )
 
     print("Iniciando sincronización paginada con Sicar X...")
     price_key = PRICE_LIST_ID.split("-")[-1]
@@ -26,7 +32,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     synced_uuids = set()
     sync_completed_successfully = False
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         while has_more_products:
             payload = {
                 "items": items_per_page,
@@ -154,7 +160,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                             update(Product)
                             .where(Product.sicar_uuid.in_(batch))
                             .values(is_deleted=True,
-                                    eliminated_at=datetime.now())
+                                    deleted_at=datetime.now(timezone.utc))
                         )
                         await db.execute(stmt)
                         

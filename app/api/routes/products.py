@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.core.database import get_db
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
@@ -23,9 +23,10 @@ async def get_product_details(uuid: str, db: AsyncSession = Depends(get_db)):
     # Lógica de expiración
     needs_update = (
         product.details_updated_at is None or 
-        datetime.now() - product.details_updated_at > timedelta(days=1)
+        datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)
     )
-
+    print(f"{datetime.now(timezone.utc)} - {product.details_updated_at} = {datetime.now(timezone.utc) - product.details_updated_at}")
+    print(f"{datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)}")
     if needs_update:
         print(f"Datos obsoletos para {uuid}. Descargando de GraphQL...")
         
@@ -39,7 +40,7 @@ async def get_product_details(uuid: str, db: AsyncSession = Depends(get_db)):
             product.tags = full_data.get("tags")
             product.sales_unit_uuid = full_data.get("sales_unit_uuid")
             product.additional_images = full_data.get("additional_images")
-            product.details_updated_at = datetime.now()
+            product.details_updated_at = datetime.now(timezone.utc)
             
             await db.commit()
             await db.refresh(product)
