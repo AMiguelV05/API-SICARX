@@ -34,4 +34,4 @@ class Product(Base):
     is_active = Column(Boolean, default=True) # Indica si el producto está activo en tienda en linea
     is_deleted = Column(Boolean, default=False)  # Para marcar productos que ya no existen en Sicar
     details_updated_at = Column(DateTime, nullable=True)  # Fecha de actualización de detalles
-    eliminated_at = Column(DateTime, nullable=True)  # Fecha de eliminación del producto en Sicar
+    deleted_at = Column(DateTime, nullable=True)  # Fecha de eliminación del producto en Sicar
