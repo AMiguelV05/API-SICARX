@@ -16,7 +16,7 @@ PRICE_LIST_ID = settings.SICAR_PRICE_LIST_ID
 MAX_RETRIES = 5
 
 async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
-    items_per_page = 1000
+    items_per_page = 300
     total_procesados = 0
     has_more_products = True
 
@@ -90,9 +90,12 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 print(f"Abortando sincronización. Fallo crítico persistente en el offset {offset}.")
                 break 
 
+            if not items:
+                continue  # No hay items en este bloque, pasamos al siguiente
+
             # Lógica de Inserción/Actualización en PostgreSQL
             for p in items:
-                prices_obj = p.get("prices", {})
+                prices_obj = p.get("prices") or {}
                 product_uuid = p.get("uuid")
                 if product_uuid:
                     synced_uuids.add(product_uuid)
@@ -124,7 +127,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             total_procesados += len(items)
             print(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
             
-            offset += items_per_page
+            offset += len(items)
         
     # Fase de limpieza
     if sync_completed_successfully:
