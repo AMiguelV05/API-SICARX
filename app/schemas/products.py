@@ -12,11 +12,12 @@ class LocalCatalogFilter(BaseModel):
 # Modelo de salida
 class ProductBasic(BaseModel):
     sicar_uuid: str 
-    sku: Optional[str]
+    sku: str
     name: str
     description_details: Optional[str]
     image_url: Optional[str]
     price: float
+    stock: float
 
     class Config:
         from_attributes = True

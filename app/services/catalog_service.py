@@ -8,15 +8,12 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         Product.is_deleted == False, 
         Product.is_active == True
     )
-
-    # Aplicación de filtros
-    print(filters.get("deparment_uuid"))
-    """
+    
     if filters.get("department_uuid"):
         stmt = stmt.where(Product.department_uuid == filters["department_uuid"])
     
     if filters.get("category_uuid"):
-        stmt = stmt.where(Product.category_uuid == filters["category_uuid"])"""
+        stmt = stmt.where(Product.category_uuid == filters["category_uuid"])
 
 
     # Contar el total de resultados
