@@ -1,15 +1,23 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from datetime import datetime, timedelta, timezone
 from app.core.database import get_db
+from app.core.security import validate_api_key
+
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse
+from app.services.catalog_service import get_local_catalog
 
 router = APIRouter()
 
 @router.get("/products/{uuid}")
-async def get_product_details(uuid: str, db: AsyncSession = Depends(get_db)):
+async def get_product_details(
+    uuid: str, 
+    db: AsyncSession = Depends(get_db),
+    _ : str = Depends(validate_api_key)):
+    
     """
     Busca un producto localmente. Si no tiene detalles o pasaron 24 horas,
     hace scraping al servidor central de Sicar para actualizar la base de datos.
@@ -47,3 +55,20 @@ async def get_product_details(uuid: str, db: AsyncSession = Depends(get_db)):
             print(f"Producto {uuid} actualizado con éxito en la base de datos local.")
 
     return product
+
+@router.post("/catalog", response_model=LocalCatalogResponse, summary="Obtener catálogo local")
+async def get_catalog(
+    filter_data: LocalCatalogFilter = Body(...),
+    db: AsyncSession = Depends(get_db),
+    _ : str = Depends(validate_api_key)
+):
+    """
+    Obtiene la lista de productos directamente desde la base de datos local.
+    Retorna solo la información básica necesaria para las tarjetas de producto.
+    """
+    try:
+        # Convertimos el modelo de Pydantic a diccionario
+        result = await get_local_catalog(db, filter_data.model_dump())
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
