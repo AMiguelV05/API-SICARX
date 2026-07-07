@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Body, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -10,6 +11,7 @@ from app.services.product_service import fetch_full_details_from_sicar
 from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse
 from app.services.catalog_service import get_local_catalog
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.get("/products/{uuid}")
@@ -33,10 +35,10 @@ async def get_product_details(
         product.details_updated_at is None or 
         datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)
     )
-    print(f"{datetime.now(timezone.utc)} - {product.details_updated_at} = {datetime.now(timezone.utc) - product.details_updated_at}")
-    print(f"{datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)}")
+    logger.debug(f"{datetime.now(timezone.utc)} - {product.details_updated_at} = {datetime.now(timezone.utc) - product.details_updated_at}")
+    logger.debug(f"{datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)}")
     if needs_update:
-        print(f"Datos obsoletos para {uuid}. Descargando de GraphQL...")
+        logger.info(f"Datos obsoletos para {uuid}. Descargando de GraphQL...")
         
         # Llamada al servicio que maneja el auto-login
         full_data = await fetch_full_details_from_sicar(product.sicar_uuid)
@@ -52,7 +54,7 @@ async def get_product_details(
             
             await db.commit()
             await db.refresh(product)
-            print(f"Producto {uuid} actualizado con éxito en la base de datos local.")
+            logger.info(f"Producto {uuid} actualizado con éxito en la base de datos local.")
 
     return product
 
@@ -71,4 +73,5 @@ async def get_catalog(
         result = await get_local_catalog(db, filter_data.model_dump())
         return result
     except Exception as e:
+        logger.error(f"Error al obtener el catálogo local: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))

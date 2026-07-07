@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Body, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
@@ -7,6 +8,7 @@ from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/orders", response_model=OrderResponse)
@@ -17,14 +19,16 @@ async def create_order(
     _ : str = Depends(validate_api_key)
 ):
     if not authorization:
+        logger.warning("Intento de creación de orden rechazado: No se proporcionó token de sesión.")
         raise HTTPException(status_code=401, detail="No se proporcionó el token de sesión del cliente en los headers.")
 
     # Verificación y refresco de la sesión del cliente
     try:
         session_data = await get_or_refresh_customer_session(authorization)
-        # Obtenemos el token garantizado (ya sea el mismo si era válido, o uno nuevo si había expirado)
+        # Obtenemos el token (ya sea el mismo si era válido, o uno nuevo si había expirado)
         valid_client_token = session_data.get("token")
     except Exception as e:
+        logger.error(f"Fallo al validar o refrescar sesión del cliente: {str(e)}")
         raise HTTPException(status_code=401, detail=f"No se pudo validar ni refrescar la sesión del cliente: {str(e)}")
 
     branch_id = order_payload.branchId
@@ -49,6 +53,8 @@ async def create_order(
             branch_id=branch_id, 
             products_data=order_payload_dict["ecOrderDto"]["products"]
         )
+
+        logger.info(f"Orden creada exitosamente en la sucursal {branch_id}.")
         return sicar_response
         
     except Exception as e:
@@ -67,6 +73,7 @@ async def cancel_order(
     products_to_restore = cancel_payload.products
 
     if not document_uuid or not cash_register_uuid:
+        logger.warning("Intento de cancelación fallido: Faltan uuid del documento o caja registradora.")
         raise HTTPException(status_code=400, detail="Faltan el uuid del documento o la caja registradora.")
 
     try:
@@ -76,6 +83,8 @@ async def cancel_order(
             cash_register_uuid, 
             products_to_restore
         )
+
+        logger.info(f"Pedido {document_uuid} cancelado exitosamente. Stock restaurado.")
         return OrderCancelResponse(
             documentUuid=document_uuid,
             sicarTimestamp=cancel_timestamp,
@@ -85,4 +94,5 @@ async def cancel_order(
         
     except Exception as e:
         await db.rollback()
+        logger.error(f"Error al cancelar el pedido {document_uuid}: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))

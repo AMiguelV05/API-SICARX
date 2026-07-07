@@ -1,9 +1,11 @@
 import httpx
+import logging
 from fastapi import HTTPException
 from app.core.config import settings
 
 ACCOUNT_LAMBDA_URL = "https://7ew5wkc4jsnbb6ph2bd2r4o5540hqlea.lambda-url.us-east-1.on.aws/login/v1/account"
 LOGIN_LAMBDA_URL = "https://7ew5wkc4jsnbb6ph2bd2r4o5540hqlea.lambda-url.us-east-1.on.aws/login/v1/login"
+logger = logging.getLogger(__name__)
 
 class SicarAuthManager:
     """Gestor centralizado para la autenticación B2B con Sicar X"""
@@ -31,7 +33,7 @@ class SicarAuthManager:
             account_response = await client.post(ACCOUNT_LAMBDA_URL, json=account_payload)
             
             if account_response.status_code != 200:
-                print(f"Error fatal en Auto-Login: {account_response.text}")
+                logger.error(f"Error fatal en Auto-Login: {account_response.text}")
                 raise HTTPException(
                     status_code=500, 
                     detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
@@ -49,7 +51,7 @@ class SicarAuthManager:
             login_response = await client.post(LOGIN_LAMBDA_URL, json=login_payload)
 
             if login_response.status_code != 200:
-                print(f"Error fatal en Auto-Login: {login_response.text}")
+                logger.error(f"Error fatal en Auto-Login: {login_response.text}")
                 raise HTTPException(
                     status_code=500, 
                     detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
@@ -58,14 +60,14 @@ class SicarAuthManager:
             final_jwt = login_response.headers.get("Cauth") or login_response.headers.get("cauth")
             
             if not final_jwt:
-                print("Headers de respuesta de login:", login_response.headers)
+                logger.error("Headers de respuesta de login faltantes:", login_response.headers)
                 raise HTTPException(
                     status_code=500, 
                     detail="Fallo crítico: El backend no pudo obtener el token final de Sicar X."
                 )
 
             self._current_token = final_jwt
-            print("Token administrativo de Sicar X actualizado exitosamente.")
+            logger.info("Token administrativo de Sicar X actualizado exitosamente.")
             return self._current_token
         
 # Instancia global

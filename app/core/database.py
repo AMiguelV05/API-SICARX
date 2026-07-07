@@ -2,14 +2,14 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
-# 1. Crear el motor asíncrono
+# Crear el motor asíncrono
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=True,
     future=True
 )
 
-# 2. Fábrica de sesiones asíncronas
+# Fábrica de sesiones asíncronas
 AsyncSessionLocal = async_sessionmaker(
     engine, 
     class_=AsyncSession, 

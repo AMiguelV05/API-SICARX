@@ -1,6 +1,9 @@
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.models.product import Product
+
+logger = logging.getLogger(__name__)
 
 async def get_local_catalog(db: AsyncSession, filters: dict):
     # Consulta base: solo productos activos y no eliminados
@@ -10,9 +13,11 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     )
     
     if filters.get("department_uuid"):
+        logger.debug(f"Aplicando filtro por departamento: {filters['department_uuid']}")
         stmt = stmt.where(Product.department_uuid == filters["department_uuid"])
     
     if filters.get("category_uuid"):
+        logger.debug(f"Aplicando filtro por categoría: {filters['category_uuid']}")
         stmt = stmt.where(Product.category_uuid == filters["category_uuid"])
 
 
@@ -26,6 +31,8 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     # Ejecutar la consulta
     result = await db.execute(stmt)
     products = result.scalars().all()
+
+    logger.info(f"Consulta de catálogo exitosa. Filtros: {filters}. Total encontrados: {total_items}")
 
     return {
         "total": total_items,

@@ -1,5 +1,6 @@
 import httpx
 import json
+import logging
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
@@ -7,6 +8,7 @@ from app.models.product import Product
 
 STORE_URL = "https://api.sicarx.com/store/"
 ORDER_URL = "https://ferreteriacharly.sicarx.shop/api/cart/order"
+logger = logging.getLogger(__name__)
 
 async def validate_cart_items(uuids: list, token: str, branch_id: str, price_list_uuid: str):
     """Validación de stock y precios usando el token del cliente web"""
@@ -47,6 +49,7 @@ async def validate_cart_items(uuids: list, token: str, branch_id: str, price_lis
     async with httpx.AsyncClient() as client:
         response = await client.post(STORE_URL, content=query, headers=headers)
         if response.status_code != 200:
+            logger.error(f"Error en pre-validación de carrito en Sicar\n{response}")
             raise HTTPException(status_code=400, detail="Error en pre-validación de carrito en Sicar")
         return response.json()
 
@@ -64,8 +67,9 @@ async def create_order_in_sicar(db: AsyncSession, order_payload: dict, client_to
 
     async with httpx.AsyncClient() as client:
         response = await client.post(ORDER_URL, json=order_payload, headers=order_headers)
-        print(f"Respuesta de Sicar al crear orden: {response.status_code} - {response}")
+        logger.info(f"Respuesta de Sicar al crear orden: {response.status_code} - {response}")
         if response.status_code not in (200, 201):
+            logger.error(f"Error confirmando la orden: {response.text}")
             raise Exception(f"Error confirmando la orden: {response.text}")
         
         sicar_response = response.json()

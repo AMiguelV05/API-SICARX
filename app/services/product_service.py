@@ -1,6 +1,8 @@
 import httpx
+import logging
 from app.services.sicar_auth import sicar_auth
 
+logger = logging.getLogger(__name__)
 GRAPHQL_URL = "https://api.sicarx.com/graph/v1/"
 
 async def fetch_full_details_from_sicar(uuid: str) -> dict:
@@ -36,17 +38,17 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
 
         # Si caducó, FastAPI va por uno nuevo a AWS Lambda
         if response.status_code == 401:
-            print(f"Token B2B expirado al consultar producto {uuid}. Renovando...")
+            logger.warning(f"Token B2B expirado al consultar producto {uuid}. Renovando...")
             new_token = await sicar_auth.refresh_token()
             response = await attempt_fetch(new_token)
 
         if response.status_code != 200:
-            print(f"Error fetching details for UUID {uuid}. Status: {response.status_code}")
+            logger.error(f"Error obteniendo detalles para UUID {uuid}. Estado: {response.status_code}")
             return {}
 
         data = response.json()
         if "errors" in data:
-            print(f"GraphQL errors for UUID {uuid}: {data['errors']}")
+            logger.error(f"Errores GraphQL para UUID {uuid}: {data['errors']}")
             return {}
 
         product_data = data.get("data", {}).get("product") or {}
@@ -61,5 +63,5 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
         }
 
     except httpx.RequestError as e:
-        print(f"Request error while fetching details for UUID {uuid}: {e}")
+        logger.error(f"Request error while fetching details for UUID {uuid}: {e}")
         return {}

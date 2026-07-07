@@ -1,5 +1,6 @@
 import httpx
 import asyncio
+import logging
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
@@ -11,6 +12,8 @@ from app.services.sicar_auth import sicar_auth
 
 # Imports para testeo
 from app.core.database import AsyncSessionLocal
+
+logger = logging.getLogger(__name__)
 
 SICAR_LIST_URL = "https://api.sicarx.com/product/v1/product/list"
 PRICE_LIST_ID = settings.SICAR_PRICE_LIST_ID
@@ -27,7 +30,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         pool=5.0
     )
 
-    print("Iniciando sincronización paginada con Sicar X...")
+    logger.info("Iniciando sincronización paginada con Sicar X...")
     price_key = PRICE_LIST_ID.split("-")[-1]
 
     current_sync_id = str(uuid4())
@@ -68,33 +71,33 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         break
                     
                     elif response.status_code == 204:
-                        print(f"No hay más productos en Sicar. Offset {offset}. Finalizando sincronización.")
+                        logger.info(f"No hay más productos en Sicar. Offset {offset}. Finalizando sincronización.")
                         has_more_products = False
                         sync_completed_successfully = True
                         success = True
                         break
 
                     elif response.status_code == 401:
-                        print(f"Token expirado en bloque {offset}. Renovando con AWS Lambda...")
-                        print(f"Respuesta de Sicar: {response.text}")
+                        logger.warning(f"Token expirado en bloque {offset}. Renovando con AWS Lambda...")
+                        logger.debug(f"Respuesta de Sicar: {response.text}")
                         await sicar_auth.refresh_token()
                         retry_count += 1
                         
                     else:
-                        print(f"Sicar falló con {response.status_code} en bloque {offset}. Reintento {retry_count + 1}/{MAX_RETRIES}")
-                        print(f"Respuesta de Sicar: {response.text}")
-                        print(f"{len(items)} items procesados hasta ahora.")
+                        logger.warning(f"Sicar falló con {response.status_code} en bloque {offset}. Reintento {retry_count + 1}/{MAX_RETRIES}")
+                        logger.debug(f"Respuesta de Sicar: {response.text}")
+                        logger.debug(f"{len(items)} items procesados hasta ahora.")
                         retry_count += 1
                         await asyncio.sleep(2 ** retry_count) # Backoff
                         
                 except httpx.RequestError as e:
-                    print(f"Error de red en bloque {offset}: {e}. Reintento {retry_count + 1}/{MAX_RETRIES}")
+                    logger.error(f"Error de red en bloque {offset}: {e}. Reintento {retry_count + 1}/{MAX_RETRIES}")
                     retry_count += 1
                     await asyncio.sleep(2 ** retry_count)
 
             # Si después de X intentos falló, abortamos este ciclo de sincronización para proteger el backend
             if not success:
-                print(f"Abortando sincronización. Fallo crítico persistente en el offset {offset}.")
+                logger.error(f"Abortando sincronización. Fallo crítico persistente en el offset {offset}.")
                 break 
 
             if not items:
@@ -133,13 +136,13 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 await db.commit()
 
             total_procesados += len(items)
-            print(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
+            logger.info(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
             
             offset += len(items)
         
     # Fase de limpieza
     if sync_completed_successfully:
-        print("Iniciando limpieza de productos eliminados...")
+        logger.info("Iniciando limpieza de productos eliminados...")
         try:
             # Filtramos por is_deleted == False para no actualizar registros que ya estaban borrados previamente.
             stmt = (
@@ -156,20 +159,20 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             result = await db.execute(stmt)
             await db.commit()
 
-            print(f"Limpieza completada. {result.rowcount} productos fueron desactivados.")
+            logger.info(f"Limpieza completada. {result.rowcount} productos fueron desactivados.")
                 
         except Exception as e:
             await db.rollback()
-            print(f"Error de base de datos durante la limpieza: {e}")
+            logger.error(f"Error de base de datos durante la limpieza: {e}")
 
 """
 Testeo manual de la función de sincronización.
 """
 async def run_manual_test():
-    print("Iniciando prueba manual de sincronización...")
+    logger.info("Iniciando prueba manual de sincronización...")
     async with AsyncSessionLocal() as session:
         await sync_sicar_catalog(session)
-    print("Prueba manual finalizada.")
+    logger.info("Prueba manual finalizada.")
 
 if __name__ == "__main__":
     asyncio.run(run_manual_test())

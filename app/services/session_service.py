@@ -1,8 +1,10 @@
 import httpx
+import logging
 import urllib.parse
 import json
 import base64
 
+logger = logging.getLogger(__name__)
 MAIN_SITE_URL = "https://ferreteriacharly.sicarx.shop/"
 CONFIG_URL = "https://ferreteriacharly.sicarx.shop/api/ecommerce/config"
 
@@ -29,8 +31,10 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
                 response = await client.get(CONFIG_URL, headers=headers_refresh)
                 
                 if response.status_code != 200:
+                    logger.error(f"El token anterior es inválido o expiró: {response.text}")
                     raise Exception(f"El token anterior es inválido o expiró: {response.text}")
                 
+                logger.info("Token refrescado correctamente")
                 sicar_config = response.json()
                 
             else:
@@ -44,6 +48,7 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
                 tmp_store_cookie = client.cookies.get("tmpStore")
                 
                 if not tmp_store_cookie:
+                    logger.error("Sicar X no devolvió la cookie de sesión inicial.")
                     raise Exception("Sicar X no devolvió la cookie de sesión inicial.")
                 
                 # Decodificamos Base64 y URL-encoded
@@ -56,8 +61,10 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
             # Extracción del JWT y otros datos relevantes
             token = sicar_config.get("payload")
             if not token:
+                logger.error("No se encontró un JWT válido en la respuesta de Sicar.")
                 raise Exception("No se encontró un JWT válido en la respuesta de Sicar.")
 
+            logger.info("Token generado correctamente")
             return {
                 "token": token,
                 "priceListUuid": sicar_config.get("priceListUuid"),
@@ -66,6 +73,8 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
             }
             
         except httpx.RequestError as e:
+            logger.error(f"Error de red con Sicar X: {str(e)}")
             raise Exception(f"Error de red con Sicar X: {str(e)}")
         except json.JSONDecodeError:
+            logger.error("Error al decodificar la estructura JSON de Sicar.")
             raise Exception("Error al decodificar la estructura JSON de Sicar.")
