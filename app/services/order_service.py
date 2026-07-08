@@ -49,7 +49,7 @@ async def validate_cart_items(uuids: list, token: str, branch_id: str, price_lis
     async with httpx.AsyncClient() as client:
         response = await client.post(STORE_URL, content=query, headers=headers)
         if response.status_code != 200:
-            logger.error(f"Error en pre-validación de carrito en Sicar\n{response}")
+            logger.error(f"Error en pre-validacion de carrito en Sicar\n{response}")
             raise HTTPException(status_code=400, detail="Error en pre-validación de carrito en Sicar")
         return response.json()
 

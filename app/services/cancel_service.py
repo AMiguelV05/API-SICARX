@@ -30,12 +30,12 @@ async def process_order_cancellation(db: AsyncSession, document_uuid: str, cash_
 
     # Si el token caducó...
     if response.status_code == 401:
-        logger.warning("Token administrativo expirado. Solicitando renovación a AWS...")
+        logger.warning("Token administrativo expirado. Solicitando renovacion a AWS...")
         new_token = await sicar_auth.refresh_token()
         response = await attempt_cancel(new_token)
 
     if response.status_code != 200:
-        logger.error(f"Sicar X rechazó la cancelación: {response.text}")
+        logger.error(f"Sicar X rechazo la cancelación: {response.text}")
         raise Exception(f"Sicar X rechazó la cancelación: {response.text}")
 
     cancel_timestamp = response.text 

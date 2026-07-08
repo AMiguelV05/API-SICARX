@@ -14,17 +14,17 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
     frontend independiente utilizando la llave secreta.
     """
     if not api_key:
-        logger.error("Falta la cabecera de autenticación x-api-key.")
+        logger.error("Falta la cabecera de autenticacion x-api-key.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Falta la cabecera de autenticación x-api-key."
         )
         
     if api_key != settings.X_API_KEY:
-        logger.error("Acceso denegado: API Key inválida o expirada.")
+        logger.error("Acceso denegado: API Key invalida o expirada.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Acceso denegado: API Key inválida o expirada."
+            detail="Acceso denegado: API Key invalida o expirada."
         )
         
     return api_key

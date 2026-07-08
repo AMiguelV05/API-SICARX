@@ -54,7 +54,7 @@ async def get_product_details(
             
             await db.commit()
             await db.refresh(product)
-            logger.info(f"Producto {uuid} actualizado con éxito en la base de datos local.")
+            logger.info(f"Producto {uuid} actualizado con exito en la base de datos local.")
 
     return product
 
@@ -73,5 +73,5 @@ async def get_catalog(
         result = await get_local_catalog(db, filter_data.model_dump())
         return result
     except Exception as e:
-        logger.error(f"Error al obtener el catálogo local: {str(e)}")
+        logger.error(f"Error al obtener el catalogo local: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))

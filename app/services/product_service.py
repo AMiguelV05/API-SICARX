@@ -63,5 +63,5 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
         }
 
     except httpx.RequestError as e:
-        logger.error(f"Request error while fetching details for UUID {uuid}: {e}")
+        logger.error(f"Error request obteniendo los detalles para UUID {uuid}: {e}")
         return {}

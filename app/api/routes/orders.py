@@ -19,7 +19,7 @@ async def create_order(
     _ : str = Depends(validate_api_key)
 ):
     if not authorization:
-        logger.warning("Intento de creación de orden rechazado: No se proporcionó token de sesión.")
+        logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
         raise HTTPException(status_code=401, detail="No se proporcionó el token de sesión del cliente en los headers.")
 
     # Verificación y refresco de la sesión del cliente
@@ -28,7 +28,7 @@ async def create_order(
         # Obtenemos el token (ya sea el mismo si era válido, o uno nuevo si había expirado)
         valid_client_token = session_data.get("token")
     except Exception as e:
-        logger.error(f"Fallo al validar o refrescar sesión del cliente: {str(e)}")
+        logger.error(f"Fallo al validar o refrescar sesion del cliente: {str(e)}")
         raise HTTPException(status_code=401, detail=f"No se pudo validar ni refrescar la sesión del cliente: {str(e)}")
 
     branch_id = order_payload.branchId
@@ -73,7 +73,7 @@ async def cancel_order(
     products_to_restore = cancel_payload.products
 
     if not document_uuid or not cash_register_uuid:
-        logger.warning("Intento de cancelación fallido: Faltan uuid del documento o caja registradora.")
+        logger.warning("Intento de cancelacion fallido: Faltan uuid del documento o caja registradora.")
         raise HTTPException(status_code=400, detail="Faltan el uuid del documento o la caja registradora.")
 
     try:

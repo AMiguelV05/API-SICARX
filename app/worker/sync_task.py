@@ -51,7 +51,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         write=5.0,
         pool=5.0
     )
-    logger.debug("Iniciando sincronización paginada con Sicar X")
+    logger.debug("Iniciando sincronizacion paginada con Sicar X")
     price_key = PRICE_LIST_ID.split("-")[-1]
 
     current_sync_id = str(uuid4())
@@ -92,7 +92,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         break
                     
                     elif response.status_code == 204:
-                        logger.info(f"No hay más productos en Sicar. Offset {offset}. Finalizando sincronización.")
+                        logger.info(f"No hay mas productos en Sicar. Offset {offset}. Finalizando sincronizacion.")
                         has_more_products = False
                         sync_completed_successfully = True
                         success = True
@@ -108,7 +108,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         retry_count += 1
                         
                     else:
-                        logger.warning(f"Sicar falló con {response.status_code} en bloque {offset}. Reintento {retry_count + 1}/{MAX_RETRIES}")
+                        logger.warning(f"Sicar fallo con {response.status_code} en bloque {offset}. Reintento {retry_count + 1}/{MAX_RETRIES}")
                         logger.debug(f"Respuesta de Sicar: {response.text}")
                         logger.debug(f"{len(items)} items procesados hasta ahora.")
                         retry_count += 1
@@ -121,7 +121,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
 
             # Si después de X intentos falló, abortamos este ciclo de sincronización
             if not success:
-                logger.error(f"Abortando sincronización. Fallo crítico persistente en el offset {offset}.")
+                logger.error(f"Abortando sincronizacion. Fallo critico persistente en el offset {offset}.")
                 break 
 
             if not items:

@@ -16,12 +16,12 @@ async def initialize_or_refresh_session(
     """
     try:
         if authorization:
-            logger.info("Solicitando refresco de sesión existente.")
+            logger.info("Solicitando refresco de sesion existente.")
         else:
-            logger.info("Solicitando inicialización de una nueva sesión.")
+            logger.info("Solicitando inicializacion de una nueva sesion.")
 
         session_data = await get_or_refresh_customer_session(authorization)
         return session_data
     except Exception as e:
-        logger.error(f"Error al inicializar o refrescar la sesión: {str(e)}")
+        logger.error(f"Error al inicializar o refrescar la sesion: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
