@@ -5,7 +5,7 @@ from app.core.config import settings
 # Crear el motor asíncrono
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=True,
+    echo=False,
     future=True
 )
 
@@ -19,7 +19,7 @@ AsyncSessionLocal = async_sessionmaker(
 class Base(DeclarativeBase):
     pass
 
-# 3. Dependencia para inyectar la sesión
+# Dependencia para inyectar la sesión
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session

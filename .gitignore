@@ -26,5 +26,6 @@ __pycache__/
 # Logs and SO files
 
 *.log
+*.log.*
 .DS_Store
 Thumbs.db

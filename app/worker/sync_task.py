@@ -1,17 +1,39 @@
 import httpx
 import asyncio
 import logging
-from sqlalchemy import select, update
+import asyncio
+from logging.handlers import RotatingFileHandler
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
+from app.core.database import AsyncSessionLocal
 from app.models.product import Product
 from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Imports para testeo
-from app.core.database import AsyncSessionLocal
+handler = RotatingFileHandler(
+    "sync.log",
+    maxBytes=10 * 1024 * 1024,
+    backupCount=5
+)
+
+formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+handler.setFormatter(formatter)
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[handler]
+)
+
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +47,11 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     has_more_products = True
     timeout = httpx.Timeout(
         connect=5.0,
-        read=10.0,
+        read=30.0,
         write=5.0,
         pool=5.0
     )
-
-    logger.info("Iniciando sincronización paginada con Sicar X...")
+    logger.debug("Iniciando sincronización paginada con Sicar X")
     price_key = PRICE_LIST_ID.split("-")[-1]
 
     current_sync_id = str(uuid4())
@@ -80,7 +101,10 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     elif response.status_code == 401:
                         logger.warning(f"Token expirado en bloque {offset}. Renovando con AWS Lambda...")
                         logger.debug(f"Respuesta de Sicar: {response.text}")
-                        await sicar_auth.refresh_token()
+                        try:
+                            await sicar_auth.refresh_token()
+                        except Exception as e:
+                            logger.exception(e)
                         retry_count += 1
                         
                     else:
@@ -88,14 +112,14 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         logger.debug(f"Respuesta de Sicar: {response.text}")
                         logger.debug(f"{len(items)} items procesados hasta ahora.")
                         retry_count += 1
-                        await asyncio.sleep(2 ** retry_count) # Backoff
+                        await asyncio.sleep(2 ** retry_count)
                         
                 except httpx.RequestError as e:
                     logger.error(f"Error de red en bloque {offset}: {e}. Reintento {retry_count + 1}/{MAX_RETRIES}")
                     retry_count += 1
                     await asyncio.sleep(2 ** retry_count)
 
-            # Si después de X intentos falló, abortamos este ciclo de sincronización para proteger el backend
+            # Si después de X intentos falló, abortamos este ciclo de sincronización
             if not success:
                 logger.error(f"Abortando sincronización. Fallo crítico persistente en el offset {offset}.")
                 break 
@@ -121,6 +145,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "is_active": not p.get("hidden", False), 
                     "price": prices_obj.get(price_key, 0.0), 
                     "stock": p.get("stock", 0.0),
+                    "is_deleted": False,
+                    "deleted_at": None,
                     "last_sync_id": current_sync_id
                 })
             if product_values:
@@ -136,13 +162,14 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 await db.commit()
 
             total_procesados += len(items)
-            logger.info(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
+            logger.debug(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
             
             offset += len(items)
+        logger.info(f"Sincronizacion finalizada")
         
     # Fase de limpieza
     if sync_completed_successfully:
-        logger.info("Iniciando limpieza de productos eliminados...")
+        logger.info("Iniciando limpieza de productos eliminados")
         try:
             # Filtramos por is_deleted == False para no actualizar registros que ya estaban borrados previamente.
             stmt = (
@@ -165,14 +192,25 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             await db.rollback()
             logger.error(f"Error de base de datos durante la limpieza: {e}")
 
-"""
-Testeo manual de la función de sincronización.
-"""
-async def run_manual_test():
-    logger.info("Iniciando prueba manual de sincronización...")
-    async with AsyncSessionLocal() as session:
-        await sync_sicar_catalog(session)
-    logger.info("Prueba manual finalizada.")
+async def scheduled_job():
+    try:
+        async with AsyncSessionLocal() as session:
+            await sync_sicar_catalog(session)
+    except Exception as e:
+        logger.error(f"Fallo en la tarea programada: {e}")
+
+async def main():
+    scheduler = AsyncIOScheduler()
+    
+    scheduler.add_job(scheduled_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
+    scheduler.start()
+    
+    # Mantiene el hilo principal vivo
+    while True:
+        await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    asyncio.run(run_manual_test())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Scheduler apagado correctamente.")
