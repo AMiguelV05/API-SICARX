@@ -5,9 +5,13 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
 from app.models.product import Product
+from app.services.sicar_auth import sicar_auth
 
 STORE_URL = "https://api.sicarx.com/store/"
 ORDER_URL = "https://ferreteriacharly.sicarx.shop/api/cart/order"
+DISPATCH_PAY_URL = "https://api.sicarx.com/external/v1/dispatch/pay"
+GRAPH_URL = "https://api.sicarx.com/document-graph/v1/graph-v2"
+
 logger = logging.getLogger(__name__)
 
 async def validate_cart_items(uuids: list, token: str, branch_id: str, price_list_uuid: str):
@@ -85,3 +89,47 @@ async def create_order_in_sicar(db: AsyncSession, order_payload: dict, client_to
             
     await db.commit()
     return sicar_response
+
+async def pay_order_in_sicar(order_id: str, total_amount: float, cash_register_uuid: str, branch_id: str):
+    """Aplica el pago a una orden existente desde sicarX directamente mediante la API REST."""
+
+    async def attempt_payment(admin_token: str):
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Authorization": admin_token,
+            "Content-Type": "application/json;charset=UTF-8",
+            "Origin": "https://app.sicarx.com",
+            "Referer": "https://app.sicarx.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0"
+        }
+
+        payload = {
+            "cashRegisterUuid": cash_register_uuid,
+            "id": order_id,
+            "payments": [
+                {
+                    "paymentId": "CASH", 
+                    "amount": total_amount
+                }
+            ],
+            "total": total_amount
+        }
+    
+        async with httpx.AsyncClient() as client:
+            return await client.post(DISPATCH_PAY_URL, json=payload, headers=headers)
+        
+    current_token = await sicar_auth.get_token()
+    response = await attempt_payment(current_token)
+
+    if response.status_code == 401:
+        logger.warning("Token administrativo expirado. Solicitando renovacion a AWS")
+        new_token = await sicar_auth.refresh_token()
+        response = await attempt_payment(new_token)
+    
+    if response.status_code != 200:
+        logger.error(f"Error al aplicar el pago a la orden {order_id}: {response.text}")
+        raise Exception(f"La orden se creó, pero falló el pago: {response.text}")
+
+    logger.debug(f"Respuesta de pago en Sicar: {response.status_code} - {response.text}")
+            
+    return response.json()

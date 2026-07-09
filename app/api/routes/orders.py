@@ -3,10 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, Body, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import validate_api_key
-from app.services.order_service import validate_cart_items, create_order_in_sicar
+from app.services.order_service import validate_cart_items, create_order_in_sicar, pay_order_in_sicar
 from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,10 +54,20 @@ async def create_order(
             branch_id=branch_id, 
             products_data=order_payload_dict["ecOrderDto"]["products"]
         )
+        order_id = sicar_response.get("id")
+        total_amount = float(order_payload_dict["ecOrderDto"]["total"])
 
-        logger.info(f"Orden creada exitosamente en la sucursal {branch_id}.")
-        return sicar_response
-        
+        payment_response = await pay_order_in_sicar(
+            order_id=order_id,
+            total_amount=total_amount,
+            cash_register_uuid=settings.CASH_REGISTER_UUID,
+            branch_id=branch_id
+        )
+
+        logger.info(f"Orden creada y pagada exitosamente en la sucursal {branch_id}.")
+
+        return payment_response
+    
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=400, detail=str(e))

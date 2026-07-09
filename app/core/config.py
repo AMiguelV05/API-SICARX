@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     SICAR_ADMIN_PASSWORD: str
     SICAR_TOKEN: str
     SICAR_PRICE_LIST_ID: str
+    CASH_REGISTER_UUID: str
 
     class Config:
         env_file = ".env"
