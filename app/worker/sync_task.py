@@ -12,6 +12,7 @@ from app.models.product import Product
 from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
+from app.core.sicar_headers import bearer_json_headers
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 handler = RotatingFileHandler(
@@ -77,12 +78,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     # Siempre pedimos el token más fresco de la memoria
                     current_token = await sicar_auth.get_token()
                     
-                    headers = {
-                        "Authorization": f"Bearer {current_token}",
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                    }
+                    headers = bearer_json_headers(current_token)
 
                     response = await client.post(SICAR_LIST_URL, json=payload, headers=headers)
                     
