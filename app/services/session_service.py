@@ -3,6 +3,7 @@ import logging
 import urllib.parse
 import json
 import base64
+from app.core.sicar_headers import storefront_headers, USER_AGENT
 
 logger = logging.getLogger(__name__)
 MAIN_SITE_URL = "https://ferreteriacharly.sicarx.shop/"
@@ -20,19 +21,13 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
                 # Refresco de sesión usando el token existente
                 clean_token = current_token.replace("Bearer ", "").replace("bearer ", "").strip()
                 
-                headers_refresh = {
-                    "Accept": "application/json, text/plain, */*",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Origin": "https://ferreteriacharly.sicarx.shop",
-                    "Referer": "https://ferreteriacharly.sicarx.shop/",
-                    "Authorization": clean_token
-                }
+                headers_refresh = storefront_headers(clean_token)
                 
                 response = await client.get(CONFIG_URL, headers=headers_refresh)
                 
                 if response.status_code != 200:
-                    logger.error(f"El token anterior es invalido o expiro: {response.text}")
-                    raise Exception(f"El token anterior es inválido o expiró: {response.text}")
+                    logger.error(f"El token anterior es invalido o expiro: {response.status_code} - {response.text}")
+                    raise Exception("El token anterior es inválido o expiró.")
                 
                 logger.info("Token refrescado correctamente")
                 sicar_config = response.json()
@@ -41,7 +36,7 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
                 # creación de nueva sesión mediante scraping de la cookie tmpStore
                 headers_new = {
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    "User-Agent": USER_AGENT
                 }
                 
                 response = await client.get(MAIN_SITE_URL, headers=headers_new)
@@ -74,7 +69,7 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
             
         except httpx.RequestError as e:
             logger.error(f"Error de red con Sicar X: {str(e)}")
-            raise Exception(f"Error de red con Sicar X: {str(e)}")
+            raise Exception("Error de red con Sicar X.")
         except json.JSONDecodeError:
             logger.error("Error al decodificar la estructura JSON de Sicar.")
             raise Exception("Error al decodificar la estructura JSON de Sicar.")

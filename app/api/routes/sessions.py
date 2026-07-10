@@ -24,4 +24,4 @@ async def initialize_or_refresh_session(
         return session_data
     except Exception as e:
         logger.error(f"Error al inicializar o refrescar la sesion: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="No se pudo inicializar ni refrescar la sesión. Intenta nuevamente.")

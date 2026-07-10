@@ -1,4 +1,5 @@
 import logging
+import secrets
 from fastapi import Security, HTTPException, status
 from fastapi.security.api_key import APIKeyHeader
 from app.core.config import settings
@@ -20,7 +21,7 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
             detail="Falta la cabecera de autenticación x-api-key."
         )
         
-    if api_key != settings.X_API_KEY:
+    if not secrets.compare_digest(api_key, settings.X_API_KEY):
         logger.error("Acceso denegado: API Key invalida o expirada.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
