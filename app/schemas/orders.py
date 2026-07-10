@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List
+from app.core.config import settings
 
 class ProductItem(BaseModel):
     uuid: str = Field(..., description="UUID del producto en Sicar")
@@ -47,7 +48,7 @@ class OrderCreate(BaseModel):
     contentId: str
     branchId: int = Field(default=151456)
     payload: str = Field(..., description="JWT de autenticación del cliente")
-    priceListUuid: str = Field(default="0b8b0848-3880-4085-b213-3b3d30c79429")
+    priceListUuid: str = Field(default_factory=lambda: settings.SICAR_PRICE_LIST_ID)
     priceNumber: int = Field(default=1)
     totalTax: str
     totalQuantity: str
@@ -55,7 +56,7 @@ class OrderCreate(BaseModel):
     ecOrderDto: EcOrderDto
 
 class OrderCancel(BaseModel):
-    cashRegisterUuid: str = Field(default="332a974c-6186-4135-9a14-c3fc16665156", description="UUID de la caja registradora")
+    cashRegisterUuid: str = Field(default_factory=lambda: settings.CASH_REGISTER_UUID, description="UUID de la caja registradora")
     uuid: str = Field(..., description="UUID del ticket/documento de venta")
     products: List[ProductItem]
 

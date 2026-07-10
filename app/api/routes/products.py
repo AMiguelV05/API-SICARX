@@ -32,11 +32,10 @@ async def get_product_details(
 
     # Lógica de expiración
     needs_update = (
-        product.details_updated_at is None or 
+        product.details_updated_at is None or
         datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)
     )
-    logger.debug(f"{datetime.now(timezone.utc)} - {product.details_updated_at} = {datetime.now(timezone.utc) - product.details_updated_at}")
-    logger.debug(f"{datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)}")
+    logger.debug(f"Producto {uuid}: details_updated_at={product.details_updated_at}, needs_update={needs_update}")
     if needs_update:
         logger.info(f"Datos obsoletos para {uuid}. Descargando de GraphQL...")
         
@@ -74,4 +73,4 @@ async def get_catalog(
         return result
     except Exception as e:
         logger.error(f"Error al obtener el catalogo local: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="No se pudo obtener el catálogo local. Intenta nuevamente.")

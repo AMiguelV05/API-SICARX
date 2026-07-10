@@ -30,28 +30,35 @@ async def create_order(
         valid_client_token = session_data.get("token")
     except Exception as e:
         logger.error(f"Fallo al validar o refrescar sesion del cliente: {str(e)}")
-        raise HTTPException(status_code=401, detail=f"No se pudo validar ni refrescar la sesión del cliente: {str(e)}")
+        raise HTTPException(status_code=401, detail="No se pudo validar ni refrescar la sesión del cliente.")
 
     branch_id = order_payload.branchId
     price_list_uuid = order_payload.priceListUuid
     products_data = order_payload.ecOrderDto.products
     uuids = [p.uuid for p in products_data if p.uuid]
+    requested_quantities = {}
+    for p in products_data:
+        if p.uuid:
+            try:
+                requested_quantities[p.uuid] = requested_quantities.get(p.uuid, 0) + float(p.quantity)
+            except (TypeError, ValueError):
+                requested_quantities[p.uuid] = requested_quantities.get(p.uuid, 0)
 
     try:
         # Pre-validación usando el token fresco
         if uuids:
-            await validate_cart_items(uuids, valid_client_token, branch_id, price_list_uuid)
+            await validate_cart_items(uuids, requested_quantities, valid_client_token, branch_id, price_list_uuid)
 
         # Sincronización del Payload
         order_payload_dict = order_payload.model_dump()
-        order_payload_dict["payload"] = valid_client_token 
+        order_payload_dict["payload"] = valid_client_token
 
         # Creación delegada al servicio
         sicar_response = await create_order_in_sicar(
-            db=db, 
+            db=db,
             order_payload=order_payload_dict,
             client_token=valid_client_token,
-            branch_id=branch_id, 
+            branch_id=branch_id,
             products_data=order_payload_dict["ecOrderDto"]["products"]
         )
         order_id = sicar_response.get("id")
@@ -67,10 +74,14 @@ async def create_order(
         logger.info(f"Orden creada y pagada exitosamente en la sucursal {branch_id}.")
 
         return payment_response
-    
+
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Error inesperado al crear la orden: {e}")
+        raise HTTPException(status_code=400, detail="No se pudo procesar la orden. Verifica los datos e intenta nuevamente.")
 
 
 @router.post("/cancel", response_model=OrderCancelResponse)
@@ -101,9 +112,12 @@ async def cancel_order(
             sicarTimestamp=cancel_timestamp,
             message="Pedido cancelado exitosamente.",
             status="CANCELLED"
-        )   
-        
+        )
+
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception as e:
         await db.rollback()
-        logger.error(f"Error al cancelar el pedido {document_uuid}: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"Error inesperado al cancelar el pedido {document_uuid}: {e}")
+        raise HTTPException(status_code=400, detail="No se pudo cancelar el pedido. Intenta nuevamente.")
