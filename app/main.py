@@ -20,16 +20,15 @@ app = FastAPI(
 origins = [
     "http://localhost",
     "http://localhost:8000",
-    "http://localhost:8000/docs",
-    "https://ferreteriacharly.com/"
+    "https://ferreteriacharly.com"
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization", "x-api-key"],
 )
 
 # Router para conseguir detalles de productos desde Sicar X y guardarlos en la base de datos local
