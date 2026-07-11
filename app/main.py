@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import products, orders, sessions
+from app.api.routes import products, orders, sessions, taxonomy
 
 logging.basicConfig(
     filename="app.log",
@@ -41,6 +41,10 @@ app.include_router(orders.router,
 
 # Router para inicializar o refrescar la sesión con Sicar X
 app.include_router(sessions.router)
+
+# Router para departamentos y categorías (filtros del frontend)
+app.include_router(taxonomy.router,
+                   tags=["Taxonomy"])
 
 @app.get("/")
 def read_root():
