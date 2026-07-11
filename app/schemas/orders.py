@@ -1,59 +1,35 @@
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from app.core.config import settings
 
 class ProductItem(BaseModel):
     uuid: str = Field(..., description="UUID del producto en Sicar")
     quantity: float = Field(..., description="Cantidad a comprar o cancelar")
 
-# Sub-modelos para la orden
-
-class OrderProductItem(BaseModel):
-    uuid: str = Field(..., description="UUID del producto en Sicar")
-    type: int
-    sku: str
-    description: str
-    quantity: str = Field(..., description="Cantidad comprada (en texto)")
-    unit: str
-    priceBaseTax: str
-    priceTax: str
-    amountTax: str
-    taxesIds: List[str] = Field(default_factory=list)
-
 class ContactInfo(BaseModel):
     name: str
     phone: str
-    email: str
+    email: Optional[str] = None
 
 class DeliveryInfo(BaseModel):
     contactInfo: ContactInfo
     deliveryType: str = Field(..., example="PICKUP")
 
-class EcOrderDto(BaseModel):
-    uuid: str = Field(..., description="UUID de la orden web")
-    timeZone: str = Field(default="America/Mexico_City")
-    type: str = Field(default="SALE")
-    serie: str
-    isoCurrency: str = Field(default="MXN")
-    decimals: int = Field(default=2)
-    opMode: str = Field(default="MX")
-    total: str
-    products: List[OrderProductItem]
-    ecOrderType: str = Field(default="REMOTE")
-    deliveryInfo: DeliveryInfo
-
 # MODELOS PRINCIPALES
 
 class OrderCreate(BaseModel):
-    contentId: str
-    branchId: int = Field(default=151456)
-    payload: str = Field(..., description="JWT de autenticación del cliente")
-    priceListUuid: str = Field(default_factory=lambda: settings.SICAR_PRICE_LIST_ID)
-    priceNumber: int = Field(default=1)
-    totalTax: str
-    totalQuantity: str
+    """
+    Contrato simplificado: el frontend solo envía el carrito (uuid + cantidad) y los
+    datos de entrega. Precios, impuestos, sku, descripción, unidad y totales se calculan
+    en el backend (ver order_service.build_order_payload) a partir de datos de Sicar X y
+    del catálogo local.
+    """
+    products: List[ProductItem]
+    deliveryInfo: DeliveryInfo
+    contentId: Optional[str] = None
+    branchId: Optional[int] = Field(default=None, description="Por defecto 151456 si se omite")
+    priceListUuid: Optional[str] = Field(default=None, description="Por defecto settings.SICAR_PRICE_LIST_ID si se omite")
     wholesalePrices: bool = Field(default=False)
-    ecOrderDto: EcOrderDto
 
 class OrderCancel(BaseModel):
     cashRegisterUuid: str = Field(default_factory=lambda: settings.CASH_REGISTER_UUID, description="UUID de la caja registradora")

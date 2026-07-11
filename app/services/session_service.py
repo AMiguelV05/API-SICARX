@@ -9,6 +9,15 @@ logger = logging.getLogger(__name__)
 MAIN_SITE_URL = "https://ferreteriacharly.sicarx.shop/"
 CONFIG_URL = "https://ferreteriacharly.sicarx.shop/api/ecommerce/config"
 
+def _decode_jwt_claims(token: str) -> dict:
+    """Decodifica (sin verificar firma) el payload de un JWT de sesión de Sicar X."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload_b64))
+    except (IndexError, ValueError, json.JSONDecodeError):
+        return {}
+
 async def get_or_refresh_customer_session(current_token: str = None) -> dict:
     """
     Gestiona la sesión de un cliente final.
@@ -60,11 +69,13 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
                 raise Exception("No se encontró un JWT válido en la respuesta de Sicar.")
 
             logger.info("Token generado correctamente")
+            claims = _decode_jwt_claims(token)
             return {
                 "token": token,
                 "priceListUuid": sicar_config.get("priceListUuid"),
                 "branchId": sicar_config.get("branches", [{}])[0].get("branchId") if sicar_config.get("branches") else 151456,
-                "deliveryCost": sicar_config.get("config", {}).get("deliveryWays", {}).get("homeDeliveryCost", 50)
+                "deliveryCost": sicar_config.get("config", {}).get("deliveryWays", {}).get("homeDeliveryCost", 50),
+                "contentId": claims.get("jti")
             }
             
         except httpx.RequestError as e:

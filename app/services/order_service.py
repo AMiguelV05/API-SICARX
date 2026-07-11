@@ -1,6 +1,7 @@
 import httpx
 import json
 import logging
+from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
@@ -45,6 +46,12 @@ async def validate_cart_items(uuids: list, requested_quantities: dict, token: st
         stockForProducts(uuids: {graphql_uuids}) {{
             uuid
             stock
+        }}
+        content {{
+            units {{
+                uuid
+                shortName
+            }}
         }}
     }}"""
 
@@ -93,6 +100,91 @@ async def validate_cart_items(uuids: list, requested_quantities: dict, token: st
         )
 
     return data
+
+def _format_amount(value) -> str:
+    return f"{float(value):.2f}"
+
+def _format_quantity(value) -> str:
+    qty = float(value)
+    return str(int(qty)) if qty == int(qty) else str(qty)
+
+def build_order_payload(
+    cart_data: dict,
+    local_products: dict,
+    quantities: dict,
+    delivery_info: dict,
+    branch_id: int,
+    price_list_uuid: str,
+    content_id: str,
+    wholesale_prices: bool = False,
+) -> dict:
+    """
+    Construye el documento de orden que espera Sicar X a partir de datos ya obtenidos
+    (no hace llamadas de red). Replica el formato observado en un pedido real aceptado
+    por Sicar X: `priceBaseTax`, `priceTax` y `amountTax` usan el mismo valor
+    (`netPrice1`, precio final con impuesto incluido) — Sicar X no espera aquí el
+    desglose de impuesto pese al nombre de los campos.
+    """
+    products_by_uuid = {p.get("uuid"): p for p in (cart_data.get("products") or []) if isinstance(p, dict)}
+    units_by_uuid = {
+        u.get("uuid"): u.get("shortName")
+        for u in (cart_data.get("content") or {}).get("units") or []
+        if isinstance(u, dict)
+    }
+
+    order_lines = []
+    total = 0.0
+
+    for product_uuid, quantity in quantities.items():
+        sicar_info = products_by_uuid.get(product_uuid) or {}
+        local_product = local_products.get(product_uuid)
+        price_list = sicar_info.get("priceList") or {}
+
+        net_price = price_list.get("netPrice1")
+        if net_price is None:
+            logger.error(f"Sicar no devolvio precio para el producto {product_uuid}.")
+            raise HTTPException(status_code=502, detail="No se pudo obtener el precio de uno o más productos.")
+
+        total += float(net_price) * quantity
+        sales_unit_uuid = local_product.sales_unit_uuid if local_product else None
+
+        order_lines.append({
+            "uuid": product_uuid,
+            "type": sicar_info.get("type", 0),
+            "sku": local_product.sku if local_product else "",
+            "description": local_product.name if local_product else "",
+            "quantity": _format_quantity(quantity),
+            "unit": units_by_uuid.get(sales_unit_uuid, "PZA"),
+            "priceBaseTax": _format_amount(net_price),
+            "priceTax": _format_amount(net_price),
+            "amountTax": _format_amount(net_price),
+            "taxesIds": price_list.get("saleTaxes") or [],
+        })
+
+    total_str = _format_amount(total)
+
+    return {
+        "contentId": content_id,
+        "branchId": branch_id,
+        "priceListUuid": price_list_uuid,
+        "priceNumber": 1,
+        "totalTax": total_str,
+        "totalQuantity": _format_quantity(sum(quantities.values())),
+        "wholesalePrices": wholesale_prices,
+        "ecOrderDto": {
+            "uuid": str(uuid4()),
+            "timeZone": "America/Mexico_City",
+            "type": "SALE",
+            "serie": "TL",
+            "isoCurrency": "MXN",
+            "decimals": 2,
+            "opMode": "MX",
+            "total": total_str,
+            "products": order_lines,
+            "ecOrderType": "REMOTE",
+            "deliveryInfo": delivery_info,
+        },
+    }
 
 async def create_order_in_sicar(db: AsyncSession, order_payload: dict, client_token: str, branch_id: str, products_data: list):
     """Confirma la orden en Sicar y descuenta el stock localmente."""

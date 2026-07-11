@@ -30,12 +30,19 @@ Two separate processes share the same Postgres database and `Product` model:
 
 ### Request flow: placing an order (`app/api/routes/orders.py`)
 
-1. Client sends its session JWT via `Authorization` header → `get_or_refresh_customer_session` validates/refreshes it.
-2. `validate_cart_items` (`order_service.py`) checks stock/prices in SICAR X via GraphQL using the customer token.
-3. `create_order_in_sicar` posts the order to SICAR X's REST endpoint (customer token), then decrements local `Product.stock` in Postgres.
-4. `pay_order_in_sicar` applies payment via SICAR X REST using the admin/B2B token (with 401-retry).
+The `/orders` request body is intentionally minimal — the frontend sends only `products:
+[{uuid, quantity}]` and `deliveryInfo`; everything else (pricing, tax fields, sku,
+description, unit, totals) is computed server-side. This contract and the exact field
+semantics below were reverse-engineered by capturing one real accepted order from the
+actual storefront checkout — see `app/services/order_service.py:build_order_payload`.
 
-Cancellation (`app/services/cancel_service.py`) mirrors this: cancel in SICAR X with the admin token, then restore local stock.
+1. Client sends its session JWT via `Authorization` header → `get_or_refresh_customer_session` validates/refreshes it (and now also decodes the JWT's `jti` claim as a fallback `contentId`).
+2. `validate_cart_items` (`order_service.py`) checks stock/availability in SICAR X via GraphQL using the customer token, and returns the raw per-product `priceList`/`type` data plus `content.units` (sales-unit uuid → short name) for the next step — it's no longer validate-and-discard.
+3. `build_order_payload` (pure function, no network calls) assembles the full SICAR order document: `sku`/`description` come from the local `Product` cache, `priceBaseTax`/`priceTax`/`amountTax` all use the **same** value — `priceList.netPrice1` (the tax-inclusive retail price) — despite the field names; SICAR X does not want the tax broken out here. `serie` is hardcoded `"TL"` and there's no shipping line item for `deliveryType: "PICKUP"` — both confirmed from the captured real request.
+4. `create_order_in_sicar` posts the order to SICAR X's REST endpoint (customer token), then decrements local `Product.stock` in Postgres.
+5. `pay_order_in_sicar` applies payment via SICAR X REST using the admin/B2B token (with 401-retry). Note: the real storefront leaves pickup orders in `TO_PAY` status (paid in-store); this backend pays immediately via the admin token instead — an intentional difference, not a bug.
+
+Cancellation (`app/services/cancel_service.py`) mirrors this: cancel in SICAR X with the admin token, then restore local stock. Note: the `id` SICAR returns from order creation is *not* the same identifier `POST /cancel` expects as `uuid` — cancelling a freshly-created order's `id` fails with `"is not a valid UUID"`; the real cancel-uuid source is still unidentified.
 
 ### Local catalog vs. live SICAR X data
 
