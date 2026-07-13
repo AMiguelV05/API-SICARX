@@ -20,7 +20,8 @@ app = FastAPI(
 origins = [
     "http://localhost",
     "http://localhost:8000",
-    "https://ferreteriacharly.com"
+    "https://ferreteriacharly.com",
+    "https://api-production-cf7a.up.railway.app"
 ]
 
 app.add_middleware(
