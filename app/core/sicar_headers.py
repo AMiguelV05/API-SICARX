@@ -29,12 +29,12 @@ def storefront_headers(token: str, content_type: str = None, branch_id=None) -> 
     return headers
 
 
-def admin_app_headers(token: str) -> dict:
+def admin_app_headers(token: str, content_type: str = "application/json;charset=UTF-8") -> dict:
     """Encabezados para llamadas administrativas contra app.sicarx.com."""
     return {
         "Accept": ACCEPT_JSON,
         "Authorization": token,
-        "Content-Type": "application/json;charset=UTF-8",
+        "Content-Type": content_type,
         "Origin": ADMIN_APP_ORIGIN,
         "Referer": f"{ADMIN_APP_ORIGIN}/",
         "User-Agent": USER_AGENT_ADMIN_APP,

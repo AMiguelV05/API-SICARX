@@ -55,8 +55,11 @@ async def get_or_refresh_customer_session(current_token: str = None) -> dict:
                     logger.error("Sicar X no devolvio la cookie de sesion inicial.")
                     raise Exception("Sicar X no devolvió la cookie de sesión inicial.")
                 
-                # Decodificamos Base64 y URL-encoded
-                padded_cookie = tmp_store_cookie + "=" * ((4 - len(tmp_store_cookie) % 4) % 4)
+                # Sicar codifica la cookie dos veces: URL-encode, luego Base64 sobre ese
+                # resultado (que a su vez es JSON URL-encoded). Hay que revertir en ese
+                # mismo orden: URL-decode -> Base64-decode -> URL-decode.
+                outer_decoded = urllib.parse.unquote(tmp_store_cookie)
+                padded_cookie = outer_decoded + "=" * ((4 - len(outer_decoded) % 4) % 4)
                 base64_decoded = base64.b64decode(padded_cookie).decode('utf-8')
                 url_decoded = urllib.parse.unquote(base64_decoded)
                 

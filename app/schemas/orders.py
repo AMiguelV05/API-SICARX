@@ -33,7 +33,7 @@ class OrderCreate(BaseModel):
 
 class OrderCancel(BaseModel):
     cashRegisterUuid: str = Field(default_factory=lambda: settings.CASH_REGISTER_UUID, description="UUID de la caja registradora")
-    uuid: str = Field(..., description="UUID del ticket/documento de venta")
+    uuid: str = Field(..., description="El `id` devuelto por OrderResponse al crear la orden (no un UUID real de Sicar; el backend lo resuelve al uuid interno antes de cancelar)")
     products: List[ProductItem]
 
 class OrderResponse(BaseModel):
