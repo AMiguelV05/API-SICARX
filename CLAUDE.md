@@ -26,7 +26,7 @@ Two separate processes share the same Postgres database and `Product` model:
 ### Two distinct SICAR X auth schemes — do not conflate them
 
 - **Admin/B2B token** (`app/services/sicar_auth.py`, the `sicar_auth` singleton): one shared token for server-to-server calls (catalog sync, product-detail scraping, payment, cancellation). Seeded from `SICAR_TOKEN`, held in memory, refreshed via `SicarAuthManager.refresh_token()` (hits two AWS Lambda endpoints with `SICAR_ADMIN_EMAIL`/`SICAR_ADMIN_PASSWORD`) whenever SICAR X returns 401. Every caller follows the same pattern: try with the current token, on 401 call `refresh_token()`, retry once (see `order_service.pay_order_in_sicar`, `cancel_service.process_order_cancellation`, `product_service.fetch_full_details_from_sicar`).
-- **Customer/session token** (`app/services/session_service.py`): a per-shopper JWT. A new session is bootstrapped by scraping the `tmpStore` cookie off the SICAR X storefront HTML and base64/URL-decoding it; an existing session is refreshed by calling SICAR X's `/api/ecommerce/config` with the current token. This token travels in the `Authorization` header between the frontend and this API and is what's used for cart validation and order creation — never the admin token.
+- **Customer/session token** (`app/services/session_service.py`): a per-shopper JWT. A new session is bootstrapped by scraping the `tmpStore` cookie off the SICAR X storefront HTML — SICAR double-encodes it (URL-encode, then Base64 over that, and the Base64 payload itself is URL-encoded JSON), so decoding requires URL-decode → Base64-decode → URL-decode, in that order, before `json.loads`; getting this order wrong throws `binascii.Error: Incorrect padding`. An existing session is refreshed by calling SICAR X's `/api/ecommerce/config` with the current token. This token travels in the `Authorization` header between the frontend and this API and is what's used for cart validation and order creation — never the admin token.
 
 ### Request flow: placing an order (`app/api/routes/orders.py`)
 
@@ -50,6 +50,17 @@ Cancellation (`app/services/cancel_service.py`) mirrors this: resolve the real d
 - `GET /products/{uuid}` (`routes/products.py`) serves from Postgres but lazily refreshes `description_details`, `tags`, `additional_images`, etc. from SICAR X's GraphQL API when `details_updated_at` is null or older than 24h (`fetch_full_details_from_sicar`).
 - `POST /catalog` reads only from Postgres (`catalog_service.get_local_catalog`) — no live SICAR X calls — filtered by `department_uuid`/`category_uuid` with pagination.
 - `GET /taxonomy` (`routes/taxonomy.py`) returns departments with their nested categories (for building filter UIs) from local `Department`/`Category`/`department_category` tables (`app/models/taxonomy.py`). Categories are many-to-many with departments in SICAR X, not a strict hierarchy. Fetched from SICAR X's `/store/` GraphQL endpoint using an anonymous customer session (`taxonomy_service.fetch_taxonomy_from_sicar`), cached with the same lazy 24h-staleness refresh pattern as `GET /products/{uuid}`.
+
+### Endpoints (all verified live end-to-end)
+
+| Endpoint | Token used | Notes |
+|---|---|---|
+| `POST /catalog` | none (just `x-api-key`) | Postgres only, paginated, filterable by `department_uuid`/`category_uuid`. |
+| `GET /products/{uuid}` | admin/B2B (internal, only if stale) | Serves from Postgres; lazily refreshes detail fields from SICAR GraphQL if `details_updated_at` is null/>24h old. |
+| `GET /taxonomy` | admin/B2B (internal, only if stale) | Departments + nested categories from Postgres; same 24h lazy-refresh pattern. |
+| `POST /session/init` | none (just `x-api-key`) | Bootstraps a new customer session (no `Authorization` header) or refreshes an existing one (with it). Returns the customer JWT the frontend must then send back as `Authorization` on `/orders`. |
+| `POST /orders` | customer (required `Authorization` header) + admin/B2B (internal, for payment) | See flow below. |
+| `POST /cancel` | admin/B2B (internal only — no customer token involved) | See flow below. |
 
 ### Auth on this API's own endpoints
 

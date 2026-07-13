@@ -15,13 +15,22 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-@router.post("/orders", response_model=OrderResponse)
+@router.post("/orders", response_model=OrderResponse, summary="Crear pedido")
 async def create_order(
-    order_payload: OrderCreate = Body(...), 
+    order_payload: OrderCreate = Body(...),
     authorization: str = Header(None, alias="Authorization", description="Token de sesión del cliente web"),
     db: AsyncSession = Depends(get_db),
     _ : str = Depends(validate_api_key)
 ):
+    """
+    Contrato semiautomático: el frontend solo envía `products: [{uuid, quantity}]` y
+    `deliveryInfo`; precios, impuestos, sku, descripción, unidad y totales se calculan
+    en el backend a partir de Sicar X y del catálogo local (`order_service.build_order_payload`).
+
+    Requiere el JWT de sesión del cliente (obtenido de `POST /session/init`) en el header
+    `Authorization` — se usa para validar el carrito y crear la orden en Sicar X; el pago
+    se aplica internamente con el token admin/B2B, nunca con el del cliente.
+    """
     if not authorization:
         logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
         raise HTTPException(status_code=401, detail="No se proporcionó el token de sesión del cliente en los headers.")
@@ -99,12 +108,18 @@ async def create_order(
         raise HTTPException(status_code=400, detail="No se pudo procesar la orden. Verifica los datos e intenta nuevamente.")
 
 
-@router.post("/cancel", response_model=OrderCancelResponse)
+@router.post("/cancel", response_model=OrderCancelResponse, summary="Cancelar pedido")
 async def cancel_order(
     cancel_payload: OrderCancel = Body(...),
     db: AsyncSession = Depends(get_db),
     _ : str = Depends(validate_api_key)
 ):
+    """
+    Cancela un pedido en Sicar X y restaura el stock local. No requiere el token de
+    sesión del cliente — se usa exclusivamente el token admin/B2B. `uuid` es el `id`
+    devuelto por `POST /orders` (no un UUID real de Sicar); el backend lo resuelve
+    internamente al identificador que Sicar X espera antes de cancelar.
+    """
     document_uuid = cancel_payload.uuid
     cash_register_uuid = cancel_payload.cashRegisterUuid
     products_to_restore = cancel_payload.products

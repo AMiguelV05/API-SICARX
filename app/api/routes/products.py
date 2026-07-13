@@ -8,13 +8,13 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail
 from app.services.catalog_service import get_local_catalog
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-@router.get("/products/{uuid}")
+@router.get("/products/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
 async def get_product_details(
     uuid: str, 
     db: AsyncSession = Depends(get_db),

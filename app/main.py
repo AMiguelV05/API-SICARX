@@ -13,7 +13,7 @@ logging.basicConfig(
 app = FastAPI(
     title="API Integración Sicar X",
     description="Capa intermedia para el e-commerce",
-    authors=["Ferretería Charly"],
+    contact={"name": "Ferretería Charly"},
     version="1.0.0"
 )
 
@@ -46,6 +46,6 @@ app.include_router(sessions.router)
 app.include_router(taxonomy.router,
                    tags=["Taxonomy"])
 
-@app.get("/")
+@app.get("/", summary="Health check", tags=["Health"])
 def read_root():
     return {"mensaje": "API intermedia funcionando correctamente"}
