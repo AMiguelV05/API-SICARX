@@ -10,6 +10,32 @@ API SICARX is a FastAPI middleware between an e-commerce frontend (Ferretería C
 - Install deps: `pip install -r requirements.txt`
 - No test suite exists in this repo currently.
 
+### Docker Compose
+
+`docker-compose.yml` runs the whole stack: `db` (Postgres 16), a one-off `migrate` service (`alembic upgrade head`, runs once and exits), `api` (uvicorn), and `worker` (`sync_task`) — `api`/`worker` both wait on `migrate` completing successfully before starting, so migrations never race.
+
+- `docker compose up --build` — build images and start everything
+- `docker compose logs -f api` / `worker` — tail a service's stdout (app-level logs still also land in `app.log`/`sync.log` on the host via bind mounts)
+- `docker compose run --rm migrate alembic revision --autogenerate -m "description"` — generate a new migration without starting the rest of the stack
+- `docker compose down` — stop everything; add `-v` to also drop the `db_data` volume (destructive — wipes the containerized Postgres)
+
+**Important**: the `db` service creates a **new, empty** Postgres instance (its own `db_data` volume) — it is not connected to whatever Postgres you already use for local development or production. `DATABASE_URL` for `api`/`worker`/`migrate` is overridden in `docker-compose.yml` to point at this containerized `db` (not the `DATABASE_URL` in your `.env`, which is only used for the other vars). To point this stack at your existing Postgres instead, remove the `db` service and its `depends_on` entries, and set `DATABASE_URL` in `.env` to that instance's address (use `host.docker.internal` in place of `localhost` if it runs on the host machine, since `localhost` inside a container refers to the container itself).
+
+### Deploying to Railway
+
+Live at project **api-sicarx** (workspace: Angel Villalvazo's Projects), three services: `api` (public domain `api-production-cf7a.up.railway.app`), `worker` (no public networking), and a Postgres plugin named **`Postgres-O4xA`** (mind the suffix — a second, unused `Postgres` plugin service also exists in the project from a setup mistake and should be deleted once confirmed unneeded, since nothing references it).
+
+Two Railway services run from this same repo/`Dockerfile`: `railway.api.json` (uvicorn, plus `alembic upgrade head` as a `preDeployCommand`) and `railway.worker.json` (`sync_task`, no pre-deploy command — see below on why only one service runs migrations). Railway's managed Postgres plugin replaces the `db`/`migrate` services from Docker Compose — there is no dedicated one-off migration service on Railway, so `preDeployCommand` on the `api` service is what runs migrations instead.
+
+**How these were actually deployed**: no GitHub integration is wired up yet (the Docker/Railway files weren't committed/pushed at deploy time), so both services were pushed via `railway up --service <name>` from the local directory — which uploads whatever `railway.json` currently sits at the repo root as that deploy's config. Since there's no per-service config-as-code path set in the dashboard, deploying either service means temporarily copying its file over the root one first: `cp railway.api.json railway.json && railway up --service api`, then `cp railway.worker.json railway.json && railway up --service worker`, removing the root `railway.json` afterward so the repo doesn't carry a stale third config file. The one-time fix that removes this manual step: in each service's Settings → Config-as-code file path, point `api` at `railway.api.json` and `worker` at `railway.worker.json`, then connect both to the GitHub repo for auto-deploy-on-push.
+
+**Gotchas specific to Railway** (neither applies to the Docker Compose setup):
+- Railway does **not** run `startCommand` through a shell — `--port $PORT` gets passed to uvicorn as the literal 5-character string `$PORT`, not the actual port number, and it crash-loops with `Error: Invalid value for '--port': '$PORT' is not a valid integer.` (hit and fixed live during initial deploy). `railway.api.json`'s `startCommand` must wrap the whole thing in a shell explicitly: `sh -c \"uvicorn app.main:app --host 0.0.0.0 --port $PORT\"`. The worker's command has no env var references so it doesn't need this.
+- Railway's Postgres plugin exposes `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` (and a `DATABASE_URL` using the plain `postgresql://` scheme) — but `app/core/database.py` needs the `asyncpg` driver. Don't use the plugin's own `DATABASE_URL` as-is; set `DATABASE_URL` on both `api` and `worker` manually as a variable reference: `postgresql+asyncpg://${{Postgres-O4xA.PGUSER}}:${{Postgres-O4xA.PGPASSWORD}}@${{Postgres-O4xA.PGHOST}}:${{Postgres-O4xA.PGPORT}}/${{Postgres-O4xA.PGDATABASE}}`.
+- Both services import `app.core.config.settings`, and pydantic-settings fails at import time if any required var is missing — so all 7 vars (`X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`, plus the `DATABASE_URL` override above) must be set on **both** `api` and `worker`, even the ones only one of them actually uses.
+- Only `api` runs `alembic upgrade head` (as its `preDeployCommand`) — Railway has no `depends_on`/completion-order primitive across services like Compose's `service_completed_successfully`, so avoid a migration race by not running it from both. On the very first deploy, deploy `api` first and let it finish before deploying `worker`, so the schema exists before the worker's first sync tries to write to it (this was the actual order used). On later deploys that include a new migration, redeploy `api` before `worker` for the same reason.
+- The worker logs to `sync.log` via `RotatingFileHandler` inside the container's ephemeral filesystem, same as locally — Railway has no bind-mount equivalent, so `railway logs --service worker` only ever shows `Starting Container` and nothing else. To confirm the worker is actually syncing, check `POST /catalog`'s `total` count over time instead (both services share the same Postgres).
+
 ## Configuration
 
 - Settings load via pydantic-settings from a project-root `.env` (`app/core/config.py`, `Settings`). Required vars: `DATABASE_URL`, `X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`.

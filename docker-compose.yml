@@ -1,0 +1,85 @@
+# NOTA: el servicio `db` de abajo levanta un Postgres NUEVO y vacío (con su propio volumen
+# `db_data`), completamente separado de cualquier Postgres local que ya estés usando en
+# desarrollo. Este compose no migra datos existentes automáticamente. Si quieres partir de
+# los datos reales ya sincronizados, restaura un `pg_dump` de tu base actual dentro de este
+# volumen (o apunta `DATABASE_URL` a tu Postgres existente y elimina el servicio `db` y sus
+# referencias en `depends_on`).
+#
+# Variables como X_API_KEY, SICAR_ADMIN_EMAIL/PASSWORD, SICAR_TOKEN, etc. se toman de tu
+# .env real (nunca se hornean en la imagen). DATABASE_URL se sobreescribe abajo para apuntar
+# al servicio `db` de esta misma red de Docker Compose.
+#
+# `migrate` corre `alembic upgrade head` una sola vez y termina; `api` y `worker` esperan a
+# que termine con éxito antes de arrancar, evitando que ambos corran migraciones a la vez.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sicarx
+      POSTGRES_PASSWORD: sicarx
+      POSTGRES_DB: sicarx
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sicarx"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sicarx:sicarx@db:5432/sicarx
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sicarx:sicarx@db:5432/sicarx
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app.log:/app/app.log
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sicarx:sicarx@db:5432/sicarx
+    volumes:
+      - ./sync.log:/app/sync.log
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.worker.sync_task"]
+
+volumes:
+  db_data:

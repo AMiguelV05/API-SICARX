@@ -8,6 +8,7 @@ env/
 
 .env
 .env.*
+!.env.example
 secret.py
 
 # Python Bytecode and Compiled Files

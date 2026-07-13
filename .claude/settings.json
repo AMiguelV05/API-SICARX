@@ -5,7 +5,8 @@
       "Bash(venv/Scripts/python.exe -m alembic revision --autogenerate -m \"Agrega tablas de departamentos y categorias\")",
       "Bash(venv/Scripts/python.exe -m alembic upgrade head)",
       "PowerShell($procId = \\(Get-NetTCPConnection -LocalPort 8001 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique\\); if \\($procId\\) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue; Write-Output \"stopped $procId\" } else { Write-Output \"already stopped\" })",
-      "Bash(rm -f \"C:\\\\Users\\\\PC\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-PC-Desktop-API-SICARX\\\\4744beaa-b97d-4b8f-9304-e9ad074b7247\\\\scratchpad\"/taxonomy*.json \"C:\\\\Users\\\\PC\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-PC-Desktop-API-SICARX\\\\4744beaa-b97d-4b8f-9304-e9ad074b7247\\\\scratchpad\"/uvicorn_taxonomy.log 2>/dev/null; echo done)"
+      "Bash(rm -f \"C:\\\\Users\\\\PC\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-PC-Desktop-API-SICARX\\\\4744beaa-b97d-4b8f-9304-e9ad074b7247\\\\scratchpad\"/taxonomy*.json \"C:\\\\Users\\\\PC\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-PC-Desktop-API-SICARX\\\\4744beaa-b97d-4b8f-9304-e9ad074b7247\\\\scratchpad\"/uvicorn_taxonomy.log 2>/dev/null; echo done)",
+      "Bash(railway domain *)"
     ],
     "additionalDirectories": [
       "C:\\Users\\PC\\AppData\\Local\\Temp\\claude\\c--Users-PC-Desktop-API-SICARX\\4744beaa-b97d-4b8f-9304-e9ad074b7247\\scratchpad"
