@@ -119,6 +119,43 @@ Respuesta `200`:
 Usa `department_uuid`/`category_uuid` (de `GET /taxonomy`) para filtrar, y `tag` para ofertas u
 otras etiquetas. Pagina con `limit`/`offset`.
 
+### `POST /search` — buscar por sku o nombre
+
+```http
+POST /search
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "q": "portarollo",
+  "limit": 60,
+  "offset": 0
+}
+```
+
+Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
+`name` en un solo campo de búsqueda. Respuesta `200` con la misma forma que `/catalog`:
+
+```json
+{
+  "total": 11,
+  "docs": [
+    {
+      "sicar_uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sku": "PR2057",
+      "name": "PORTAROLLO",
+      "description_details": null,
+      "image_url": null,
+      "price": 8.62069,
+      "stock": 2.0
+    }
+  ]
+}
+```
+
+`q` no puede ir vacío (`422` si lo está o si falta). No combina con `department_uuid`/
+`category_uuid` — es una búsqueda global sobre todo el catálogo.
+
 ### `GET /products/{uuid}` — detalle de producto
 
 ```http
@@ -285,8 +322,6 @@ async function createOrder(sessionToken: string, products: { uuid: string; quant
 
 ## Notas y advertencias
 
-- **No hay endpoint de "búsqueda"** — filtra del lado del frontend sobre lo que trae `/catalog`,
-  o usa `department_uuid`/`category_uuid`/`tag` en el body.
 - **Precios/stock pueden cambiar entre que se muestran y se compran** — `/orders` valida
   disponibilidad en tiempo real contra Sicar X antes de confirmar; un `409` en checkout es
   normal y esperado, no un bug.

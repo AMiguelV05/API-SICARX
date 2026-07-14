@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import products, orders, sessions, taxonomy
+from app.api.routes import products, orders, sessions, taxonomy, search
 
 logging.basicConfig(
     filename="app.log",
@@ -46,6 +46,10 @@ app.include_router(sessions.router)
 # Router para departamentos y categorías (filtros del frontend)
 app.include_router(taxonomy.router,
                    tags=["Taxonomy"])
+
+# Router para busqueda de productos por sku o nombre
+app.include_router(search.router,
+                   tags=["Search"])
 
 @app.get("/", summary="Health check", tags=["Health"])
 def read_root():

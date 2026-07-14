@@ -87,6 +87,7 @@ Cancellation (`app/services/cancel_service.py`) mirrors this: resolve the real d
 - `Product` (`app/models/product.py`) is the single local table. The sync worker upserts it with `on_conflict_do_update` on `sicar_uuid`. Rows are never deleted — a completed sync pass marks stale rows (whose `last_sync_id` doesn't match the current pass) `is_deleted=True` instead.
 - `GET /products/{uuid}` (`routes/products.py`) serves from Postgres but lazily refreshes `description_details`, `tags`, `additional_images`, etc. from SICAR X's GraphQL API when `details_updated_at` is null or older than 24h (`fetch_full_details_from_sicar`).
 - `POST /catalog` reads only from Postgres (`catalog_service.get_local_catalog`) — no live SICAR X calls — filtered by `department_uuid`/`category_uuid` with pagination.
+- `POST /search` (`catalog_service.search_products`) does a case-insensitive substring match (`ILIKE '%q%'`) against `sku` OR `name`, accelerated by `pg_trgm` GIN indexes (`ix_products_sku_trgm`/`ix_products_name_trgm`, migration `224799e4444b`) — confirmed via `EXPLAIN` to use a Bitmap Index Scan rather than a sequential scan. Plain substring search on 124k+ rows would be far too slow without these; a fresh Postgres (e.g. after the crash-recovery incident above, or a new environment) needs this migration applied before `/search` is usable at all — `CREATE EXTENSION pg_trgm` requires superuser/extension privileges, which Railway's managed Postgres plugin grants by default but a locked-down externally-managed Postgres might not.
 - `GET /taxonomy` (`routes/taxonomy.py`) returns departments with their nested categories (for building filter UIs) from local `Department`/`Category`/`department_category` tables (`app/models/taxonomy.py`). Categories are many-to-many with departments in SICAR X, not a strict hierarchy. Fetched from SICAR X's `/store/` GraphQL endpoint using an anonymous customer session (`taxonomy_service.fetch_taxonomy_from_sicar`), cached with the same lazy 24h-staleness refresh pattern as `GET /products/{uuid}`.
 
 ### Endpoints (all verified live end-to-end)
@@ -94,6 +95,7 @@ Cancellation (`app/services/cancel_service.py`) mirrors this: resolve the real d
 | Endpoint | Token used | Notes |
 |---|---|---|
 | `POST /catalog` | none (just `x-api-key`) | Postgres only, paginated, filterable by `department_uuid`/`category_uuid`. |
+| `POST /search` | none (just `x-api-key`) | Postgres only, paginated; substring match on `sku`/`name` via `pg_trgm` GIN indexes. |
 | `GET /products/{uuid}` | admin/B2B (internal, only if stale) | Serves from Postgres; lazily refreshes detail fields from SICAR GraphQL if `details_updated_at` is null/>24h old. |
 | `GET /taxonomy` | admin/B2B (internal, only if stale) | Departments + nested categories from Postgres; same 24h lazy-refresh pattern. |
 | `POST /session/init` | none (just `x-api-key`) | Bootstraps a new customer session (no `Authorization` header) or refreshes an existing one (with it). Returns the customer JWT the frontend must then send back as `Authorization` on `/orders`. |
