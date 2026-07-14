@@ -8,12 +8,12 @@ class Product(Base):
     id = Column(Integer, primary_key=True, index=True)
     
     # Identificadores
-    sicar_uuid = Column(String, unique=True, index=True, nullable=False) 
-    sku = Column(String, index=True, nullable=True) 
+    sicar_uuid = Column(String, unique=True, index=True, nullable=False)
+    sku = Column(String, nullable=True)  
     additional_skus = Column(JSON, nullable=True)  # Para guardar los SKUs adicionales que pueda tener un producto, como un array de strings
-    
+
     # Datos básicos
-    name = Column(String, index=True, nullable=False) 
+    name = Column(String, nullable=False)  
     description_details = Column(Text, nullable=True) 
     image_url = Column(String, nullable=True)
     
