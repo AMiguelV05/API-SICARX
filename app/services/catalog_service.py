@@ -1,6 +1,6 @@
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, case
 from app.models.product import Product
 
 logger = logging.getLogger(__name__)
@@ -41,8 +41,12 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
 
 async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None):
     """Busqueda por substring (case-insensitive) en sku o name, acelerada por los
-    indices GIN de pg_trgm"""
+    indices GIN de pg_trgm. Los resultados donde sku o name empiezan con `q` se
+    ordenan primero, antes que las coincidencias que solo contienen `q` en medio."""
     pattern = f"%{q}%"
+    prefix_pattern = f"{q}%"
+    starts_with = or_(Product.sku.ilike(prefix_pattern), Product.name.ilike(prefix_pattern))
+
     stmt = select(Product).where(
         Product.is_deleted == False,
         Product.is_active == True,
@@ -58,7 +62,8 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)
 
-    stmt = stmt.limit(limit).offset(offset)
+    priority = case((starts_with, 0), else_=1)
+    stmt = stmt.order_by(priority, Product.name).limit(limit).offset(offset)
 
     result = await db.execute(stmt)
     products = result.scalars().all()

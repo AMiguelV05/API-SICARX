@@ -138,7 +138,11 @@ Content-Type: application/json
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
 `name` en un solo campo de búsqueda. `department_uuid`/`category_uuid` son opcionales y funcionan
 igual que en `/catalog` — úsalos para combinar el cuadro de búsqueda con los filtros de
-departamento/categoría ya existentes. Respuesta `200` con la misma forma que `/catalog`:
+departamento/categoría ya existentes.
+
+Los resultados donde `sku` o `name` **empiezan con** el texto buscado aparecen primero; el resto
+(coincidencias en medio del texto) aparece después, ya paginado en ese orden — no es necesario
+ordenar nada del lado del frontend. Respuesta `200` con la misma forma que `/catalog`:
 
 ```json
 {
