@@ -129,12 +129,16 @@ Content-Type: application/json
 {
   "q": "portarollo",
   "limit": 60,
-  "offset": 0
+  "offset": 0,
+  "department_uuid": null,
+  "category_uuid": null
 }
 ```
 
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
-`name` en un solo campo de búsqueda. Respuesta `200` con la misma forma que `/catalog`:
+`name` en un solo campo de búsqueda. `department_uuid`/`category_uuid` son opcionales y funcionan
+igual que en `/catalog` — úsalos para combinar el cuadro de búsqueda con los filtros de
+departamento/categoría ya existentes. Respuesta `200` con la misma forma que `/catalog`:
 
 ```json
 {
@@ -153,8 +157,7 @@ Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, c
 }
 ```
 
-`q` no puede ir vacío (`422` si lo está o si falta). No combina con `department_uuid`/
-`category_uuid` — es una búsqueda global sobre todo el catálogo.
+`q` no puede ir vacío (`422` si lo está o si falta).
 
 ### `GET /products/{uuid}` — detalle de producto
 

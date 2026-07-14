@@ -39,7 +39,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None):
     """Busqueda por substring (case-insensitive) en sku o name, acelerada por los
     indices GIN de pg_trgm"""
     pattern = f"%{q}%"
@@ -48,6 +48,12 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int):
         Product.is_active == True,
         or_(Product.sku.ilike(pattern), Product.name.ilike(pattern))
     )
+
+    if department_uuid:
+        stmt = stmt.where(Product.department_uuid == department_uuid)
+
+    if category_uuid:
+        stmt = stmt.where(Product.category_uuid == category_uuid)
 
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)

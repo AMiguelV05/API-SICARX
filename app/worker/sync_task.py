@@ -18,7 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 handler = RotatingFileHandler(
     "sync.log",
     maxBytes=10 * 1024 * 1024,
-    backupCount=5
+    backupCount=3
 )
 
 formatter = logging.Formatter(
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 SICAR_LIST_URL = "https://api.sicarx.com/product/v1/product/list"
 PRICE_LIST_ID = settings.SICAR_PRICE_LIST_ID
-MAX_RETRIES = 5
+MAX_RETRIES = 4
 
 async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     items_per_page = 300
@@ -53,7 +53,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         pool=5.0
     )
     logger.debug("Iniciando sincronizacion paginada con Sicar X")
-    price_key = PRICE_LIST_ID.split("-")[-1]
+    price_key = f"N{PRICE_LIST_ID.split("-")[-1]}"
 
     current_sync_id = str(uuid4())
     sync_completed_successfully = False
