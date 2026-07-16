@@ -94,7 +94,8 @@ Content-Type: application/json
   "offset": 0,
   "department_uuid": null,
   "category_uuid": null,
-  "tag": null
+  "tag": null,
+  "in_stock": false
 }
 ```
 
@@ -117,7 +118,8 @@ Respuesta `200`:
 ```
 
 Usa `department_uuid`/`category_uuid` (de `GET /taxonomy`) para filtrar, y `tag` para ofertas u
-otras etiquetas. Pagina con `limit`/`offset`.
+otras etiquetas. `in_stock: true` restringe a productos con `stock > 0` (por defecto `false`).
+Pagina con `limit`/`offset`.
 
 ### `POST /search` — buscar por sku o nombre
 
@@ -131,14 +133,16 @@ Content-Type: application/json
   "limit": 60,
   "offset": 0,
   "department_uuid": null,
-  "category_uuid": null
+  "category_uuid": null,
+  "in_stock": false
 }
 ```
 
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
 `name` en un solo campo de búsqueda. `department_uuid`/`category_uuid` son opcionales y funcionan
 igual que en `/catalog` — úsalos para combinar el cuadro de búsqueda con los filtros de
-departamento/categoría ya existentes.
+departamento/categoría ya existentes. `in_stock: true` restringe el resultado a productos con
+`stock > 0` (por defecto `false`, no filtra por stock).
 
 Los resultados donde `sku` o `name` **empiezan con** el texto buscado aparecen primero; el resto
 (coincidencias en medio del texto) aparece después, ya paginado en ese orden — no es necesario

@@ -18,13 +18,15 @@ async def search(
     """
     Busca productos cuyo `sku` o `name` contengan el texto de `q` (sin distinguir
     mayúsculas/minúsculas). Sirve desde la base de datos local, igual que `POST /catalog`.
-    Admite los mismos filtros `department_uuid`/`category_uuid` que `POST /catalog`.
+    Admite los mismos filtros `department_uuid`/`category_uuid` que `POST /catalog`, y
+    `in_stock` para mostrar solo productos con stock > 0.
     """
     try:
         result = await search_products(
             db, filter_data.q, filter_data.limit, filter_data.offset,
             department_uuid=filter_data.department_uuid,
             category_uuid=filter_data.category_uuid,
+            in_stock=filter_data.in_stock,
         )
         return result
     except Exception as e:

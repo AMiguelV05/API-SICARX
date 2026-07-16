@@ -8,6 +8,7 @@ class SearchFilter(BaseModel):
     offset: int = Field(default=0, description="Paginación (inicio)")
     department_uuid: Optional[str] = None
     category_uuid: Optional[str] = None
+    in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
 
 class SearchResponse(BaseModel):
     total: int

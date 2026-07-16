@@ -9,6 +9,7 @@ class LocalCatalogFilter(BaseModel):
     department_uuid: Optional[str] = None
     category_uuid: Optional[str] = None
     tag: Optional[str] = None
+    in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
 
 # Modelo de salida
 class ProductBasic(BaseModel):
