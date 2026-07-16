@@ -95,7 +95,8 @@ Content-Type: application/json
   "department_uuid": null,
   "category_uuid": null,
   "tag": null,
-  "in_stock": false
+  "in_stock": false,
+  "sort_by": null
 }
 ```
 
@@ -120,6 +121,11 @@ Respuesta `200`:
 Usa `department_uuid`/`category_uuid` (de `GET /taxonomy`) para filtrar, y `tag` para ofertas u
 otras etiquetas. `in_stock: true` restringe a productos con `stock > 0` (por defecto `false`).
 Pagina con `limit`/`offset`.
+
+`sort_by` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`.
+Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden garantizado entre
+llamadas — usa `sort_by` siempre que el orden le importe a la UI (p. ej. un selector de
+"Ordenar por: Precio menor a mayor / mayor a menor / Nombre A-Z").
 
 ### `POST /search` — buscar por sku o nombre
 

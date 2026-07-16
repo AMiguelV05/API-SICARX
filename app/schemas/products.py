@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime
 
 # Filtros de entrada
@@ -10,6 +10,9 @@ class LocalCatalogFilter(BaseModel):
     category_uuid: Optional[str] = None
     tag: Optional[str] = None
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
+    sort_by: Optional[Literal["price_asc", "price_desc", "name_asc"]] = Field(
+        default=None, description="Orden de los resultados: price_asc, price_desc o name_asc"
+    )
 
 # Modelo de salida
 class ProductBasic(BaseModel):

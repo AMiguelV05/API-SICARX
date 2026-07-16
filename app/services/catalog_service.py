@@ -27,6 +27,15 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)
 
+    # Orden de los resultados
+    sort_by = filters.get("sort_by")
+    if sort_by == "price_asc":
+        stmt = stmt.order_by(Product.price.asc())
+    elif sort_by == "price_desc":
+        stmt = stmt.order_by(Product.price.desc())
+    elif sort_by == "name_asc":
+        stmt = stmt.order_by(Product.name.asc())
+
     # Aplicar paginación
     stmt = stmt.limit(filters.get("limit", 60)).offset(filters.get("offset", 0))
     
