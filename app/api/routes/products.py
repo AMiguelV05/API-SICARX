@@ -1,9 +1,8 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Body, Header
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException, Body, status
 from sqlalchemy.future import select
 from datetime import datetime, timedelta, timezone
-from app.core.database import get_db
+from app.core.database import DbDep
 from app.core.security import validate_api_key
 
 from app.models.product import Product
@@ -12,14 +11,10 @@ from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, Produ
 from app.services.catalog_service import get_local_catalog
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/products", tags=["Products Catalog and Details"], dependencies=[Depends(validate_api_key)])
 
-@router.get("/products/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
-async def get_product_details(
-    uuid: str, 
-    db: AsyncSession = Depends(get_db),
-    _ : str = Depends(validate_api_key)):
-    
+@router.get("/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
+async def get_product_details(uuid: str, db: DbDep):
     """
     Busca un producto localmente. Si no tiene detalles o pasaron 24 horas,
     hace scraping al servidor central de Sicar para actualizar la base de datos.
@@ -34,7 +29,7 @@ async def get_product_details(
     product = result.scalars().first()
 
     if not product:
-        raise HTTPException(status_code=404, detail="Producto no encontrado")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
 
     # Lógica de expiración
     needs_update = (
@@ -44,10 +39,10 @@ async def get_product_details(
     logger.debug(f"Producto {uuid}: details_updated_at={product.details_updated_at}, needs_update={needs_update}")
     if needs_update:
         logger.info(f"Datos obsoletos para {uuid}. Descargando de GraphQL...")
-        
+
         # Llamada al servicio que maneja el auto-login
         full_data = await fetch_full_details_from_sicar(product.sicar_uuid)
-        
+
         # Actualizamos el modelo en PostgreSQL
         if full_data:
             product.additional_skus = full_data.get("skus")
@@ -56,19 +51,15 @@ async def get_product_details(
             product.sales_unit_uuid = full_data.get("sales_unit_uuid")
             product.additional_images = full_data.get("additional_images")
             product.details_updated_at = datetime.now(timezone.utc)
-            
+
             await db.commit()
             await db.refresh(product)
             logger.info(f"Producto {uuid} actualizado con exito en la base de datos local.")
 
     return product
 
-@router.post("/catalog", response_model=LocalCatalogResponse, summary="Obtener catálogo local")
-async def get_catalog(
-    filter_data: LocalCatalogFilter = Body(...),
-    db: AsyncSession = Depends(get_db),
-    _ : str = Depends(validate_api_key)
-):
+@router.post("", response_model=LocalCatalogResponse, summary="Obtener catálogo local")
+async def get_catalog(db: DbDep, filter_data: LocalCatalogFilter = Body()):
     """
     Obtiene la lista de productos directamente desde la base de datos local.
     Retorna solo la información básica necesaria para las tarjetas de producto.
@@ -79,4 +70,4 @@ async def get_catalog(
         return result
     except Exception as e:
         logger.error(f"Error al obtener el catalogo local: {str(e)}")
-        raise HTTPException(status_code=400, detail="No se pudo obtener el catálogo local. Intenta nuevamente.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al obtener el catálogo local. Intenta más tarde.")

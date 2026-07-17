@@ -5,7 +5,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from app.core.rate_limit import limiter
-from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses, client_orders
+from app.api.v1_router import v1_router
 
 logging.basicConfig(
     filename="app.log",
@@ -40,34 +40,9 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "x-api-key", "X-Client-Token"],
 )
 
-# Router para conseguir detalles de productos desde Sicar X y guardarlos en la base de datos local
-app.include_router(products.router,
-                   tags=["Products Catalog and Details"])
-
-# Router para crear pedidos en Sicar X y descontar stock local
-app.include_router(orders.router,
-                   tags=["Orders Creation and Cancellation"])
-
-# Router para inicializar o refrescar la sesión con Sicar X
-app.include_router(sessions.router)
-
-# Router para departamentos y categorías (filtros del frontend)
-app.include_router(taxonomy.router,
-                   tags=["Taxonomy"])
-
-# Router para busqueda de productos por sku o nombre
-app.include_router(search.router,
-                   tags=["Search"])
-
-# Router para registro e inicio de sesión de cuentas de cliente
-app.include_router(auth.router,
-                   tags=["Client Auth"])
-
-# Router para el libro de direcciones guardadas de cada cliente
-app.include_router(addresses.router)
-
-# Router para el historial de pedidos de cada cliente
-app.include_router(client_orders.router)
+# Toda la API vive bajo /v1 (ver app/api/v1_router.py) -- cada sub-router ya trae su
+# propio tags=/dependencies=, asi que aqui solo se incluye el wrapper.
+app.include_router(v1_router)
 
 @app.get("/", summary="Health check", tags=["Health"])
 def read_root():

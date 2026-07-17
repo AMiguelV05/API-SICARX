@@ -4,15 +4,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.client import ClientAccount
 from app.schemas.client import ClientRegister, ClientLogin, ClientUpdate
-from app.core.security import hash_password, verify_password
+from app.core.security import hash_password, verify_password, _hash_password_sync
 
 logger = logging.getLogger(__name__)
 
 # Hash bcrypt fijo, calculado una sola vez al importar el modulo, usado solo para igualar
 # el tiempo de respuesta cuando el correo no existe -- evita que se pueda distinguir "cuenta
 # inexistente" de "contraseña incorrecta" midiendo cuanto tarda cada rama (verify_password,
-# via bcrypt, es la parte costosa de la operacion, ~100-300ms).
-_DUMMY_HASH = hash_password("timing-attack-mitigation-dummy-password")
+# via bcrypt, es la parte costosa de la operacion, ~100-300ms). Usa la variante sincrona
+# a proposito: esto corre al importar el modulo, antes de que exista un event loop, asi que
+# no hay nada que bloquear -- llamar a la variante async (hash_password) aqui fallaria.
+_DUMMY_HASH = _hash_password_sync("timing-attack-mitigation-dummy-password")
 
 async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccount:
     email = data.email.lower()
@@ -25,7 +27,7 @@ async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccou
         name=data.name,
         email=email,
         phone=data.phone,
-        hashed_password=hash_password(data.password),
+        hashed_password=await hash_password(data.password),
     )
     db.add(client)
     await db.commit()
@@ -41,7 +43,7 @@ async def authenticate_client(db: AsyncSession, data: ClientLogin) -> ClientAcco
 
     # Siempre corremos verify_password, incluso si no existe la cuenta (contra el hash dummy),
     # para que ambas ramas tomen el mismo tiempo.
-    password_ok = verify_password(data.password, client.hashed_password if client else _DUMMY_HASH)
+    password_ok = await verify_password(data.password, client.hashed_password if client else _DUMMY_HASH)
     if not client or not password_ok:
         logger.info(f"Intento de login fallido para: {email}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Correo o contraseña incorrectos.")
@@ -56,10 +58,10 @@ async def authenticate_client(db: AsyncSession, data: ClientLogin) -> ClientAcco
 
 async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpdate) -> ClientAccount:
     if data.new_password:
-        if not data.current_password or not verify_password(data.current_password, client.hashed_password):
+        if not data.current_password or not await verify_password(data.current_password, client.hashed_password):
             logger.info(f"Intento de cambio de contraseña con contraseña actual incorrecta: {client.email}")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La contraseña actual es incorrecta.")
-        client.hashed_password = hash_password(data.new_password)
+        client.hashed_password = await hash_password(data.new_password)
 
     if data.name is not None:
         client.name = data.name

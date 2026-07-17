@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 import bcrypt
 import jwt
 from fastapi import Security, HTTPException, status, Header, Depends
@@ -39,13 +41,27 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
 
     return api_key
 
-def hash_password(password: str) -> str:
-    """Genera el hash bcrypt de una contraseña en texto plano."""
+def _hash_password_sync(password: str) -> str:
+    """Genera el hash bcrypt de una contraseña en texto plano. Sincrona a proposito: solo
+    debe llamarse directamente en contexto sync (p. ej. el bootstrap de _DUMMY_HASH al
+    importar el modulo, antes de que exista un event loop) - en cualquier otro caso usar
+    `hash_password`, que la corre en un threadpool."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-def verify_password(password: str, hashed_password: str) -> bool:
-    """Verifica una contraseña en texto plano contra su hash bcrypt."""
+def _verify_password_sync(password: str, hashed_password: str) -> bool:
+    """Verifica una contraseña en texto plano contra su hash bcrypt. Sincrona a proposito,
+    ver `_hash_password_sync` - usar `verify_password` fuera de contexto sync."""
     return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+
+async def hash_password(password: str) -> str:
+    """Genera el hash bcrypt de una contraseña en texto plano, sin bloquear el event loop
+    (bcrypt tarda ~100-300ms, corrida en un threadpool via asyncio.to_thread)."""
+    return await asyncio.to_thread(_hash_password_sync, password)
+
+async def verify_password(password: str, hashed_password: str) -> bool:
+    """Verifica una contraseña en texto plano contra su hash bcrypt, sin bloquear el event
+    loop - ver `hash_password`."""
+    return await asyncio.to_thread(_verify_password_sync, password, hashed_password)
 
 def create_client_token(client_uuid: str) -> str:
     """Genera el JWT de sesión para una cuenta de cliente registrada localmente."""
@@ -102,3 +118,6 @@ async def get_current_client_header(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de la cuenta de cliente (X-Client-Token).")
 
     return await _resolve_client_from_token(x_client_token, db)
+
+CurrentClientDep = Annotated[ClientAccount, Depends(get_current_client)]
+CurrentClientHeaderDep = Annotated[ClientAccount, Depends(get_current_client_header)]

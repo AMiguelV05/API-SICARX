@@ -1,11 +1,12 @@
-from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 from datetime import datetime
+from pydantic import Field
+from app.schemas.base import CamelModel
 
 # Filtros de entrada
-class LocalCatalogFilter(BaseModel):
-    limit: int = Field(default=60, description="Cantidad de productos por página")
-    offset: int = Field(default=0, description="Paginación (inicio)")
+class LocalCatalogFilter(CamelModel):
+    limit: int = Field(default=60, ge=1, le=200, description="Cantidad de productos por página (1-200)")
+    offset: int = Field(default=0, ge=0, description="Paginación (inicio)")
     department_uuid: Optional[str] = None
     category_uuid: Optional[str] = None
     tag: Optional[str] = None
@@ -15,8 +16,8 @@ class LocalCatalogFilter(BaseModel):
     )
 
 # Modelo de salida
-class ProductBasic(BaseModel):
-    sicar_uuid: str 
+class ProductBasic(CamelModel):
+    sicar_uuid: str
     sku: str
     name: str
     description_details: Optional[str]
@@ -24,25 +25,22 @@ class ProductBasic(BaseModel):
     price: float
     stock: float
 
-    class Config:
-        from_attributes = True
-
 # Respuesta completa con paginación
-class LocalCatalogResponse(BaseModel):
+class LocalCatalogResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
 
 # Detalle completo de producto (GET /products/{uuid})
-class ProductDetail(BaseModel):
+class ProductDetail(CamelModel):
     id: int
     sicar_uuid: str
     sku: Optional[str]
-    additional_skus: Optional[list]
+    additional_skus: Optional[list[str]]
     name: str
     description_details: Optional[str]
     image_url: Optional[str]
-    tags: Optional[list]
-    additional_images: Optional[list]
+    tags: Optional[list[str]]
+    additional_images: Optional[list[str]]
     sales_unit_uuid: Optional[str]
     department_uuid: Optional[str]
     category_uuid: Optional[str]
@@ -54,6 +52,3 @@ class ProductDetail(BaseModel):
     last_sync_id: Optional[str]
     details_updated_at: Optional[datetime]
     deleted_at: Optional[datetime]
-
-    class Config:
-        from_attributes = True

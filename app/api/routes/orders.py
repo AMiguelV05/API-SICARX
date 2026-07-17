@@ -1,12 +1,10 @@
 import logging
 from uuid import uuid4
-from fastapi import APIRouter, Depends, HTTPException, Body, Header
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException, Body, Header, status
 from sqlalchemy import select
-from app.core.database import get_db
-from app.core.security import validate_api_key, get_current_client_header
+from app.core.database import DbDep
+from app.core.security import validate_api_key, CurrentClientHeaderDep
 from app.models.product import Product
-from app.models.client import ClientAccount
 from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar, pay_order_in_sicar
 from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
@@ -15,15 +13,14 @@ from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, Or
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(prefix="/orders", tags=["Orders Creation and Cancellation"], dependencies=[Depends(validate_api_key)])
 
-@router.post("/orders", response_model=OrderResponse, summary="Crear pedido")
+@router.post("", response_model=OrderResponse, summary="Crear pedido")
 async def create_order(
-    order_payload: OrderCreate = Body(...),
+    client: CurrentClientHeaderDep,
+    db: DbDep,
+    order_payload: OrderCreate = Body(),
     authorization: str = Header(None, alias="Authorization", description="Token de sesión del cliente web"),
-    client: ClientAccount = Depends(get_current_client_header),
-    db: AsyncSession = Depends(get_db),
-    _ : str = Depends(validate_api_key)
 ):
     """
     Contrato semiautomático: el frontend solo envía `products: [{uuid, quantity}]` y
@@ -41,7 +38,7 @@ async def create_order(
     """
     if not authorization:
         logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
-        raise HTTPException(status_code=401, detail="No se proporcionó el token de sesión del cliente en los headers.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de sesión del cliente en los headers.")
 
     # Verificación y refresco de la sesión del cliente
     try:
@@ -50,7 +47,7 @@ async def create_order(
         valid_client_token = session_data.get("token")
     except Exception as e:
         logger.error(f"Fallo al validar o refrescar sesion del cliente: {str(e)}")
-        raise HTTPException(status_code=401, detail="No se pudo validar ni refrescar la sesión del cliente.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se pudo validar ni refrescar la sesión del cliente.")
 
     branch_id = order_payload.branchId or session_data.get("branchId") or 151456
     price_list_uuid = order_payload.priceListUuid or session_data.get("priceListUuid") or settings.SICAR_PRICE_LIST_ID
@@ -63,7 +60,7 @@ async def create_order(
     uuids = list(requested_quantities.keys())
 
     if not uuids:
-        raise HTTPException(status_code=400, detail="El carrito no contiene productos válidos.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El carrito no contiene productos válidos.")
 
     try:
         # Pre-validación de stock/disponibilidad y datos de precio/impuestos usando el token fresco
@@ -126,32 +123,32 @@ async def create_order(
     except Exception as e:
         await db.rollback()
         logger.error(f"Error inesperado al crear la orden: {e}")
-        raise HTTPException(status_code=400, detail="No se pudo procesar la orden. Verifica los datos e intenta nuevamente.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al procesar la orden. Intenta más tarde.")
 
 
-@router.post("/cancel", response_model=OrderCancelResponse, summary="Cancelar pedido")
+@router.post("/{order_id}/cancel", response_model=OrderCancelResponse, summary="Cancelar pedido")
 async def cancel_order(
-    cancel_payload: OrderCancel = Body(...),
-    client: ClientAccount = Depends(get_current_client_header),
-    db: AsyncSession = Depends(get_db),
-    _ : str = Depends(validate_api_key)
+    order_id: str,
+    client: CurrentClientHeaderDep,
+    db: DbDep,
+    cancel_payload: OrderCancel = Body(),
 ):
     """
     Cancela un pedido en Sicar X y restaura el stock local. Usa el token admin/B2B
     internamente para hablar con Sicar X, pero ahora también requiere el header
     `X-Client-Token` (cuenta de cliente local): la orden debe pertenecer al cliente
     autenticado, o se responde 404 (sin revelar si la orden existe pero es de otra
-    cuenta). `uuid` es el `id` devuelto por `POST /orders` (no un UUID real de Sicar);
+    cuenta). `order_id` es el `id` devuelto por `POST /orders` (no un UUID real de Sicar);
     el backend lo resuelve internamente al identificador que Sicar X espera antes de
     cancelar.
     """
-    document_uuid = cancel_payload.uuid
+    document_uuid = order_id
     cash_register_uuid = cancel_payload.cashRegisterUuid
     products_to_restore = cancel_payload.products
 
-    if not document_uuid or not cash_register_uuid:
-        logger.warning("Intento de cancelacion fallido: Faltan uuid del documento o caja registradora.")
-        raise HTTPException(status_code=400, detail="Faltan el uuid del documento o la caja registradora.")
+    if not cash_register_uuid:
+        logger.warning("Intento de cancelacion fallido: Falta la caja registradora.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Falta la caja registradora.")
 
     local_order = await get_owned_order_by_sicar_id(db, client.id, document_uuid)
 
@@ -180,4 +177,4 @@ async def cancel_order(
     except Exception as e:
         await db.rollback()
         logger.error(f"Error inesperado al cancelar el pedido {document_uuid}: {e}")
-        raise HTTPException(status_code=400, detail="No se pudo cancelar el pedido. Intenta nuevamente.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al cancelar el pedido. Intenta más tarde.")

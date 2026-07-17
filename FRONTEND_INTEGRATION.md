@@ -31,40 +31,57 @@ provisto por el equipo backend, se manda igual en cada request:
 x-api-key: <valor provisto por backend>
 ```
 
-Sin este header, cualquier ruta responde `401`.
+Sin este header, cualquier ruta responde `403`.
 
-### 2. Token de sesión del cliente — solo para `POST /orders`
+### 2. Token de sesión de Sicar X — solo para `POST /v1/orders`
 
-Un JWT por comprador, obtenido de `POST /session/init` y reenviado como `Authorization` al
-crear un pedido. **Nunca** se usa en ninguna otra ruta — `/catalog`, `/products/{uuid}`,
-`/taxonomy` y `/cancel` no lo necesitan, solo el `x-api-key`.
+Un JWT por comprador, obtenido de `POST /v1/session/init` y reenviado como `Authorization` al
+crear un pedido. **Nunca** se usa en ninguna otra ruta — `/v1/products`, `/v1/products/{uuid}`,
+`/v1/taxonomy` no lo necesitan, solo el `x-api-key`.
+
+### 3. Token de cuenta de cliente (`X-Client-Token`) — obligatorio para `POST /v1/orders` y `POST /v1/orders/{order_id}/cancel`
+
+**Login ahora es obligatorio para comprar — ya no existe checkout anónimo.** Un tercer JWT, distinto
+de los dos anteriores, obtenido de `POST /v1/auth/register` o `POST /v1/auth/login` y reenviado en
+una cabecera aparte, `X-Client-Token` (NO en `Authorization`, que en estas dos rutas ya está ocupada
+por el token de sesión de Sicar X del punto 2). Identifica qué cuenta queda dueña del pedido, para
+que después pueda verlo en `GET /v1/auth/me/orders`. Sin este header, `POST /v1/orders` y
+`POST /v1/orders/{order_id}/cancel` responden `401` antes de siquiera intentar hablar con Sicar X.
 
 ## Flujo típico de una compra
 
 ```
-1. POST /session/init            → obtener token de sesión (una vez, guardar en el cliente)
-2. POST /catalog                 → mostrar catálogo / resultados de filtro
-3. GET  /products/{uuid}         → detalle al abrir una ficha de producto
-4. POST /orders                  → crear el pedido (usa el token del paso 1)
-5. (si aplica) POST /cancel      → cancelar el pedido creado en el paso 4
+1. POST /v1/auth/register o /v1/auth/login       → obtener token de cuenta (X-Client-Token), una vez
+2. POST /v1/session/init                          → obtener token de sesión de Sicar X (una vez)
+3. POST /v1/products                              → mostrar catálogo / resultados de filtro
+4. GET  /v1/products/{uuid}                       → detalle al abrir una ficha de producto
+5. POST /v1/orders                                → crear el pedido (usa los tokens de los pasos 1 y 2)
+6. (si aplica) POST /v1/orders/{order_id}/cancel  → cancelar el pedido creado en el paso 5 (usa el token del paso 1)
 ```
 
-`/session/init` normalmente se llama **una sola vez** al iniciar la sesión de compra (p. ej. al
+`/v1/session/init` normalmente se llama **una sola vez** al iniciar la sesión de compra (p. ej. al
 cargar el carrito o al primer intento de checkout), no en cada request. Guarda el `token`
 devuelto (en memoria, cookie, o storage del lado cliente) y reenvíalo tal cual en `Authorization`
-al llamar a `/orders`.
+al llamar a `/v1/orders`. Guarda también el token de `/v1/auth/login`/`/v1/auth/register` (distinto)
+para reenviarlo en `X-Client-Token`.
 
 ---
 
 ## Referencia de endpoints
 
-### `POST /session/init` — iniciar o refrescar sesión
+> **Nota sobre nombres de campo:** las respuestas siempre usan camelCase (todos los ejemplos de
+> abajo). Los *bodies* de request, por ahora, todavía aceptan también los nombres antiguos en
+> snake_case (p. ej. mandar `department_uuid` en vez de `departmentUuid` sigue funcionando) —
+> no es una migración forzada de entrada, solo de salida. No construyas código nuevo dependiendo
+> de esto: no está garantizado que el soporte a snake_case se mantenga indefinidamente.
+
+### `POST /v1/session/init` — iniciar o refrescar sesión
 
 Sin `Authorization`: crea una sesión anónima nueva. Con `Authorization` (token previo): lo valida
 y refresca si expiró.
 
 ```http
-POST /session/init
+POST /v1/session/init
 x-api-key: <api-key>
 Authorization: <token-anterior>     # opcional
 ```
@@ -80,18 +97,19 @@ Respuesta `200`:
 }
 ```
 
-Guarda `token` — es lo que se reenvía como `Authorization` en `/orders`.
+Guarda `token` — es lo que se reenvía como `Authorization` en `/v1/orders`.
 
-### `POST /auth/register` / `POST /auth/login` — cuentas de cliente (login propio, separado de Sicar X)
+### `POST /v1/auth/register` / `POST /v1/auth/login` — cuentas de cliente (login propio, separado de Sicar X)
 
-Esto es un tercer tipo de token, **distinto** del token de `/session/init` de arriba. `/session/init`
-gestiona la sesión anónima de compra contra Sicar X (necesaria para `/orders`); `/auth/register` y
-`/auth/login` son cuentas de cliente propias de esta API — para que un usuario tenga un login
-persistente en el sitio (guardar direcciones, ver histórico, etc. — todavía no implementado, solo
-existe el login por ahora). Ambos requieren `x-api-key` igual que cualquier otra ruta.
+Esto es un tercer tipo de token, **distinto** del token de `/v1/session/init` de arriba.
+`/v1/session/init` gestiona la sesión anónima de compra contra Sicar X (necesaria para
+`/v1/orders`); `/v1/auth/register` y `/v1/auth/login` son cuentas de cliente propias de esta API —
+para que un usuario tenga un login persistente en el sitio (guardar direcciones, ver histórico,
+etc. — todavía no implementado, solo existe el login por ahora). Ambos requieren `x-api-key` igual
+que cualquier otra ruta.
 
 ```http
-POST /auth/register
+POST /v1/auth/register
 x-api-key: <api-key>
 Content-Type: application/json
 
@@ -104,8 +122,8 @@ Content-Type: application/json
 ```
 
 `password` requiere mínimo 8 caracteres (`422` si es más corta). Responde `200` con el mismo shape
-que `/auth/login` — el registro inicia sesión automáticamente, no hace falta llamar a `/auth/login`
-después:
+que `/v1/auth/login` — el registro inicia sesión automáticamente, no hace falta llamar a
+`/v1/auth/login` después:
 
 ```json
 {
@@ -122,7 +140,7 @@ después:
 `409` si el correo ya está registrado.
 
 ```http
-POST /auth/login
+POST /v1/auth/login
 x-api-key: <api-key>
 Content-Type: application/json
 
@@ -134,19 +152,22 @@ Content-Type: application/json
 
 Misma respuesta `200` que arriba. `401` si el correo o la contraseña son incorrectos. El correo
 no distingue mayúsculas/minúsculas (`Juan@x.com` y `juan@x.com` son la misma cuenta), así que no
-hace falta normalizar nada del lado del frontend. `/auth/login` está limitado a 5 intentos por
+hace falta normalizar nada del lado del frontend. `/v1/auth/login` está limitado a 5 intentos por
 minuto por IP — pasado ese límite responde `429` con `{"error": "Rate limit exceeded: ..."}`.
 
-Guarda este `token` — es el que se reenvía como `Authorization` en `GET`/`PATCH /auth/me` abajo.
-**Nota:** todavía no está conectado a `/orders` — los pedidos se siguen creando de forma anónima
-con el token de `/session/init`, sin importar si el cliente tiene cuenta o no.
+Guarda este `token` — se reenvía en dos lugares distintos: como `Authorization` en
+`GET`/`PATCH /v1/auth/me` (y las rutas de direcciones/historial de pedidos abajo), y como
+`X-Client-Token` en `POST /v1/orders`/`POST /v1/orders/{order_id}/cancel` (ver "Dos capas de
+autenticación" arriba — ahí sí importa la cabecera exacta, `Authorization` está ocupada por el
+token de sesión de Sicar X en esas dos rutas). Login es obligatorio para comprar — ya no existe
+checkout anónimo.
 
-### `GET /auth/me` — datos de la cuenta (para "Mi cuenta")
+### `GET /v1/auth/me` — datos de la cuenta (para "Mi cuenta")
 
 ```http
-GET /auth/me
+GET /v1/auth/me
 x-api-key: <api-key>
-Authorization: <token de /auth/register o /auth/login>
+Authorization: <token de /v1/auth/register o /v1/auth/login>
 ```
 
 Respuesta `200`:
@@ -161,33 +182,33 @@ Respuesta `200`:
       "uuid": "51cbf02f-cf83-470e-9313-c586d816c9c0",
       "label": "Casa",
       "street": "Av. Siempre Viva",
-      "ext_number": "123",
-      "int_number": null,
+      "extNumber": "123",
+      "intNumber": null,
       "neighborhood": null,
       "city": "Culiacán",
       "state": "Sinaloa",
       "country": "México",
-      "zip_code": "80000",
+      "zipCode": "80000",
       "references": null,
-      "is_default": true
+      "isDefault": true
     }
   ]
 }
 ```
 
-`addresses` viene incluido de una vez (no hace falta llamar a `GET /auth/me/addresses` aparte solo
-para pintar "Mi cuenta"), pero para agregar/editar/eliminar una dirección sí se usan las rutas de
-abajo. `401` si falta el `Authorization`, el token es inválido/expiró, o la cuenta ya no existe/está
-desactivada — en cualquiera de esos casos, manda al usuario de vuelta a login.
+`addresses` viene incluido de una vez (no hace falta llamar a `GET /v1/auth/me/addresses` aparte
+solo para pintar "Mi cuenta"), pero para agregar/editar/eliminar una dirección sí se usan las
+rutas de abajo. `401` si falta el `Authorization`, el token es inválido/expiró, o la cuenta ya no
+existe/está desactivada — en cualquiera de esos casos, manda al usuario de vuelta a login.
 
-### `PATCH /auth/me` — editar nombre, teléfono o contraseña
+### `PATCH /v1/auth/me` — editar nombre, teléfono o contraseña
 
 Todos los campos son opcionales — solo se cambia lo que se envíe.
 
 ```http
-PATCH /auth/me
+PATCH /v1/auth/me
 x-api-key: <api-key>
-Authorization: <token de /auth/register o /auth/login>
+Authorization: <token de /v1/auth/register o /v1/auth/login>
 Content-Type: application/json
 
 {
@@ -201,31 +222,31 @@ Para cambiar la contraseña, hay que enviar **ambas**: la actual y la nueva, en 
 
 ```json
 {
-  "current_password": "unaContraseñaSegura",
-  "new_password": "unaContraseñaNuevaSegura"
+  "currentPassword": "unaContraseñaSegura",
+  "newPassword": "unaContraseñaNuevaSegura"
 }
 ```
 
-`new_password` requiere mínimo 8 caracteres (`422` si es más corta). `401` si `current_password`
-no coincide con la actual. Responde `200` con el mismo shape que `GET /auth/me`, ya actualizado
+`newPassword` requiere mínimo 8 caracteres (`422` si es más corta). `401` si `currentPassword`
+no coincide con la actual. Responde `200` con el mismo shape que `GET /v1/auth/me`, ya actualizado
 (este endpoint no toca `email` ni `addresses` — usa las rutas de abajo para direcciones). Limitado
 a 10 llamadas por minuto por IP (`429` si se excede).
 
-### `GET/POST/PATCH/DELETE /auth/me/addresses` — libro de direcciones
+### `GET/POST/PATCH/DELETE /v1/auth/me/addresses` — libro de direcciones
 
-Direcciones guardadas de la cuenta, como recurso aparte (no se editan desde `PATCH /auth/me`).
-Todas requieren `x-api-key` + el mismo `Authorization` que `/auth/me`.
+Direcciones guardadas de la cuenta, como recurso aparte (no se editan desde `PATCH /v1/auth/me`).
+Todas requieren `x-api-key` + el mismo `Authorization` que `/v1/auth/me`.
 
 ```http
-GET /auth/me/addresses
+GET /v1/auth/me/addresses
 x-api-key: <api-key>
 Authorization: <token>
 ```
 
-Responde `200` con un arreglo (mismo shape que `addresses` dentro de `GET /auth/me`).
+Responde `200` con un arreglo (mismo shape que `addresses` dentro de `GET /v1/auth/me`).
 
 ```http
-POST /auth/me/addresses
+POST /v1/auth/me/addresses
 x-api-key: <api-key>
 Authorization: <token>
 Content-Type: application/json
@@ -233,29 +254,29 @@ Content-Type: application/json
 {
   "label": "Casa",
   "street": "Av. Siempre Viva",
-  "ext_number": "123",
+  "extNumber": "123",
   "city": "Culiacán",
   "state": "Sinaloa",
   "country": "México",
-  "zip_code": "80000",
-  "is_default": true
+  "zipCode": "80000",
+  "isDefault": true
 }
 ```
 
-Solo `street` es obligatorio (`422` si falta). `is_default: true` desmarca automáticamente
+Solo `street` es obligatorio (`422` si falta). `isDefault: true` desmarca automáticamente
 cualquier otra dirección default que el cliente ya tuviera — solo puede haber una a la vez.
 Responde `201` con la dirección creada (incluye su `uuid`, que es lo que identifica la dirección
 en `PATCH`/`DELETE` de abajo — nunca un índice de arreglo).
 
 ```http
-PATCH /auth/me/addresses/{uuid}
+PATCH /v1/auth/me/addresses/{uuid}
 x-api-key: <api-key>
 Authorization: <token>
 Content-Type: application/json
 
 {
   "label": "Casa (nueva referencia)",
-  "is_default": true
+  "isDefault": true
 }
 ```
 
@@ -263,7 +284,7 @@ Todos los campos son opcionales — solo se cambia lo que se envíe. Responde `2
 actualizada. `404` si el `uuid` no existe o no pertenece al cliente autenticado.
 
 ```http
-DELETE /auth/me/addresses/{uuid}
+DELETE /v1/auth/me/addresses/{uuid}
 x-api-key: <api-key>
 Authorization: <token>
 ```
@@ -271,21 +292,71 @@ Authorization: <token>
 `204` sin contenido si se elimina correctamente. `404` si el `uuid` no existe o no pertenece al
 cliente autenticado — igual que `PATCH`, nunca revela si la dirección de otro cliente existe.
 
-### `POST /catalog` — catálogo local (paginado, sin llamadas a Sicar X)
+### `GET /v1/auth/me/orders` — historial de pedidos del cliente
 
 ```http
-POST /catalog
+GET /v1/auth/me/orders?limit=20&offset=0
+x-api-key: <api-key>
+Authorization: <token de /v1/auth/login o /v1/auth/register>
+```
+
+Lista paginada (`limit`/`offset` como query params, no body — mismos límites que `/v1/products`:
+`limit` 1-200, default 60; `offset` ≥ 0), más recientes primero. Solo Postgres local, sin llamadas
+a Sicar X.
+
+Respuesta `200`:
+```json
+{
+  "total": 3,
+  "docs": [
+    {
+      "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+      "sicarOrderId": "6a55165ada77fe7cd25d39e3",
+      "serieFolio": "TL518",
+      "status": "PAID",
+      "dispatchStatus": "PENDING_ACCEPTANCE",
+      "dispatchHistory": null,
+      "total": 129.99,
+      "totalQuantity": 3,
+      "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": null }, "deliveryType": "PICKUP" },
+      "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA" } ],
+      "createdAt": "2026-07-10T18:32:05Z"
+    }
+  ]
+}
+```
+
+### `GET /v1/auth/me/orders/{orderUuid}` — detalle de un pedido
+
+```http
+GET /v1/auth/me/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6
+x-api-key: <api-key>
+Authorization: <token de /v1/auth/login o /v1/auth/register>
+```
+
+Mismo shape que un elemento de `docs` arriba. `404` si el pedido no existe o no pertenece a la
+cuenta autenticada. Si `dispatchStatus` no está en un estado definitivo (`COMPLETE`/`DISPATCHED`),
+esta llamada intenta refrescarlo contra Sicar X antes de responder — puede tardar un poco más que
+la lista. `status` (`PAID`/`CANCELLED`) es el estado de pago/cancelación propio de esta API;
+`dispatchStatus` (`PENDING_ACCEPTANCE`/`PENDING`/`PREPARING`/`COMPLETE`/`DISPATCHED`) es el estado
+de cumplimiento/entrega real de Sicar X — son dos cosas distintas, no las confundas al mostrar el
+seguimiento del pedido.
+
+### `POST /v1/products` — catálogo local (paginado, sin llamadas a Sicar X)
+
+```http
+POST /v1/products
 x-api-key: <api-key>
 Content-Type: application/json
 
 {
   "limit": 60,
   "offset": 0,
-  "department_uuid": null,
-  "category_uuid": null,
+  "departmentUuid": null,
+  "categoryUuid": null,
   "tag": null,
-  "in_stock": false,
-  "sort_by": null
+  "inStock": false,
+  "sortBy": null
 }
 ```
 
@@ -295,11 +366,11 @@ Respuesta `200`:
   "total": 124149,
   "docs": [
     {
-      "sicar_uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
       "sku": "PR2057",
       "name": "PORTAROLLO",
-      "description_details": null,
-      "image_url": null,
+      "descriptionDetails": null,
+      "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0
     }
@@ -307,23 +378,26 @@ Respuesta `200`:
 }
 ```
 
-Usa `department_uuid`/`category_uuid` (de `GET /taxonomy`) para filtrar, y `tag` para ofertas u
+Usa `departmentUuid`/`categoryUuid` (de `GET /v1/taxonomy`) para filtrar, y `tag` para ofertas u
 otras etiquetas (coincidencia exacta contra los valores en `Product.tags`, p. ej. `"oferta"` o
-`"pretul"` — no es substring). `in_stock: true` restringe a productos con `stock > 0` (por
+`"pretul"` — no es substring). `inStock: true` restringe a productos con `stock > 0` (por
 defecto `false`). Pagina con `limit`/`offset`.
 
 `price` siempre viene con 2 decimales exactos (es un `Numeric` en la base de datos, no un
 `float`) — no asumas más precisión que esa al mostrarlo o redondearlo del lado del frontend.
 
-`sort_by` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`.
+`sortBy` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`.
 Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden garantizado entre
-llamadas — usa `sort_by` siempre que el orden le importe a la UI (p. ej. un selector de
+llamadas — usa `sortBy` siempre que el orden le importe a la UI (p. ej. un selector de
 "Ordenar por: Precio menor a mayor / mayor a menor / Nombre A-Z").
 
-### `POST /search` — buscar por sku o nombre
+`limit` debe estar entre 1 y 200 (por defecto 60 si se omite) y `offset` debe ser ≥ 0 — valores
+fuera de esos rangos responden `422` en vez de aceptarse silenciosamente.
+
+### `POST /v1/search` — buscar por sku o nombre
 
 ```http
-POST /search
+POST /v1/search
 x-api-key: <api-key>
 Content-Type: application/json
 
@@ -331,32 +405,32 @@ Content-Type: application/json
   "q": "portarollo",
   "limit": 60,
   "offset": 0,
-  "department_uuid": null,
-  "category_uuid": null,
-  "in_stock": false
+  "departmentUuid": null,
+  "categoryUuid": null,
+  "inStock": false
 }
 ```
 
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
-`name` en un solo campo de búsqueda. `department_uuid`/`category_uuid` son opcionales y funcionan
-igual que en `/catalog` — úsalos para combinar el cuadro de búsqueda con los filtros de
-departamento/categoría ya existentes. `in_stock: true` restringe el resultado a productos con
+`name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid` son opcionales y funcionan
+igual que en `/v1/products` — úsalos para combinar el cuadro de búsqueda con los filtros de
+departamento/categoría ya existentes. `inStock: true` restringe el resultado a productos con
 `stock > 0` (por defecto `false`, no filtra por stock).
 
 Los resultados donde `sku` o `name` **empiezan con** el texto buscado aparecen primero; el resto
 (coincidencias en medio del texto) aparece después, ya paginado en ese orden — no es necesario
-ordenar nada del lado del frontend. Respuesta `200` con la misma forma que `/catalog`:
+ordenar nada del lado del frontend. Respuesta `200` con la misma forma que `/v1/products`:
 
 ```json
 {
   "total": 11,
   "docs": [
     {
-      "sicar_uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
       "sku": "PR2057",
       "name": "PORTAROLLO",
-      "description_details": null,
-      "image_url": null,
+      "descriptionDetails": null,
+      "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0
     }
@@ -364,23 +438,24 @@ ordenar nada del lado del frontend. Respuesta `200` con la misma forma que `/cat
 }
 ```
 
-`q` no puede ir vacío (`422` si lo está o si falta).
+`q` no puede ir vacío (`422` si lo está o si falta). Mismos límites de paginación que
+`/v1/products`: `limit` entre 1 y 200 (por defecto 60), `offset` ≥ 0 (`422` fuera de rango).
 
-### `GET /products/{uuid}` — detalle de producto
+### `GET /v1/products/{uuid}` — detalle de producto
 
 ```http
-GET /products/3Cny4OOxdX1GoSzL9rEsTZNL7un
+GET /v1/products/3Cny4OOxdX1GoSzL9rEsTZNL7un
 x-api-key: <api-key>
 ```
 
-Respuesta `200` incluye todos los campos de `/catalog` más `tags`, `additional_images`,
-`description_details` (puede tardar un poco más la primera vez si el detalle está desactualizado
+Respuesta `200` incluye todos los campos de `POST /v1/products` más `tags`, `additionalImages`,
+`descriptionDetails` (puede tardar un poco más la primera vez si el detalle está desactualizado
 — internamente refresca desde Sicar X antes de responder).
 
-### `GET /taxonomy` — departamentos y categorías (para filtros)
+### `GET /v1/taxonomy` — departamentos y categorías (para filtros)
 
 ```http
-GET /taxonomy
+GET /v1/taxonomy
 x-api-key: <api-key>
 ```
 
@@ -403,15 +478,18 @@ Respuesta `200`:
 Una categoría puede aparecer bajo varios departamentos (relación muchos-a-muchos), no es una
 jerarquía estricta.
 
-### `POST /orders` — crear pedido
+### `POST /v1/orders` — crear pedido
 
 Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, impuestos,
-sku, totales) lo calcula el backend.**
+sku, totales) lo calcula el backend.** Requiere **login** — ver punto 3 de "Dos capas de
+autenticación" arriba: `X-Client-Token` es obligatorio junto con `Authorization`, ya no existe
+checkout anónimo.
 
 ```http
-POST /orders
+POST /v1/orders
 x-api-key: <api-key>
-Authorization: <token de /session/init>
+Authorization: <token de /v1/session/init>
+X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 Content-Type: application/json
 
 {
@@ -439,38 +517,56 @@ Respuesta `200`:
   "id": "6a55165ada77fe7cd25d39e3",
   "serieFolio": "TL518",
   "date": 1783961178060.0,
-  "status": "ACTIVE"
+  "status": "ACTIVE",
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6"
 }
 ```
 
-**Guarda `id`** — es lo que se manda a `/cancel` si el cliente necesita cancelar. El pedido ya
-queda pagado y confirmado en Sicar X al recibir esta respuesta (no hay un paso de pago aparte del
-lado del frontend).
+**Guarda `id`** — es lo que se usa como `{order_id}` en la URL de `POST /v1/orders/{order_id}/cancel`
+si el cliente necesita cancelar. **Guarda también `orderUuid`** — es el identificador local del
+pedido, usado para verlo después en `GET /v1/auth/me/orders/{orderUuid}` (ver ese endpoint arriba).
+El pedido ya queda pagado y confirmado en Sicar X al recibir esta respuesta (no hay un paso de pago
+aparte del lado del frontend).
 
 Errores esperables:
-- `401` — falta o expiró el token de sesión (llama de nuevo a `/session/init`)
+- `401` — falta o expiró el token de sesión, o falta/es inválido `X-Client-Token` (llama de nuevo a
+  `/v1/session/init` o `/v1/auth/login` según cuál haya fallado)
 - `400` — carrito vacío o datos de entrega inválidos
 - `409` — uno o más productos sin disponibilidad suficiente
 - `502` — Sicar X rechazó la orden o el pago (reintenta más tarde)
 
-### `POST /cancel` — cancelar pedido
+### `POST /v1/orders/{order_id}/cancel` — cancelar pedido
+
+Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
+(sin revelar si el pedido existe pero es de otra cuenta).
 
 ```http
-POST /cancel
+POST /v1/orders/6a55165ada77fe7cd25d39e3/cancel
 x-api-key: <api-key>
+X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 Content-Type: application/json
 
 {
-  "uuid": "6a55165ada77fe7cd25d39e3",
   "products": [
     { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "quantity": 1 }
   ]
 }
 ```
 
-`uuid` es el `id` que devolvió `/orders` (no un token de sesión, no requiere `Authorization`).
-`products` debe repetir el mismo carrito del pedido original, para que el stock local se
-restaure correctamente.
+`{order_id}` en la URL es el `id` que devolvió `POST /v1/orders` (ya no va en el body — no requiere
+`Authorization`, no es un token de sesión). El body ya no lleva `uuid`: solo `products`, que debe
+repetir el mismo carrito del pedido original para que el stock local se restaure correctamente, y
+`cashRegisterUuid` (opcional — tiene un valor por defecto del lado del servidor, solo hace falta
+enviarlo si se necesita cancelar contra una caja distinta a la default):
+
+```json
+{
+  "cashRegisterUuid": "8f3e6a2c-1d4b-4f0a-9c7e-2b5a6d1f0e33",
+  "products": [
+    { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "quantity": 1 }
+  ]
+}
+```
 
 Respuesta `200`:
 ```json
@@ -491,7 +587,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL!;   // ej. https://api-productio
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY!;    // provisto por backend
 
 async function initSession(previousToken?: string) {
-  const res = await fetch(`${API_URL}/session/init`, {
+  const res = await fetch(`${API_URL}/v1/session/init`, {
     method: "POST",
     headers: {
       "x-api-key": API_KEY,
@@ -502,8 +598,8 @@ async function initSession(previousToken?: string) {
   return res.json(); // { token, priceListUuid, branchId, deliveryCost, contentId }
 }
 
-async function getCatalog(filters: { limit?: number; offset?: number; department_uuid?: string }) {
-  const res = await fetch(`${API_URL}/catalog`, {
+async function getCatalog(filters: { limit?: number; offset?: number; departmentUuid?: string }) {
+  const res = await fetch(`${API_URL}/v1/products`, {
     method: "POST",
     headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ limit: 60, offset: 0, ...filters }),
@@ -511,12 +607,13 @@ async function getCatalog(filters: { limit?: number; offset?: number; department
   return res.json(); // { total, docs }
 }
 
-async function createOrder(sessionToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
-  const res = await fetch(`${API_URL}/orders`, {
+async function createOrder(sessionToken: string, clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
+  const res = await fetch(`${API_URL}/v1/orders`, {
     method: "POST",
     headers: {
       "x-api-key": API_KEY,
       Authorization: sessionToken,
+      "X-Client-Token": clientToken,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -528,16 +625,20 @@ async function createOrder(sessionToken: string, products: { uuid: string; quant
     const err = await res.json();
     throw new Error(err.detail ?? "No se pudo crear el pedido");
   }
-  return res.json(); // { id, serieFolio, date, status }
+  return res.json(); // { id, serieFolio, date, status, orderUuid }
 }
 ```
 
 ## Notas y advertencias
 
-- **Precios/stock pueden cambiar entre que se muestran y se compran** — `/orders` valida
+- **Precios/stock pueden cambiar entre que se muestran y se compran** — `/v1/orders` valida
   disponibilidad en tiempo real contra Sicar X antes de confirmar; un `409` en checkout es
   normal y esperado, no un bug.
-- **El token de sesión expira** — si `/orders` responde `401`, vuelve a llamar `/session/init`
-  pasando el token viejo en `Authorization` para refrescarlo, y reintenta.
-- **No hay endpoint de "estado del pedido"** todavía — si el frontend necesita mostrar
-  seguimiento post-compra, es una conversación aparte con backend (no existe hoy).
+- **El token de sesión expira** — si `/v1/orders` responde `401`, vuelve a llamar
+  `/v1/session/init` pasando el token viejo en `Authorization` para refrescarlo, y reintenta. Si
+  en cambio es `X-Client-Token` el que expiró/falta, vuelve a llamar `/v1/auth/login`.
+- **Login es obligatorio para comprar** — no existe checkout anónimo; sin una cuenta autenticada
+  (`X-Client-Token` válido) `/v1/orders` y `/v1/orders/{order_id}/cancel` responden `401`.
+- **Seguimiento post-compra sí existe**: `GET /v1/auth/me/orders` (lista) y
+  `GET /v1/auth/me/orders/{orderUuid}` (detalle, con `dispatchStatus`/`dispatchHistory`) — ver
+  referencia arriba.

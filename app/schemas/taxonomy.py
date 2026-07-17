@@ -1,18 +1,15 @@
-from pydantic import BaseModel
 from typing import List
+from app.schemas.base import CamelModel
 
-class CategoryBasic(BaseModel):
+class CategoryBasic(CamelModel):
     uuid: str
     name: str
 
-    class Config:
-        from_attributes = True
-
-class DepartmentWithCategories(BaseModel):
+class DepartmentWithCategories(CamelModel):
     uuid: str
     name: str
     order: int
     categories: List[CategoryBasic]
 
-class TaxonomyResponse(BaseModel):
+class TaxonomyResponse(CamelModel):
     departments: List[DepartmentWithCategories]

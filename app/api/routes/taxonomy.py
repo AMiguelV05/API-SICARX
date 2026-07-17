@@ -1,19 +1,15 @@
 import logging
 from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.core.database import get_db
+from app.core.database import DbDep
 from app.core.security import validate_api_key
 from app.services.taxonomy_service import get_local_taxonomy
 from app.schemas.taxonomy import TaxonomyResponse, DepartmentWithCategories, CategoryBasic
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(tags=["Taxonomy"], dependencies=[Depends(validate_api_key)])
 
 @router.get("/taxonomy", response_model=TaxonomyResponse, summary="Departamentos y categorías para filtros")
-async def get_taxonomy(
-    db: AsyncSession = Depends(get_db),
-    _: str = Depends(validate_api_key)
-):
+async def get_taxonomy(db: DbDep):
     """
     Devuelve los departamentos y sus categorías asociadas, para construir filtros en el
     frontend. Se sirve desde la base de datos local con refresco perezoso (cache de 24h).
