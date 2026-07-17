@@ -53,6 +53,28 @@ def create_client_token(client_uuid: str) -> str:
     payload = {"sub": client_uuid, "exp": expire}
     return jwt.encode(payload, settings.CLIENT_JWT_SECRET, algorithm=CLIENT_JWT_ALGORITHM)
 
+async def _resolve_client_from_token(token: str, db: AsyncSession) -> ClientAccount:
+    """
+    Decodifica un JWT de cuenta de cliente (emitido por `create_client_token`) y
+    carga la cuenta correspondiente desde la base de datos local. Compartido por
+    `get_current_client` y `get_current_client_header`, que solo difieren en de
+    qué cabecera toman el token.
+    """
+    clean_token = token.replace("Bearer ", "").replace("bearer ", "").strip()
+
+    try:
+        payload = jwt.decode(clean_token, settings.CLIENT_JWT_SECRET, algorithms=[CLIENT_JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La sesión expiró, inicia sesión nuevamente.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
+
+    client = await db.scalar(select(ClientAccount).where(ClientAccount.uuid == payload.get("sub")))
+    if not client or not client.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Cuenta no encontrada o desactivada.")
+
+    return client
+
 async def get_current_client(
     authorization: str = Header(None, alias="Authorization", description="Token JWT de la cuenta de cliente"),
     db: AsyncSession = Depends(get_db),
@@ -65,17 +87,18 @@ async def get_current_client(
     if not authorization:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de la cuenta.")
 
-    token = authorization.replace("Bearer ", "").replace("bearer ", "").strip()
+    return await _resolve_client_from_token(authorization, db)
 
-    try:
-        payload = jwt.decode(token, settings.CLIENT_JWT_SECRET, algorithms=[CLIENT_JWT_ALGORITHM])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La sesión expiró, inicia sesión nuevamente.")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
+async def get_current_client_header(
+    x_client_token: str = Header(None, alias="X-Client-Token", description="Token JWT de la cuenta de cliente"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Igual que `get_current_client`, pero toma el token de la cabecera `X-Client-Token`
+    en vez de `Authorization`. Usada únicamente en `/orders` y `/cancel`, donde
+    `Authorization` ya está ocupada por el token de sesión de Sicar X.
+    """
+    if not x_client_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de la cuenta de cliente (X-Client-Token).")
 
-    client = await db.scalar(select(ClientAccount).where(ClientAccount.uuid == payload.get("sub")))
-    if not client or not client.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Cuenta no encontrada o desactivada.")
-
-    return client
+    return await _resolve_client_from_token(x_client_token, db)

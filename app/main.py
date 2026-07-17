@@ -5,7 +5,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from app.core.rate_limit import limiter
-from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses
+from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses, client_orders
 
 logging.basicConfig(
     filename="app.log",
@@ -37,7 +37,7 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
-    allow_headers=["Content-Type", "Authorization", "x-api-key"],
+    allow_headers=["Content-Type", "Authorization", "x-api-key", "X-Client-Token"],
 )
 
 # Router para conseguir detalles de productos desde Sicar X y guardarlos en la base de datos local
@@ -65,6 +65,9 @@ app.include_router(auth.router,
 
 # Router para el libro de direcciones guardadas de cada cliente
 app.include_router(addresses.router)
+
+# Router para el historial de pedidos de cada cliente
+app.include_router(client_orders.router)
 
 @app.get("/", summary="Health check", tags=["Health"])
 def read_root():

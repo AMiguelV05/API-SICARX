@@ -41,6 +41,36 @@ async def _resolve_document_uuid(object_id: str) -> str:
         raise HTTPException(status_code=404, detail="No se encontró el documento a cancelar en Sicar X.")
     return document_uuid
 
+async def fetch_document_dispatch_status(object_id: str) -> dict | None:
+    """Consulta el estado de cumplimiento (`dispatchStatus`) y el historial de cambios
+    (`dispatchHistory`) de un documento en Sicar X - mismo endpoint y objectId que
+    `_resolve_document_uuid`, confirmado en vivo contra el panel admin de Sicar X
+    (app.sicarx.com, seccion de entregas) el cual usa la misma consulta generatedV2
+    para su propio tablero de despacho. `status` aqui es el estado de documento propio
+    de Sicar (ACTIVE/TO_PAY/...), no el `status` local que usa este API (PAID/CANCELLED)."""
+    if not is_safe_sicar_id(object_id):
+        raise HTTPException(status_code=400, detail="El identificador del documento no es válido.")
+
+    query = f"""{{ generatedV2(objectId: "{object_id}") {{
+        status
+        dispatchStatus
+        dispatchHistory {{ date previousStatus currentStatus userName userUuid }}
+    }} }}"""
+
+    async def attempt_lookup(admin_token: str):
+        headers = admin_app_headers(admin_token, content_type="application/graphql")
+        async with httpx.AsyncClient(timeout=CANCEL_TIMEOUT) as client:
+            return await client.post(DOCUMENT_GRAPH_URL, content=query, headers=headers)
+
+    response = await sicar_auth.request_with_retry(attempt_lookup)
+
+    if response.status_code != 200:
+        logger.error(f"Error al consultar el estado de despacho del documento {object_id}: {response.status_code} - {response.text}")
+        return None
+
+    payload = response.json()
+    return (payload.get("data") or {}).get("generatedV2")
+
 async def process_order_cancellation(db: AsyncSession, object_id: str, cash_register_uuid: str, products: list):
     """Cancela en Sicar usando el Token B2B del Administrador y revierte stock local.
 

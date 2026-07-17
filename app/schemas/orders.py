@@ -1,5 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Literal, Optional
+from datetime import datetime
 from app.core.config import settings
 
 class ProductItem(BaseModel):
@@ -41,9 +42,32 @@ class OrderResponse(BaseModel):
     serieFolio: str = Field(..., description="Folio del documento creado en Sicar")
     date: float = Field(..., description="Fecha y hora de la orden en Sicar")
     status: str = Field(..., description="Estado de la orden en Sicar")
+    orderUuid: str = Field(..., description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid}")
 
 class OrderCancelResponse(BaseModel):
     documentUuid: str = Field(..., description="UUID del documento cancelado")
     sicarTimestamp: float = Field(..., description="Timestamp de cancelación en Sicar")
     message: str = Field(..., description="Mensaje de confirmación de cancelación")
     status: str = Field(..., description="Estado de la orden después de la cancelación")
+
+# HISTORIAL DE ORDENES DEL CLIENTE (GET /auth/me/orders)
+
+class OrderPublic(BaseModel):
+    uuid: str
+    sicar_order_id: str
+    serie_folio: Optional[str]
+    status: str
+    dispatch_status: Optional[str] = Field(default=None, description="Estado de cumplimiento en Sicar X: PENDING_ACCEPTANCE, PENDING, PREPARING, COMPLETE o DISPATCHED")
+    dispatch_history: Optional[list] = Field(default=None, description="Historial de cambios de dispatch_status")
+    total: float
+    total_quantity: float
+    delivery_info: dict
+    items: list
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class OrderListResponse(BaseModel):
+    total: int
+    docs: List[OrderPublic]

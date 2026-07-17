@@ -11,5 +11,8 @@
     "additionalDirectories": [
       "C:\\Users\\PC\\AppData\\Local\\Temp\\claude\\c--Users-PC-Desktop-API-SICARX\\4744beaa-b97d-4b8f-9304-e9ad074b7247\\scratchpad"
     ]
+  },
+  "enabledPlugins": {
+    "railway@railway-skills": true
   }
 }

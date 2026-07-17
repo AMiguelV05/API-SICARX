@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Body, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
-from app.core.security import validate_api_key
+from app.core.security import validate_api_key, get_current_client_header
 from app.models.product import Product
+from app.models.client import ClientAccount
 from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar, pay_order_in_sicar
 from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
+from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse
 from app.core.config import settings
 
@@ -19,6 +21,7 @@ router = APIRouter()
 async def create_order(
     order_payload: OrderCreate = Body(...),
     authorization: str = Header(None, alias="Authorization", description="Token de sesión del cliente web"),
+    client: ClientAccount = Depends(get_current_client_header),
     db: AsyncSession = Depends(get_db),
     _ : str = Depends(validate_api_key)
 ):
@@ -27,9 +30,14 @@ async def create_order(
     `deliveryInfo`; precios, impuestos, sku, descripción, unidad y totales se calculan
     en el backend a partir de Sicar X y del catálogo local (`order_service.build_order_payload`).
 
-    Requiere el JWT de sesión del cliente (obtenido de `POST /session/init`) en el header
-    `Authorization` — se usa para validar el carrito y crear la orden en Sicar X; el pago
-    se aplica internamente con el token admin/B2B, nunca con el del cliente.
+    Requiere DOS tokens distintos, ninguno reemplaza al otro:
+    - `Authorization`: JWT de sesión del cliente web en Sicar X (obtenido de
+      `POST /session/init`) — se usa para validar el carrito y crear la orden en Sicar X;
+      el pago se aplica internamente con el token admin/B2B, nunca con el del cliente.
+    - `X-Client-Token`: JWT de la cuenta de cliente local (obtenido de `POST /auth/login`
+      o `/auth/register`) — identifica qué `ClientAccount` queda dueña de la orden para
+      que después pueda verla en `GET /auth/me/orders`. Login ahora es obligatorio para
+      comprar; ya no existe checkout anónimo.
     """
     if not authorization:
         logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
@@ -95,9 +103,22 @@ async def create_order(
             branch_id=branch_id
         )
 
-        logger.info(f"Orden creada y pagada exitosamente en la sucursal {branch_id}.")
+        local_order = await create_local_order(
+            db=db,
+            client_account_id=client.id,
+            order_payload_dict=order_payload_dict,
+            payment_response=payment_response,
+        )
 
-        return payment_response
+        logger.info(f"Orden creada y pagada exitosamente en la sucursal {branch_id} para cliente {client.email}.")
+
+        return OrderResponse(
+            id=payment_response.get("id"),
+            serieFolio=payment_response.get("serieFolio"),
+            date=payment_response.get("date"),
+            status=payment_response.get("status"),
+            orderUuid=local_order.uuid,
+        )
 
     except HTTPException:
         await db.rollback()
@@ -111,14 +132,18 @@ async def create_order(
 @router.post("/cancel", response_model=OrderCancelResponse, summary="Cancelar pedido")
 async def cancel_order(
     cancel_payload: OrderCancel = Body(...),
+    client: ClientAccount = Depends(get_current_client_header),
     db: AsyncSession = Depends(get_db),
     _ : str = Depends(validate_api_key)
 ):
     """
-    Cancela un pedido en Sicar X y restaura el stock local. No requiere el token de
-    sesión del cliente — se usa exclusivamente el token admin/B2B. `uuid` es el `id`
-    devuelto por `POST /orders` (no un UUID real de Sicar); el backend lo resuelve
-    internamente al identificador que Sicar X espera antes de cancelar.
+    Cancela un pedido en Sicar X y restaura el stock local. Usa el token admin/B2B
+    internamente para hablar con Sicar X, pero ahora también requiere el header
+    `X-Client-Token` (cuenta de cliente local): la orden debe pertenecer al cliente
+    autenticado, o se responde 404 (sin revelar si la orden existe pero es de otra
+    cuenta). `uuid` es el `id` devuelto por `POST /orders` (no un UUID real de Sicar);
+    el backend lo resuelve internamente al identificador que Sicar X espera antes de
+    cancelar.
     """
     document_uuid = cancel_payload.uuid
     cash_register_uuid = cancel_payload.cashRegisterUuid
@@ -128,15 +153,20 @@ async def cancel_order(
         logger.warning("Intento de cancelacion fallido: Faltan uuid del documento o caja registradora.")
         raise HTTPException(status_code=400, detail="Faltan el uuid del documento o la caja registradora.")
 
+    local_order = await get_owned_order_by_sicar_id(db, client.id, document_uuid)
+
     try:
         cancel_timestamp = await process_order_cancellation(
-            db, 
-            document_uuid, 
-            cash_register_uuid, 
+            db,
+            document_uuid,
+            cash_register_uuid,
             products_to_restore
         )
 
-        logger.info(f"Pedido {document_uuid} cancelado exitosamente. Stock restaurado.")
+        local_order.status = "CANCELLED"
+        await db.commit()
+
+        logger.info(f"Pedido {document_uuid} cancelado exitosamente por cliente {client.email}. Stock restaurado.")
         return OrderCancelResponse(
             documentUuid=document_uuid,
             sicarTimestamp=cancel_timestamp,

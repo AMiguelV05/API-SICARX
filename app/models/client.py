@@ -25,6 +25,9 @@ class ClientAccount(Base):
     addresses = relationship(
         "ClientAddress", back_populates="client_account", cascade="all, delete-orphan"
     )
+    # Sin cascade de borrado (a diferencia de addresses): las ordenes son registros
+    # financieros que deben sobrevivir aunque la cuenta cambie.
+    orders = relationship("Order", back_populates="client_account")
 
 class ClientAddress(Base):
     __tablename__ = "client_addresses"
