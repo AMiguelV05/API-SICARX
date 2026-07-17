@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.database import Base
 from app.models.product import Product
 from app.models.taxonomy import Department, Category, department_category
+from app.models.client import ClientAccount, ClientAddress
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -82,6 +82,191 @@ Respuesta `200`:
 
 Guarda `token` — es lo que se reenvía como `Authorization` en `/orders`.
 
+### `POST /auth/register` / `POST /auth/login` — cuentas de cliente (login propio, separado de Sicar X)
+
+Esto es un tercer tipo de token, **distinto** del token de `/session/init` de arriba. `/session/init`
+gestiona la sesión anónima de compra contra Sicar X (necesaria para `/orders`); `/auth/register` y
+`/auth/login` son cuentas de cliente propias de esta API — para que un usuario tenga un login
+persistente en el sitio (guardar direcciones, ver histórico, etc. — todavía no implementado, solo
+existe el login por ahora). Ambos requieren `x-api-key` igual que cualquier otra ruta.
+
+```http
+POST /auth/register
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "name": "Juan Pérez",
+  "email": "juan@example.com",
+  "phone": "3151234567",
+  "password": "unaContraseñaSegura"
+}
+```
+
+`password` requiere mínimo 8 caracteres (`422` si es más corta). Responde `200` con el mismo shape
+que `/auth/login` — el registro inicia sesión automáticamente, no hace falta llamar a `/auth/login`
+después:
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "client": {
+    "uuid": "f6bacfb9-cb38-4f96-adab-2593a14345bc",
+    "name": "Juan Pérez",
+    "email": "juan@example.com",
+    "phone": "3151234567"
+  }
+}
+```
+
+`409` si el correo ya está registrado.
+
+```http
+POST /auth/login
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "email": "juan@example.com",
+  "password": "unaContraseñaSegura"
+}
+```
+
+Misma respuesta `200` que arriba. `401` si el correo o la contraseña son incorrectos.
+
+Guarda este `token` — es el que se reenvía como `Authorization` en `GET`/`PATCH /auth/me` abajo.
+**Nota:** todavía no está conectado a `/orders` — los pedidos se siguen creando de forma anónima
+con el token de `/session/init`, sin importar si el cliente tiene cuenta o no.
+
+### `GET /auth/me` — datos de la cuenta (para "Mi cuenta")
+
+```http
+GET /auth/me
+x-api-key: <api-key>
+Authorization: <token de /auth/register o /auth/login>
+```
+
+Respuesta `200`:
+```json
+{
+  "uuid": "f6bacfb9-cb38-4f96-adab-2593a14345bc",
+  "name": "Juan Pérez",
+  "email": "juan@example.com",
+  "phone": "3151234567",
+  "addresses": [
+    {
+      "uuid": "51cbf02f-cf83-470e-9313-c586d816c9c0",
+      "label": "Casa",
+      "street": "Av. Siempre Viva",
+      "ext_number": "123",
+      "int_number": null,
+      "neighborhood": null,
+      "city": "Culiacán",
+      "state": "Sinaloa",
+      "country": "México",
+      "zip_code": "80000",
+      "references": null,
+      "is_default": true
+    }
+  ]
+}
+```
+
+`addresses` viene incluido de una vez (no hace falta llamar a `GET /auth/me/addresses` aparte solo
+para pintar "Mi cuenta"), pero para agregar/editar/eliminar una dirección sí se usan las rutas de
+abajo. `401` si falta el `Authorization`, el token es inválido/expiró, o la cuenta ya no existe/está
+desactivada — en cualquiera de esos casos, manda al usuario de vuelta a login.
+
+### `PATCH /auth/me` — editar nombre, teléfono o contraseña
+
+Todos los campos son opcionales — solo se cambia lo que se envíe.
+
+```http
+PATCH /auth/me
+x-api-key: <api-key>
+Authorization: <token de /auth/register o /auth/login>
+Content-Type: application/json
+
+{
+  "name": "Juan Pérez García",
+  "phone": "3159999999"
+}
+```
+
+Para cambiar la contraseña, hay que enviar **ambas**: la actual y la nueva, en la misma llamada
+(no se puede cambiar la contraseña solo con el token — protege contra un token robado/viejo):
+
+```json
+{
+  "current_password": "unaContraseñaSegura",
+  "new_password": "unaContraseñaNuevaSegura"
+}
+```
+
+`new_password` requiere mínimo 8 caracteres (`422` si es más corta). `401` si `current_password`
+no coincide con la actual. Responde `200` con el mismo shape que `GET /auth/me`, ya actualizado
+(este endpoint no toca `email` ni `addresses` — usa las rutas de abajo para direcciones).
+
+### `GET/POST/PATCH/DELETE /auth/me/addresses` — libro de direcciones
+
+Direcciones guardadas de la cuenta, como recurso aparte (no se editan desde `PATCH /auth/me`).
+Todas requieren `x-api-key` + el mismo `Authorization` que `/auth/me`.
+
+```http
+GET /auth/me/addresses
+x-api-key: <api-key>
+Authorization: <token>
+```
+
+Responde `200` con un arreglo (mismo shape que `addresses` dentro de `GET /auth/me`).
+
+```http
+POST /auth/me/addresses
+x-api-key: <api-key>
+Authorization: <token>
+Content-Type: application/json
+
+{
+  "label": "Casa",
+  "street": "Av. Siempre Viva",
+  "ext_number": "123",
+  "city": "Culiacán",
+  "state": "Sinaloa",
+  "country": "México",
+  "zip_code": "80000",
+  "is_default": true
+}
+```
+
+Solo `street` es obligatorio (`422` si falta). `is_default: true` desmarca automáticamente
+cualquier otra dirección default que el cliente ya tuviera — solo puede haber una a la vez.
+Responde `201` con la dirección creada (incluye su `uuid`, que es lo que identifica la dirección
+en `PATCH`/`DELETE` de abajo — nunca un índice de arreglo).
+
+```http
+PATCH /auth/me/addresses/{uuid}
+x-api-key: <api-key>
+Authorization: <token>
+Content-Type: application/json
+
+{
+  "label": "Casa (nueva referencia)",
+  "is_default": true
+}
+```
+
+Todos los campos son opcionales — solo se cambia lo que se envíe. Responde `200` con la dirección
+actualizada. `404` si el `uuid` no existe o no pertenece al cliente autenticado.
+
+```http
+DELETE /auth/me/addresses/{uuid}
+x-api-key: <api-key>
+Authorization: <token>
+```
+
+`204` sin contenido si se elimina correctamente. `404` si el `uuid` no existe o no pertenece al
+cliente autenticado — igual que `PATCH`, nunca revela si la dirección de otro cliente existe.
+
 ### `POST /catalog` — catálogo local (paginado, sin llamadas a Sicar X)
 
 ```http

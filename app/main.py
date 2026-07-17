@@ -1,7 +1,7 @@
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import products, orders, sessions, taxonomy, search
+from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses
 
 logging.basicConfig(
     filename="app.log",
@@ -28,7 +28,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "x-api-key"],
 )
 
@@ -50,6 +50,13 @@ app.include_router(taxonomy.router,
 # Router para busqueda de productos por sku o nombre
 app.include_router(search.router,
                    tags=["Search"])
+
+# Router para registro e inicio de sesión de cuentas de cliente
+app.include_router(auth.router,
+                   tags=["Client Auth"])
+
+# Router para el libro de direcciones guardadas de cada cliente
+app.include_router(addresses.router)
 
 @app.get("/", summary="Health check", tags=["Health"])
 def read_root():

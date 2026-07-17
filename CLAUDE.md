@@ -56,9 +56,10 @@ Since this Postgres holds only a disposable cache of SICAR X's catalog (SICAR X 
 
 ## Configuration
 
-- Settings load via pydantic-settings from a project-root `.env` (`app/core/config.py`, `Settings`). Required vars: `DATABASE_URL`, `X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`.
+- Settings load via pydantic-settings from a project-root `.env` (`app/core/config.py`, `Settings`). Required vars: `DATABASE_URL`, `X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`, `CLIENT_JWT_SECRET` (optional: `CLIENT_JWT_EXPIRE_MINUTES`, defaults to 10080 / 7 days).
 - `DATABASE_URL` must use an async driver (`postgresql+asyncpg://...`) — `app/core/database.py` uses `create_async_engine`.
-- `secret.py` is a standalone one-off script (`secrets.token_urlsafe(60)`) for generating a new `X_API_KEY`; it isn't imported by the app.
+- `secret.py` is a standalone one-off script (`secrets.token_urlsafe(60)`) for generating a new `X_API_KEY`; it isn't imported by the app. `CLIENT_JWT_SECRET` needs the same kind of random value (e.g. `secrets.token_urlsafe(48)`) — it signs client-account JWTs, so it must stay a real secret, never a hardcoded default.
+- **New required var alert**: `CLIENT_JWT_SECRET` was added for the client-accounts feature below. Per the Railway gotchas further down, pydantic-settings fails at import time if it's missing — this must be set on **both** `api` and `worker` on Railway before the next deploy of either, same as every other required var, even though only `api` actually issues/needs it.
 
 ## Architecture
 
@@ -97,6 +98,29 @@ Cancellation (`app/services/cancel_service.py`) mirrors this: resolve the real d
 - The original plain B-tree indexes on `sku`/`name` (`ix_products_sku`/`ix_products_name`) were dropped in migration `6854715fa27b` (~17MB reclaimed) — fully superseded by the trigram GIN indexes above once `/search` existed, and confirmed via codebase search that nothing else does an exact-match query or a real DB-level `ORDER BY` on either column (the model's `Column(...)` no longer sets `index=True` for them either). Found while investigating Railway's Postgres dashboard showing several "0 scans, candidate for removal" indexes — most of those (department_uuid, the trigram ones) are still genuinely used by live code paths despite showing 0 scans (the counters reset when Postgres re-initialized during the crash incidents above and haven't accumulated much history since), so don't assume "0 scans" on that dashboard means unused without checking the code first.
 - `GET /taxonomy` (`routes/taxonomy.py`) returns departments with their nested categories (for building filter UIs) from local `Department`/`Category`/`department_category` tables (`app/models/taxonomy.py`). Categories are many-to-many with departments in SICAR X, not a strict hierarchy. Fetched from SICAR X's `/store/` GraphQL endpoint using an anonymous customer session (`taxonomy_service.fetch_taxonomy_from_sicar`), cached with the same lazy 24h-staleness refresh pattern as `GET /products/{uuid}`.
 
+### Client accounts — a third, distinct auth scheme
+
+`ClientAccount`/`ClientAddress` (`app/models/client.py`, migrations `ad4e748fca2d` + `d8ca048fb64d` for the later `country` column) back `POST /auth/register` and `POST /auth/login` (`routes/auth.py`, `services/client_service.py`) — purely local accounts for the frontend's own login/registration, **unrelated** to either existing SICAR X auth scheme (the admin/B2B token, or `session_service.py`'s per-shopper JWT used for anonymous checkout today). `ClientAccount` has a locally-generated `uuid` (public identifier, separate from the auto-increment `id`), unique `email`, optional `phone`, and `hashed_password` (bcrypt, via `app/core/security.py`'s `hash_password`/`verify_password`). `ClientAddress` is a one-to-many saved address book per account (`client_account_id` FK, `ondelete="CASCADE"`), not yet exposed by any endpoint.
+
+Both `/auth/register` and `/auth/login` return `{token, client}` — `token` is a JWT signed with `CLIENT_JWT_SECRET` (`HS256`, `sub` = the client's `uuid`, `exp` per `CLIENT_JWT_EXPIRE_MINUTES`), created by `create_client_token`. `/auth/register` auto-logs-in (returns a token immediately, same shape as `/auth/login`) rather than requiring a separate login call after signup. Duplicate email → `409`; wrong credentials → `401`; both still require the standard `x-api-key` header like every other route (this is frontend-to-middleware auth, not a replacement for it).
+
+`GET /auth/me` / `PATCH /auth/me` (`routes/auth.py`) are the first routes protected by this token — `app/core/security.py`'s `get_current_client` dependency decodes the `Authorization` JWT (`Bearer` prefix optional, same tolerant parsing as `session_service.py`), rejects expired/invalid tokens or a deactivated/missing account with `401`, and loads the `ClientAccount` for the route to use. `GET` returns the same `ClientPublic` shape as the auth responses — built for a "Mi cuenta" page. `PATCH` (`services/client_service.py`'s `update_client`) supports partial updates to `name`/`phone`; changing `new_password` additionally requires a correct `current_password` in the same request (`401` if it doesn't match) — you cannot change the password on a stolen/stale token alone. Both still require `x-api-key` on top of the client token, same as every route.
+
+### Address book (`/auth/me/addresses`)
+
+`ClientAddress` is exposed as its own sub-resource (`routes/addresses.py`, `services/address_service.py`) rather than folded into `PATCH /auth/me` — a one-to-many collection needs per-item add/edit/remove, which a single-resource PATCH would force into error-prone client-side diffing (send the whole array, backend guesses what changed). All four routes sit under `/auth/me/addresses`, gated by the same `get_current_client` + `x-api-key` pair as `/auth/me`, and every lookup/update/delete scopes by `client_account_id == current client` — an address `uuid` belonging to a different client resolves as a plain `404`, not `403` (doesn't confirm the row exists at all).
+
+- `GET /auth/me/addresses` — list.
+- `POST /auth/me/addresses` — create (`ClientAddressCreate`; `street` required, everything else optional).
+- `PATCH /auth/me/addresses/{uuid}` — partial update (`ClientAddressUpdate`, all fields optional).
+- `DELETE /auth/me/addresses/{uuid}` — `204` on success.
+
+`ClientAddress.uuid` (migration `56c152338087`) is the public identifier for these routes — added for the same reason every other externally-referenced row in this codebase uses a `uuid` instead of the raw auto-increment `id` (`Product.sicar_uuid`, `ClientAccount.uuid`). "At most one default address per client" is enforced at the DB level with a partial unique index (`ix_client_addresses_one_default`, `UNIQUE (client_account_id) WHERE is_default = true`) rather than only in application code — `address_service.py`'s `_clear_existing_default` unsets any prior default in a separate `UPDATE` *before* the insert/update that sets the new one, so the constraint is never transiently violated; the index is declared directly on the `ClientAddress` model (unlike the `pg_trgm` indexes) so autogenerate won't flag it as a false-positive removal on the next migration.
+
+`ClientAccount.addresses` uses `lazy="selectin"` so `ClientPublic` (returned by `/auth/register`, `/auth/login`, `/auth/me`, `PATCH /auth/me`) can nest the full address list without an explicit `selectinload()` at every call site — necessary because SQLAlchemy's async ORM can't do implicit lazy-loading from Pydantic's synchronous serialization step (would raise `MissingGreenlet`).
+
+Deliberately not built yet: no auto-default-on-first-address behavior (the client must explicitly pass `is_default: true`), no email-change flow (changing the login identifier isn't supported by `/auth/me` — would need its own verification flow), and `/orders` still doesn't know about client accounts or their addresses at all — it works anonymously via the existing SICAR session-token flow, unchanged. **Planned: Google login.** When that's added, expect `hashed_password` to become nullable (OAuth-only accounts won't have one) and a `sub`/provider marker to distinguish auth methods — not built now since only email/password exists today, but worth knowing before assuming `hashed_password` is always populated.
+
 ### Endpoints (all verified live end-to-end)
 
 | Endpoint | Token used | Notes |
@@ -108,6 +132,14 @@ Cancellation (`app/services/cancel_service.py`) mirrors this: resolve the real d
 | `POST /session/init` | none (just `x-api-key`) | Bootstraps a new customer session (no `Authorization` header) or refreshes an existing one (with it). Returns the customer JWT the frontend must then send back as `Authorization` on `/orders`. |
 | `POST /orders` | customer (required `Authorization` header) + admin/B2B (internal, for payment) | See flow below. |
 | `POST /cancel` | admin/B2B (internal only — no customer token involved) | See flow below. |
+| `POST /auth/register` | none (just `x-api-key`) | Creates a local client account (name/email/phone/password); returns `{token, client}`, auto-logged-in. `409` on duplicate email. |
+| `POST /auth/login` | none (just `x-api-key`) | Validates email/password against local client accounts; returns `{token, client}`. `401` on bad credentials. |
+| `GET /auth/me` | client account (required `Authorization` header) | Returns the authenticated client's own account info (including saved addresses) — for a "Mi cuenta" page. |
+| `PATCH /auth/me` | client account (required `Authorization` header) | Partial update of `name`/`phone`; `new_password` requires a correct `current_password` in the same call. |
+| `GET /auth/me/addresses` | client account (required `Authorization` header) | List the client's saved addresses. |
+| `POST /auth/me/addresses` | client account (required `Authorization` header) | Add an address; `is_default: true` unsets any prior default. |
+| `PATCH /auth/me/addresses/{uuid}` | client account (required `Authorization` header) | Partial update of one address; `404` if it doesn't belong to the caller. |
+| `DELETE /auth/me/addresses/{uuid}` | client account (required `Authorization` header) | Remove one address; `204` on success, `404` if not owned by the caller. |
 
 ### Auth on this API's own endpoints
 

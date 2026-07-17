@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     SICAR_TOKEN: str
     SICAR_PRICE_LIST_ID: str
     CASH_REGISTER_UUID: str
+    CLIENT_JWT_SECRET: str
+    CLIENT_JWT_EXPIRE_MINUTES: int = 10080  # 7 dias
 
     class Config:
         env_file = ".env"
