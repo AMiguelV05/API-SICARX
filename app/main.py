@@ -1,6 +1,10 @@
 import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from app.core.rate_limit import limiter
 from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses
 
 logging.basicConfig(
@@ -16,6 +20,10 @@ app = FastAPI(
     contact={"name": "Ferretería Charly"},
     version="1.0.0"
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 origins = [
     "http://localhost",

@@ -18,8 +18,12 @@ class ClientAccount(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 
+    # lazy="select" (default) a proposito: no todas las rutas que resuelven un ClientAccount
+    # necesitan las direcciones (p. ej. POST/PATCH/DELETE de una direccion individual). Donde
+    # sí se necesitan (respuestas ClientPublic), se cargan explícitamente con
+    # `await client.awaitable_attrs.addresses` (AsyncAttrs, ver app/core/database.py).
     addresses = relationship(
-        "ClientAddress", back_populates="client_account", cascade="all, delete-orphan", lazy="selectin"
+        "ClientAddress", back_populates="client_account", cascade="all, delete-orphan"
     )
 
 class ClientAddress(Base):

@@ -23,6 +23,9 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     if filters.get("in_stock"):
         stmt = stmt.where(Product.stock > 0)
 
+    if filters.get("tag"):
+        stmt = stmt.where(Product.tags.contains([filters["tag"]]))
+
     # Contar el total de resultados
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)

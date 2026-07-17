@@ -1,7 +1,7 @@
 import httpx
 import asyncio
 import logging
-import asyncio
+from decimal import Decimal
 from logging.handlers import RotatingFileHandler
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,8 +128,15 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             product_values = []
             for p in items:
                 prices_obj = p.get("prices") or {}
-                
 
+                if price_key not in prices_obj:
+                    logger.warning(
+                        f"price_key '{price_key}' no encontrado en prices para producto "
+                        f"{p.get('uuid')}. Precio se guardara como 0.00. Prices disponibles: {list(prices_obj.keys())}"
+                    )
+
+                # Decimal(str(...)) evita heredar el error de representacion binaria de
+                # float al guardar en la columna Numeric.
                 product_values.append({
                     "sicar_uuid": p.get("uuid"),
                     "sku": p.get("sku", ""),
@@ -138,8 +145,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "department_uuid": p.get("departmentUuid"),
                     "category_uuid": p.get("categoryUuid"),
                     "is_bulk": p.get("bulk", False),
-                    "is_active": not p.get("hidden", False), 
-                    "price": prices_obj.get(price_key, 0.0), 
+                    "is_active": not p.get("hidden", False),
+                    "price": Decimal(str(prices_obj.get(price_key, 0.0))),
                     "stock": p.get("stock", 0.0),
                     "is_deleted": False,
                     "deleted_at": None,

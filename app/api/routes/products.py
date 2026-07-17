@@ -24,7 +24,13 @@ async def get_product_details(
     Busca un producto localmente. Si no tiene detalles o pasaron 24 horas,
     hace scraping al servidor central de Sicar para actualizar la base de datos.
     """
-    result = await db.execute(select(Product).filter(Product.sicar_uuid == uuid))
+    result = await db.execute(
+        select(Product).filter(
+            Product.sicar_uuid == uuid,
+            Product.is_deleted == False,
+            Product.is_active == True,
+        )
+    )
     product = result.scalars().first()
 
     if not product:

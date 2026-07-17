@@ -132,7 +132,10 @@ Content-Type: application/json
 }
 ```
 
-Misma respuesta `200` que arriba. `401` si el correo o la contraseña son incorrectos.
+Misma respuesta `200` que arriba. `401` si el correo o la contraseña son incorrectos. El correo
+no distingue mayúsculas/minúsculas (`Juan@x.com` y `juan@x.com` son la misma cuenta), así que no
+hace falta normalizar nada del lado del frontend. `/auth/login` está limitado a 5 intentos por
+minuto por IP — pasado ese límite responde `429` con `{"error": "Rate limit exceeded: ..."}`.
 
 Guarda este `token` — es el que se reenvía como `Authorization` en `GET`/`PATCH /auth/me` abajo.
 **Nota:** todavía no está conectado a `/orders` — los pedidos se siguen creando de forma anónima
@@ -205,7 +208,8 @@ Para cambiar la contraseña, hay que enviar **ambas**: la actual y la nueva, en 
 
 `new_password` requiere mínimo 8 caracteres (`422` si es más corta). `401` si `current_password`
 no coincide con la actual. Responde `200` con el mismo shape que `GET /auth/me`, ya actualizado
-(este endpoint no toca `email` ni `addresses` — usa las rutas de abajo para direcciones).
+(este endpoint no toca `email` ni `addresses` — usa las rutas de abajo para direcciones). Limitado
+a 10 llamadas por minuto por IP (`429` si se excede).
 
 ### `GET/POST/PATCH/DELETE /auth/me/addresses` — libro de direcciones
 
@@ -304,8 +308,12 @@ Respuesta `200`:
 ```
 
 Usa `department_uuid`/`category_uuid` (de `GET /taxonomy`) para filtrar, y `tag` para ofertas u
-otras etiquetas. `in_stock: true` restringe a productos con `stock > 0` (por defecto `false`).
-Pagina con `limit`/`offset`.
+otras etiquetas (coincidencia exacta contra los valores en `Product.tags`, p. ej. `"oferta"` o
+`"pretul"` — no es substring). `in_stock: true` restringe a productos con `stock > 0` (por
+defecto `false`). Pagina con `limit`/`offset`.
+
+`price` siempre viene con 2 decimales exactos (es un `Numeric` en la base de datos, no un
+`float`) — no asumas más precisión que esa al mostrarlo o redondearlo del lado del frontend.
 
 `sort_by` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`.
 Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden garantizado entre
@@ -421,7 +429,9 @@ Content-Type: application/json
 }
 ```
 
-`deliveryType` soportado hoy: `"PICKUP"` (recoger en tienda). `contactInfo.email` es opcional.
+`deliveryType` soportado hoy: `"PICKUP"` (recoger en tienda) — es el único valor aceptado
+(`422` si se envía cualquier otro). `contactInfo.email` es opcional, pero si se envía debe ser
+un correo válido (también `422` si no lo es).
 
 Respuesta `200`:
 ```json

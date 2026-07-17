@@ -1,6 +1,7 @@
 import httpx
 import json
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -101,8 +102,12 @@ async def validate_cart_items(uuids: list, requested_quantities: dict, token: st
 
     return data
 
+def _to_decimal(value) -> Decimal:
+    """Convierte a Decimal via str() para no heredar el error de representación binaria de float."""
+    return Decimal(str(value))
+
 def _format_amount(value) -> str:
-    return f"{float(value):.2f}"
+    return str(_to_decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 def _format_quantity(value) -> str:
     qty = float(value)
@@ -133,7 +138,7 @@ def build_order_payload(
     }
 
     order_lines = []
-    total = 0.0
+    total = Decimal("0")
 
     for product_uuid, quantity in quantities.items():
         sicar_info = products_by_uuid.get(product_uuid) or {}
@@ -145,7 +150,8 @@ def build_order_payload(
             logger.error(f"Sicar no devolvio precio para el producto {product_uuid}.")
             raise HTTPException(status_code=502, detail="No se pudo obtener el precio de uno o más productos.")
 
-        total += float(net_price) * quantity
+        net_price_decimal = _to_decimal(net_price)
+        total += net_price_decimal * _to_decimal(quantity)
         sales_unit_uuid = local_product.sales_unit_uuid if local_product else None
 
         order_lines.append({
@@ -155,9 +161,9 @@ def build_order_payload(
             "description": local_product.name if local_product else "",
             "quantity": _format_quantity(quantity),
             "unit": units_by_uuid.get(sales_unit_uuid, "PZA"),
-            "priceBaseTax": _format_amount(net_price),
-            "priceTax": _format_amount(net_price),
-            "amountTax": _format_amount(net_price),
+            "priceBaseTax": _format_amount(net_price_decimal),
+            "priceTax": _format_amount(net_price_decimal),
+            "amountTax": _format_amount(net_price_decimal),
             "taxesIds": price_list.get("saleTaxes") or [],
         })
 

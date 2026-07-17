@@ -17,7 +17,7 @@ async def list_addresses(
     _: str = Depends(validate_api_key)
 ):
     """Devuelve las direcciones guardadas de la cuenta autenticada."""
-    return client.addresses
+    return await client.awaitable_attrs.addresses
 
 @router.post("", response_model=ClientAddressPublic, status_code=status.HTTP_201_CREATED, summary="Agregar una dirección")
 async def add_address(

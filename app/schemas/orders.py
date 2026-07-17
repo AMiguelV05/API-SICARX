@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, EmailStr, Field
+from typing import List, Literal, Optional
 from app.core.config import settings
 
 class ProductItem(BaseModel):
@@ -9,11 +9,11 @@ class ProductItem(BaseModel):
 class ContactInfo(BaseModel):
     name: str
     phone: str
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
 
 class DeliveryInfo(BaseModel):
     contactInfo: ContactInfo
-    deliveryType: str = Field(..., example="PICKUP")
+    deliveryType: Literal["PICKUP"] = Field(..., description="Unico valor soportado hoy")
 
 # MODELOS PRINCIPALES
 
