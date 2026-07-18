@@ -14,6 +14,7 @@ from app.models.product import Product
 from app.models.taxonomy import Department, Category, department_category
 from app.models.client import ClientAccount, ClientAddress
 from app.models.order import Order
+from app.models.cart import Cart
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

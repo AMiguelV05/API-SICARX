@@ -48,6 +48,16 @@ por el token de sesión de Sicar X del punto 2). Identifica qué cuenta queda du
 que después pueda verlo en `GET /v1/auth/me/orders`. Sin este header, `POST /v1/orders` y
 `POST /v1/orders/{order_id}/cancel` responden `401` antes de siquiera intentar hablar con Sicar X.
 
+### 4. Token de carrito anónimo (`X-Cart-Token`) — solo para `/v1/cart` sin login
+
+Un identificador opaco (no un JWT, no hay que decodificarlo) que este API genera y devuelve la
+primera vez que se guarda un carrito sin que el visitante haya iniciado sesión. Ver la sección
+`/v1/cart` más abajo — **importante:** para el carrito, el mismo token de cuenta de arriba (punto 3)
+se manda de forma distinta según la ruta: `X-Client-Token` en `GET`/`PUT`/`DELETE /v1/cart`, pero
+`Authorization` en `POST /v1/cart/merge` (igual que `/v1/auth/me/addresses` y
+`/v1/auth/me/orders`, que también usan `Authorization`). No es un error tipográfico — revisa la
+cabecera exacta de cada ejemplo con cuidado.
+
 ## Flujo típico de una compra
 
 ```
@@ -64,6 +74,10 @@ cargar el carrito o al primer intento de checkout), no en cada request. Guarda e
 devuelto (en memoria, cookie, o storage del lado cliente) y reenvíalo tal cual en `Authorization`
 al llamar a `/v1/orders`. Guarda también el token de `/v1/auth/login`/`/v1/auth/register` (distinto)
 para reenviarlo en `X-Client-Token`.
+
+`/v1/cart` es independiente de este flujo — es persistencia opcional del carrito (ver referencia
+abajo), no un paso obligatorio antes de `/v1/orders`. `POST /v1/orders` sigue recibiendo el
+carrito directo en el body, no lo lee de `/v1/cart`.
 
 ---
 
@@ -478,6 +492,107 @@ Respuesta `200`:
 Una categoría puede aparecer bajo varios departamentos (relación muchos-a-muchos), no es una
 jerarquía estricta.
 
+### `GET`/`PUT`/`DELETE /v1/cart` — carrito persistente
+
+Carrito guardado del lado del servidor (sobrevive a que se borre el `localStorage`, o a cambiar
+de dispositivo) — **no reemplaza** el carrito en memoria del frontend, es una capa opcional de
+persistencia. Funciona tanto sin login (carrito anónimo) como con login (carrito de cuenta).
+Solo guarda `{uuid, quantity}` por producto — precio, nombre, stock e imagen **siempre** se leen
+en vivo del catálogo local al consultarlo, nunca se guardan como estaban al agregar el producto.
+
+**Sin login** — no mandes `X-Client-Token` ni `Authorization`. La primera vez que hagas
+`PUT /v1/cart`, la respuesta incluye un `cartToken`; guárdalo (localStorage) y reenvíalo en la
+cabecera `X-Cart-Token` en las siguientes llamadas para seguir usando el mismo carrito:
+
+```http
+PUT /v1/cart
+x-api-key: <api-key>
+X-Cart-Token: <token guardado, omitir en la primera llamada>
+Content-Type: application/json
+
+{
+  "items": [
+    { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "quantity": 2 }
+  ]
+}
+```
+
+`PUT` **reemplaza el carrito completo** — no es agregar/quitar un producto, es mandar el estado
+completo deseado cada vez (el frontend ya arma esta lista en memoria de todas formas). Si se manda
+un `X-Cart-Token` que no existe o se omite por completo, se crea un carrito nuevo silenciosamente
+(no es un error) y su token viene en la respuesta.
+
+Respuesta `200` (misma forma para `GET`, `PUT` y `POST /v1/cart/merge`):
+```json
+{
+  "items": [
+    {
+      "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sku": "PR2057",
+      "name": "PORTAROLLO",
+      "imageUrl": null,
+      "price": 8.62,
+      "stock": 2.0,
+      "quantity": 2,
+      "lineTotal": 17.24,
+      "available": true
+    }
+  ],
+  "subtotal": 17.24,
+  "totalQuantity": 2,
+  "cartToken": "5a5c479d-9aeb-49ce-bfcd-3ff285a64188",
+  "updatedAt": "2026-07-18T14:36:17Z"
+}
+```
+
+`subtotal` (no `total` — ese nombre ya significa "cantidad de filas" en `/v1/products`/`/v1/search`
+y en el historial de pedidos) es la suma de `lineTotal` **solo de los productos `available: true`**.
+Un producto puede aparecer con `available: false` (y sin `sku`/`name`/`price`/`stock`/`lineTotal`,
+todos `null`) si ya no existe en el catálogo local o fue desactivado/eliminado — **no desaparece
+de `items`**, muéstralo igual pero indica que ya no está disponible (p. ej. "Ya no disponible,
+quítalo del carrito"); no cuenta en `subtotal` pero sí en `totalQuantity`.
+
+`GET /v1/cart` sin ningún header de identidad (ni `X-Client-Token` ni `X-Cart-Token`) responde un
+carrito vacío (`items: []`) sin crear nada. `DELETE /v1/cart` vacía el carrito resuelto por esos
+mismos headers, responde `204` siempre (incluso si no había nada que borrar).
+
+**Con login** — igual, pero manda `X-Client-Token` en vez de (o junto con) `X-Cart-Token`; si
+`X-Client-Token` está presente y es válido, siempre gana sobre `X-Cart-Token` y el carrito es el
+de la cuenta, no el anónimo. `cartToken` en la respuesta viene `null` en este caso (no hace falta,
+ya tienes `X-Client-Token`).
+
+Errores esperables:
+- `401` — se mandó `X-Client-Token` pero es inválido/expiró (a diferencia de un `X-Cart-Token`
+  desconocido, que nunca es error — ver arriba)
+- `422` — algún `quantity` es `0` o negativo, o algún `uuid` de producto tiene un formato inválido
+  (rechaza toda la petición, no solo esa línea)
+
+### `POST /v1/cart/merge` — fusionar el carrito anónimo a la cuenta
+
+Llama a este endpoint justo después de un login/registro exitoso **si** el frontend ya tenía un
+`cartToken` guardado de antes de iniciar sesión (carrito armado sin cuenta). **Usa `Authorization`**
+para el token de cuenta aquí, no `X-Client-Token` (ver la nota en "Dos capas de autenticación"
+arriba) — igual que `/v1/auth/me/addresses`.
+
+```http
+POST /v1/cart/merge
+x-api-key: <api-key>
+Authorization: <token de /v1/auth/login o /v1/auth/register>
+Content-Type: application/json
+
+{
+  "cartToken": "5a5c479d-9aeb-49ce-bfcd-3ff285a64188"
+}
+```
+
+Si la cuenta no tenía carrito propio todavía, simplemente adopta el anónimo. Si ya tenía uno, las
+cantidades se **suman** por producto en común (2 + 3 = 5, no se reemplaza) y el resto se agrega.
+Responde `200` con el mismo shape de arriba (`cartToken: null`, ya es el carrito de la cuenta).
+Después de fusionar, borra el `cartToken` guardado localmente — ya no sirve, el carrito anónimo
+fue consumido. `404` si `cartToken` no corresponde a un carrito anónimo existente (ya fue
+fusionado antes, o nunca existió) — en ese caso no hay nada que fusionar, solo continúa usando
+`X-Client-Token` normalmente.
+
 ### `POST /v1/orders` — crear pedido
 
 Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, impuestos,
@@ -607,6 +722,35 @@ async function getCatalog(filters: { limit?: number; offset?: number; department
   return res.json(); // { total, docs }
 }
 
+async function saveCart(items: { uuid: string; quantity: number }[], cartToken?: string, clientToken?: string) {
+  const res = await fetch(`${API_URL}/v1/cart`, {
+    method: "PUT",
+    headers: {
+      "x-api-key": API_KEY,
+      "Content-Type": "application/json",
+      ...(clientToken ? { "X-Client-Token": clientToken } : cartToken ? { "X-Cart-Token": cartToken } : {}),
+    },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) throw new Error("No se pudo guardar el carrito");
+  return res.json(); // { items, subtotal, totalQuantity, cartToken, updatedAt }
+}
+
+async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
+  const res = await fetch(`${API_URL}/v1/cart/merge`, {
+    method: "POST",
+    headers: {
+      "x-api-key": API_KEY,
+      Authorization: clientToken, // OJO: Authorization aqui, no X-Client-Token
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ cartToken }),
+  });
+  if (res.status === 404) return null; // ya fusionado o nunca existio, nada que hacer
+  if (!res.ok) throw new Error("No se pudo fusionar el carrito");
+  return res.json();
+}
+
 async function createOrder(sessionToken: string, clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
   const res = await fetch(`${API_URL}/v1/orders`, {
     method: "POST",
@@ -642,3 +786,11 @@ async function createOrder(sessionToken: string, clientToken: string, products: 
 - **Seguimiento post-compra sí existe**: `GET /v1/auth/me/orders` (lista) y
   `GET /v1/auth/me/orders/{orderUuid}` (detalle, con `dispatchStatus`/`dispatchHistory`) — ver
   referencia arriba.
+- **`/v1/cart` no valida disponibilidad en tiempo real** — a diferencia de `/v1/orders`, guardar
+  o leer el carrito no consulta a Sicar X, solo el catálogo local (que se sincroniza cada 5 min).
+  El `409` de "sin disponibilidad suficiente" solo puede pasar hasta el checkout real
+  (`/v1/orders`), no al guardar el carrito.
+- **La cabecera de la cuenta cambia según la ruta del carrito** — `X-Client-Token` en
+  `GET`/`PUT`/`DELETE /v1/cart`, `Authorization` en `POST /v1/cart/merge`. Revisa la sección
+  "Dos capas de autenticación" (punto 4) y los ejemplos de cada endpoint si algo da `401`
+  inesperado.

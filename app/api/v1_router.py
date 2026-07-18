@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses, client_orders
+from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses, client_orders, cart
 
 # Agrupa toda la API bajo /v1. Cada sub-router ya declara su propio tags=/dependencies=
 # en su archivo -- no se repiten aqui para evitar que las listas de tags se dupliquen
@@ -14,3 +14,4 @@ v1_router.include_router(search.router)
 v1_router.include_router(auth.router)
 v1_router.include_router(addresses.router)
 v1_router.include_router(client_orders.router)
+v1_router.include_router(cart.router)

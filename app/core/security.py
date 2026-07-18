@@ -119,5 +119,20 @@ async def get_current_client_header(
 
     return await _resolve_client_from_token(x_client_token, db)
 
+async def get_optional_client_header(
+    x_client_token: str = Header(None, alias="X-Client-Token", description="Token JWT de la cuenta de cliente (opcional)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Como `get_current_client_header`, pero devuelve `None` si la cabecera esta ausente (para
+    rutas donde el cliente puede ser anonimo, p. ej. el carrito) en vez de 401. Si la cabecera
+    SI viene pero es invalida/expirada, sigue respondiendo 401 - no se baja silenciosamente a
+    anonimo, el cliente afirmo explicitamente estar logueado.
+    """
+    if not x_client_token:
+        return None
+    return await _resolve_client_from_token(x_client_token, db)
+
 CurrentClientDep = Annotated[ClientAccount, Depends(get_current_client)]
 CurrentClientHeaderDep = Annotated[ClientAccount, Depends(get_current_client_header)]
+OptionalClientHeaderDep = Annotated[ClientAccount | None, Depends(get_optional_client_header)]
