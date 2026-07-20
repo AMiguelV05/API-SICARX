@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     CASH_REGISTER_UUID: str
     CLIENT_JWT_SECRET: str
     CLIENT_JWT_EXPIRE_MINUTES: int = 10080  # 7 dias
+    ENVIRONMENT: str = "production"  # "development" habilita cookies validas sobre HTTP local
 
     class Config:
         env_file = ".env"

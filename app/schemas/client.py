@@ -1,16 +1,19 @@
 from typing import List, Optional
 from pydantic import EmailStr, Field
 from app.schemas.base import CamelModel
+from app.schemas.cart import CartResponse
 
 class ClientRegister(CamelModel):
     name: str = Field(min_length=1, description="Nombre completo del cliente")
     email: EmailStr
     phone: Optional[str] = None
     password: str = Field(min_length=8, description="Contraseña en texto plano, mínimo 8 caracteres")
+    cart_token: Optional[str] = Field(default=None, description="cartToken de un carrito anonimo a fusionar, si existe")
 
 class ClientLogin(CamelModel):
     email: EmailStr
     password: str = Field(min_length=1)
+    cart_token: Optional[str] = Field(default=None, description="cartToken de un carrito anonimo a fusionar, si existe")
 
 class ClientAddressBase(CamelModel):
     label: Optional[str] = None
@@ -54,6 +57,7 @@ class ClientPublic(CamelModel):
 class ClientAuthResponse(CamelModel):
     token: str
     client: ClientPublic
+    cart: CartResponse
 
 class ClientUpdate(CamelModel):
     name: Optional[str] = Field(default=None, min_length=1, description="Nuevo nombre, si se quiere cambiar")

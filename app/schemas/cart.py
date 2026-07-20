@@ -21,6 +21,17 @@ class CartReplace(CamelModel):
 class CartMergeRequest(CamelModel):
     cartToken: str
 
+class CartItemDelta(CamelModel):
+    productUuid: str
+    delta: float
+
+    @field_validator("productUuid")
+    @classmethod
+    def validate_product_uuid(cls, v):
+        if not is_safe_sicar_id(v):
+            raise ValueError(f"UUID de producto invalido: {v}")
+        return v
+
 class CartItemPublic(CamelModel):
     productUuid: str
     sku: Optional[str] = None
