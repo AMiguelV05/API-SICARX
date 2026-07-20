@@ -48,15 +48,32 @@ por el token de sesión de Sicar X del punto 2). Identifica qué cuenta queda du
 que después pueda verlo en `GET /v1/auth/me/orders`. Sin este header, `POST /v1/orders` y
 `POST /v1/orders/{order_id}/cancel` responden `401` antes de siquiera intentar hablar con Sicar X.
 
-### 4. Token de carrito anónimo (`X-Cart-Token`) — solo para `/v1/cart` sin login
+### 4. Cookie del carrito anónimo (`charly_cart_token`) — automática, sin gestionarla a mano
 
-Un identificador opaco (no un JWT, no hay que decodificarlo) que este API genera y devuelve la
-primera vez que se guarda un carrito sin que el visitante haya iniciado sesión. Ver la sección
-`/v1/cart` más abajo — **importante:** para el carrito, el mismo token de cuenta de arriba (punto 3)
-se manda de forma distinta según la ruta: `X-Client-Token` en `GET`/`PUT`/`DELETE /v1/cart`, pero
-`Authorization` en `POST /v1/cart/merge` (igual que `/v1/auth/me/addresses` y
-`/v1/auth/me/orders`, que también usan `Authorization`). No es un error tipográfico — revisa la
-cabecera exacta de cada ejemplo con cuidado.
+El carrito anónimo (sin login) ya **no** se identifica con un header manual — el backend emite una
+cookie `httpOnly` (`charly_cart_token`, alcance `/v1/cart`) la primera vez que se escribe un
+carrito sin sesión, y el navegador la reenvía solo en las siguientes llamadas a `/v1/cart*`. El
+frontend **no puede ni necesita leer su valor** (es `httpOnly`, invisible a JavaScript) y ya no hay
+que guardar nada en `localStorage` para esto.
+
+Requisito indispensable: como el frontend (`ferreteriacharly.com`) y esta API
+(`api-production-cf7a.up.railway.app`) están en dominios distintos, es una cookie *cross-site* —
+toda llamada `fetch`/`axios` a `/v1/cart*` debe mandar `credentials: "include"` (u
+`withCredentials: true` en axios) o el navegador nunca la envía ni la guarda, y cada llamada se ve
+como un visitante anónimo nuevo. Ver la sección `/v1/cart` más abajo.
+
+Para el carrito, el mismo token de cuenta del punto 3 sigue mandándose de forma distinta según la
+ruta: `X-Client-Token` en `GET`/`PUT`/`DELETE`/`PATCH /v1/cart*`, pero `Authorization` en
+`POST /v1/cart/merge` (igual que `/v1/auth/me/addresses` y `/v1/auth/me/orders`, que también usan
+`Authorization`). No es un error tipográfico — revisa la cabecera exacta de cada ejemplo con
+cuidado.
+
+Nota aparte: `GET`/`PUT`/`PATCH /v1/cart*` siguen devolviendo `cartToken` en el cuerpo de la
+respuesta cuando el carrito es anónimo (igual que antes) — pero ahora **solo sirve** para mandarlo
+como `cartToken` en el body de `POST /v1/auth/register`/`POST /v1/auth/login` (ver más abajo) o de
+`POST /v1/cart/merge`, ya que la cookie `httpOnly` tiene alcance `/v1/cart` y por diseño **no** se
+envía a `/v1/auth/*`. Guárdalo en memoria (variable/estado, no hace falta `localStorage`) justo
+después de armar el carrito sin sesión, por si el visitante inicia sesión o se registra después.
 
 ## Flujo típico de una compra
 
@@ -131,11 +148,16 @@ Content-Type: application/json
   "name": "Juan Pérez",
   "email": "juan@example.com",
   "phone": "3151234567",
-  "password": "unaContraseñaSegura"
+  "password": "unaContraseñaSegura",
+  "cartToken": "5a5c479d-9aeb-49ce-bfcd-3ff285a64188"
 }
 ```
 
-`password` requiere mínimo 8 caracteres (`422` si es más corta). Responde `200` con el mismo shape
+`password` requiere mínimo 8 caracteres (`422` si es más corta). `cartToken` es **opcional** — si
+el visitante ya tenía un carrito anónimo armado antes de registrarse (ver la cookie del carrito más
+arriba), mándalo aquí y se fusiona a la cuenta nueva en la misma llamada, sin un segundo request a
+`POST /v1/cart/merge`. Un `cartToken` ausente, vencido o que ya no corresponde a ningún carrito
+**no** hace fallar el registro — simplemente se ignora. Responde `200` con el mismo shape
 que `/v1/auth/login` — el registro inicia sesión automáticamente, no hace falta llamar a
 `/v1/auth/login` después:
 
@@ -147,11 +169,22 @@ que `/v1/auth/login` — el registro inicia sesión automáticamente, no hace fa
     "name": "Juan Pérez",
     "email": "juan@example.com",
     "phone": "3151234567"
+  },
+  "cart": {
+    "items": [ { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO", "imageUrl": null, "price": 8.62, "stock": 2.0, "quantity": 2, "lineTotal": 17.24, "available": true } ],
+    "subtotal": 17.24,
+    "totalQuantity": 2,
+    "cartToken": null,
+    "updatedAt": "2026-07-18T14:36:17Z"
   }
 }
 ```
 
-`409` si el correo ya está registrado.
+`cart` viene **siempre**, se haya mandado `cartToken` o no — es el carrito real de la cuenta ya
+fusionado (o vacío si la cuenta no tenía ninguno y no se mandó `cartToken`). Úsalo para hidratar el
+estado del carrito en el frontend inmediatamente después de registrarse, sin un `GET /v1/cart`
+aparte. `cartToken` dentro de `cart` siempre viene `null` aquí — ya es el carrito de la cuenta, no
+uno anónimo. `409` si el correo ya está registrado.
 
 ```http
 POST /v1/auth/login
@@ -160,16 +193,19 @@ Content-Type: application/json
 
 {
   "email": "juan@example.com",
-  "password": "unaContraseñaSegura"
+  "password": "unaContraseñaSegura",
+  "cartToken": "5a5c479d-9aeb-49ce-bfcd-3ff285a64188"
 }
 ```
 
-Misma respuesta `200` que arriba. `401` si el correo o la contraseña son incorrectos. El correo
-no distingue mayúsculas/minúsculas (`Juan@x.com` y `juan@x.com` son la misma cuenta), así que no
-hace falta normalizar nada del lado del frontend. `/v1/auth/login` está limitado a 5 intentos por
-minuto por IP — pasado ese límite responde `429` con `{"error": "Rate limit exceeded: ..."}`.
+Misma respuesta `200` que arriba (incluyendo `cart`), mismo comportamiento de `cartToken`
+(opcional, tolerante a token ausente/inválido, fusiona en la misma llamada si es válido). `401` si
+el correo o la contraseña son incorrectos. El correo no distingue mayúsculas/minúsculas
+(`Juan@x.com` y `juan@x.com` son la misma cuenta), así que no hace falta normalizar nada del lado
+del frontend. `/v1/auth/login` está limitado a 5 intentos por minuto por IP — pasado ese límite
+responde `429` con `{"error": "Rate limit exceeded: ..."}`.
 
-Guarda este `token` — se reenvía en dos lugares distintos: como `Authorization` en
+Guarda el `token` de la respuesta — se reenvía en dos lugares distintos: como `Authorization` en
 `GET`/`PATCH /v1/auth/me` (y las rutas de direcciones/historial de pedidos abajo), y como
 `X-Client-Token` en `POST /v1/orders`/`POST /v1/orders/{order_id}/cancel` (ver "Dos capas de
 autenticación" arriba — ahí sí importa la cabecera exacta, `Authorization` está ocupada por el
@@ -492,22 +528,24 @@ Respuesta `200`:
 Una categoría puede aparecer bajo varios departamentos (relación muchos-a-muchos), no es una
 jerarquía estricta.
 
-### `GET`/`PUT`/`DELETE /v1/cart` — carrito persistente
+### `GET`/`PUT`/`PATCH`/`DELETE /v1/cart*` — carrito persistente
 
-Carrito guardado del lado del servidor (sobrevive a que se borre el `localStorage`, o a cambiar
-de dispositivo) — **no reemplaza** el carrito en memoria del frontend, es una capa opcional de
-persistencia. Funciona tanto sin login (carrito anónimo) como con login (carrito de cuenta).
-Solo guarda `{uuid, quantity}` por producto — precio, nombre, stock e imagen **siempre** se leen
-en vivo del catálogo local al consultarlo, nunca se guardan como estaban al agregar el producto.
+Carrito guardado del lado del servidor (sobrevive a cerrar el navegador, o a cambiar de
+dispositivo si hay login) — **no reemplaza** el carrito en memoria del frontend, es una capa
+opcional de persistencia. Funciona tanto sin login (carrito anónimo) como con login (carrito de
+cuenta). Solo guarda `{uuid, quantity}` por producto — precio, nombre, stock e imagen **siempre**
+se leen en vivo del catálogo local al consultarlo, nunca se guardan como estaban al agregar el
+producto.
 
-**Sin login** — no mandes `X-Client-Token` ni `Authorization`. La primera vez que hagas
-`PUT /v1/cart`, la respuesta incluye un `cartToken`; guárdalo (localStorage) y reenvíalo en la
-cabecera `X-Cart-Token` en las siguientes llamadas para seguir usando el mismo carrito:
+**Sin login** — no mandes `X-Client-Token` ni `Authorization`, y **siempre** manda
+`credentials: "include"` (o `withCredentials: true`) en el `fetch`/`axios` — es lo único que hace
+falta para que la identidad anónima funcione, la cookie `charly_cart_token` la maneja el navegador
+solo (ver el punto 4 de "Dos capas de autenticación" arriba). No hay ningún header que armar a mano
+para esto:
 
 ```http
 PUT /v1/cart
 x-api-key: <api-key>
-X-Cart-Token: <token guardado, omitir en la primera llamada>
 Content-Type: application/json
 
 {
@@ -518,11 +556,12 @@ Content-Type: application/json
 ```
 
 `PUT` **reemplaza el carrito completo** — no es agregar/quitar un producto, es mandar el estado
-completo deseado cada vez (el frontend ya arma esta lista en memoria de todas formas). Si se manda
-un `X-Cart-Token` que no existe o se omite por completo, se crea un carrito nuevo silenciosamente
-(no es un error) y su token viene en la respuesta.
+completo deseado cada vez (el frontend ya arma esta lista en memoria de todas formas). Si no hay
+carrito anónimo resuelto todavía (primera visita, o cookie no reconocida/vencida), se crea uno
+nuevo silenciosamente (no es un error) y el navegador guarda la cookie nueva automáticamente a
+partir de la respuesta — no hay nada que leer o guardar del lado del frontend para esto.
 
-Respuesta `200` (misma forma para `GET`, `PUT` y `POST /v1/cart/merge`):
+Respuesta `200` (misma forma para `GET`, `PUT`, `PATCH /v1/cart/items` y `POST /v1/cart/merge`):
 ```json
 {
   "items": [
@@ -550,29 +589,60 @@ y en el historial de pedidos) es la suma de `lineTotal` **solo de los productos 
 Un producto puede aparecer con `available: false` (y sin `sku`/`name`/`price`/`stock`/`lineTotal`,
 todos `null`) si ya no existe en el catálogo local o fue desactivado/eliminado — **no desaparece
 de `items`**, muéstralo igual pero indica que ya no está disponible (p. ej. "Ya no disponible,
-quítalo del carrito"); no cuenta en `subtotal` pero sí en `totalQuantity`.
+quítalo del carrito"); no cuenta en `subtotal` pero sí en `totalQuantity`. `cartToken` sigue
+viniendo en el body (no `null`) cuando el carrito es anónimo — guárdalo solo en memoria, es lo que
+se manda como `cartToken` al registrarse/iniciar sesión o a `POST /v1/cart/merge` (ver arriba y
+abajo); ya no hace falta reenviarlo en ningún header.
 
-`GET /v1/cart` sin ningún header de identidad (ni `X-Client-Token` ni `X-Cart-Token`) responde un
-carrito vacío (`items: []`) sin crear nada. `DELETE /v1/cart` vacía el carrito resuelto por esos
-mismos headers, responde `204` siempre (incluso si no había nada que borrar).
+`GET /v1/cart` sin login y sin cookie reconocida responde un carrito vacío (`items: []`) sin crear
+nada. `DELETE /v1/cart` vacía el carrito resuelto y limpia la cookie del carrito anónimo si
+aplicaba, responde `204` siempre (incluso si no había nada que borrar).
 
-**Con login** — igual, pero manda `X-Client-Token` en vez de (o junto con) `X-Cart-Token`; si
-`X-Client-Token` está presente y es válido, siempre gana sobre `X-Cart-Token` y el carrito es el
-de la cuenta, no el anónimo. `cartToken` en la respuesta viene `null` en este caso (no hace falta,
-ya tienes `X-Client-Token`).
+**Con login** — igual, pero manda `X-Client-Token`; si está presente y es válido, siempre gana
+sobre la cookie del carrito anónimo (si hubiera una) y el carrito es el de la cuenta, no el
+anónimo. `cartToken` en la respuesta viene `null` en este caso (no hace falta, ya tienes
+`X-Client-Token`).
 
 Errores esperables:
-- `401` — se mandó `X-Client-Token` pero es inválido/expiró (a diferencia de un `X-Cart-Token`
-  desconocido, que nunca es error — ver arriba)
-- `422` — algún `quantity` es `0` o negativo, o algún `uuid` de producto tiene un formato inválido
-  (rechaza toda la petición, no solo esa línea)
+- `401` — se mandó `X-Client-Token` pero es inválido/expiró (a diferencia de una cookie de
+  carrito anónimo no reconocida, que nunca es error — ver arriba)
+- `422` — algún `quantity`/`delta` tiene un formato inválido, o algún `uuid` de producto no es
+  válido (en `PUT`, rechaza toda la petición, no solo esa línea)
+
+### `PATCH /v1/cart/items` — incrementar o decrementar un solo producto
+
+Pensado para un botón "agregar al carrito" o un stepper +/- sin tener que mandar el carrito
+completo cada vez (a diferencia de `PUT`, que sí lo requiere). Misma identidad/cookie que
+`GET`/`PUT`/`DELETE` de arriba.
+
+```http
+PATCH /v1/cart/items
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+  "delta": 1
+}
+```
+
+`delta` es la cantidad a sumar (positivo, para agregar/incrementar) o restar (negativo, para
+decrementar) — no la cantidad final. Si el producto no estaba en el carrito y `delta` es positivo,
+se agrega como línea nueva con esa cantidad. Si la cantidad resultante queda en `0` o menos, la
+línea se **elimina** del carrito (no se queda en `0`, desaparece). Si se manda un `delta` negativo
+o cero para un producto que no está en el carrito, no pasa nada (`200` con el carrito sin cambios,
+no es un error). Responde el mismo shape que `GET`/`PUT /v1/cart` arriba. Igual que `PUT`, si no
+había carrito anónimo resuelto y `delta` es positivo, crea uno nuevo silenciosamente.
 
 ### `POST /v1/cart/merge` — fusionar el carrito anónimo a la cuenta
 
-Llama a este endpoint justo después de un login/registro exitoso **si** el frontend ya tenía un
-`cartToken` guardado de antes de iniciar sesión (carrito armado sin cuenta). **Usa `Authorization`**
-para el token de cuenta aquí, no `X-Client-Token` (ver la nota en "Dos capas de autenticación"
-arriba) — igual que `/v1/auth/me/addresses`.
+**Ya casi nunca hace falta llamarlo aparte** — mandar `cartToken` directo en el body de
+`POST /v1/auth/login`/`POST /v1/auth/register` (ver esas secciones arriba) hace la misma fusión en
+la misma llamada. Este endpoint sigue existiendo para el caso en que el usuario **ya está
+logueado** (en otra pestaña, u otro dispositivo) y arma un carrito anónimo nuevo — ahí sí hace
+falta un request aparte para fusionarlo, ya que el login no vuelve a ocurrir. **Usa
+`Authorization`** para el token de cuenta aquí, no `X-Client-Token` (ver la nota en "Dos capas de
+autenticación" arriba) — igual que `/v1/auth/me/addresses`.
 
 ```http
 POST /v1/cart/merge
@@ -587,11 +657,13 @@ Content-Type: application/json
 
 Si la cuenta no tenía carrito propio todavía, simplemente adopta el anónimo. Si ya tenía uno, las
 cantidades se **suman** por producto en común (2 + 3 = 5, no se reemplaza) y el resto se agrega.
-Responde `200` con el mismo shape de arriba (`cartToken: null`, ya es el carrito de la cuenta).
-Después de fusionar, borra el `cartToken` guardado localmente — ya no sirve, el carrito anónimo
-fue consumido. `404` si `cartToken` no corresponde a un carrito anónimo existente (ya fue
-fusionado antes, o nunca existió) — en ese caso no hay nada que fusionar, solo continúa usando
-`X-Client-Token` normalmente.
+Responde `200` con el mismo shape de arriba (`cartToken: null`, ya es el carrito de la cuenta) y,
+al fusionar con éxito, el backend limpia la cookie del carrito anónimo por su cuenta — no hay que
+borrar nada del lado del frontend. `404` si `cartToken` no corresponde a un carrito anónimo
+existente (ya fue fusionado antes, o nunca existió) — a diferencia de mandar `cartToken` en
+`/v1/auth/login`/`/v1/auth/register` (que ignora un token inválido sin error), aquí sí es un
+`404` explícito porque es una acción deliberada del usuario ya logueado, no un intento tolerante
+como el de login.
 
 ### `POST /v1/orders` — crear pedido
 
@@ -722,13 +794,17 @@ async function getCatalog(filters: { limit?: number; offset?: number; department
   return res.json(); // { total, docs }
 }
 
-async function saveCart(items: { uuid: string; quantity: number }[], cartToken?: string, clientToken?: string) {
+// credentials: "include" es obligatorio en TODA llamada a /v1/cart* -- sin esto el navegador
+// nunca manda ni guarda la cookie httpOnly del carrito anonimo (cross-site, ver la seccion
+// "Dos capas de autenticacion", punto 4).
+async function saveCart(items: { uuid: string; quantity: number }[], clientToken?: string) {
   const res = await fetch(`${API_URL}/v1/cart`, {
     method: "PUT",
+    credentials: "include",
     headers: {
       "x-api-key": API_KEY,
       "Content-Type": "application/json",
-      ...(clientToken ? { "X-Client-Token": clientToken } : cartToken ? { "X-Cart-Token": cartToken } : {}),
+      ...(clientToken ? { "X-Client-Token": clientToken } : {}),
     },
     body: JSON.stringify({ items }),
   });
@@ -736,6 +812,40 @@ async function saveCart(items: { uuid: string; quantity: number }[], cartToken?:
   return res.json(); // { items, subtotal, totalQuantity, cartToken, updatedAt }
 }
 
+// delta positivo agrega/incrementa, negativo decrementa (<=0 resultante elimina la linea).
+async function adjustCartItem(productUuid: string, delta: number, clientToken?: string) {
+  const res = await fetch(`${API_URL}/v1/cart/items`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: {
+      "x-api-key": API_KEY,
+      "Content-Type": "application/json",
+      ...(clientToken ? { "X-Client-Token": clientToken } : {}),
+    },
+    body: JSON.stringify({ productUuid, delta }),
+  });
+  if (!res.ok) throw new Error("No se pudo actualizar el carrito");
+  return res.json(); // { items, subtotal, totalQuantity, cartToken, updatedAt }
+}
+
+// cartToken (opcional) es el de un carrito anonimo armado antes de iniciar sesion -- guardado en
+// memoria desde una respuesta previa de /v1/cart (ver el punto 4 de "Dos capas de autenticacion").
+// La fusion ocurre en esta misma llamada; la respuesta ya trae `cart` listo para pintar la UI.
+async function login(email: string, password: string, cartToken?: string) {
+  const res = await fetch(`${API_URL}/v1/auth/login`, {
+    method: "POST",
+    headers: { "x-api-key": API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, ...(cartToken ? { cartToken } : {}) }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail ?? "No se pudo iniciar sesión");
+  }
+  return res.json(); // { token, client, cart }
+}
+
+// Solo hace falta si el usuario YA esta logueado (otra pestana/dispositivo) y arma un carrito
+// anonimo nuevo -- login/registro ya fusionan automaticamente, ver login() arriba.
 async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
   const res = await fetch(`${API_URL}/v1/cart/merge`, {
     method: "POST",
@@ -786,11 +896,20 @@ async function createOrder(sessionToken: string, clientToken: string, products: 
 - **Seguimiento post-compra sí existe**: `GET /v1/auth/me/orders` (lista) y
   `GET /v1/auth/me/orders/{orderUuid}` (detalle, con `dispatchStatus`/`dispatchHistory`) — ver
   referencia arriba.
-- **`/v1/cart` no valida disponibilidad en tiempo real** — a diferencia de `/v1/orders`, guardar
+- **`/v1/cart*` no valida disponibilidad en tiempo real** — a diferencia de `/v1/orders`, guardar
   o leer el carrito no consulta a Sicar X, solo el catálogo local (que se sincroniza cada 5 min).
   El `409` de "sin disponibilidad suficiente" solo puede pasar hasta el checkout real
   (`/v1/orders`), no al guardar el carrito.
 - **La cabecera de la cuenta cambia según la ruta del carrito** — `X-Client-Token` en
-  `GET`/`PUT`/`DELETE /v1/cart`, `Authorization` en `POST /v1/cart/merge`. Revisa la sección
-  "Dos capas de autenticación" (punto 4) y los ejemplos de cada endpoint si algo da `401`
+  `GET`/`PUT`/`PATCH`/`DELETE /v1/cart*`, `Authorization` en `POST /v1/cart/merge`. Revisa la
+  sección "Dos capas de autenticación" (punto 4) y los ejemplos de cada endpoint si algo da `401`
   inesperado.
+- **`credentials: "include"` es obligatorio en toda llamada a `/v1/cart*`** — sin esto, el carrito
+  anónimo (cookie `httpOnly` `charly_cart_token`, cross-site entre `ferreteriacharly.com` y
+  `api-production-cf7a.up.railway.app`) nunca se guarda ni se reenvía, y cada visita se ve como un
+  carrito nuevo vacío. No aplica a `/v1/auth/*` ni al resto de la API — es específico de `/v1/cart*`.
+- **Ya no existe `X-Cart-Token` ni almacenamiento manual del carrito anónimo** — si el frontend
+  todavía tiene un `lib/cartToken.ts` o similar guardando ese header en `localStorage`, puede
+  eliminarse: la identidad anónima ahora es 100% automática vía cookie (ver el punto 4 de "Dos
+  capas de autenticación"). Solo sigue haciendo falta guardar `cartToken` **en memoria** (no
+  persistente) para pasarlo como `cartToken` en `/v1/auth/login`/`/v1/auth/register`.
