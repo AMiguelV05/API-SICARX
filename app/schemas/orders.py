@@ -41,14 +41,43 @@ class OrderResponse(CamelModel):
     id: str = Field(description="ID de la orden en Sicar")
     serieFolio: str = Field(description="Folio del documento creado en Sicar")
     date: float = Field(description="Fecha y hora de la orden en Sicar")
-    status: str = Field(description="Estado de la orden en Sicar")
-    orderUuid: str = Field(description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid}")
+    status: str = Field(description="Estado de la orden en Sicar justo despues de crearla (antes de cobrar, tipicamente TO_PAY)")
+    orderUuid: str = Field(description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid} y con POST /orders/{id}/pay")
+    preferenceId: Optional[str] = Field(default=None, description="ID de preferencia de Mercado Pago para initialization.preferenceId del Payment Brick (null si Mercado Pago no respondio)")
+    amount: float = Field(description="Total autoritativo de la orden - usar en initialization.amount del Payment Brick")
 
 class OrderCancelResponse(CamelModel):
     documentUuid: str = Field(description="UUID del documento cancelado")
     sicarTimestamp: float = Field(description="Timestamp de cancelación en Sicar")
     message: str = Field(description="Mensaje de confirmación de cancelación")
     status: str = Field(description="Estado de la orden después de la cancelación")
+
+# PAGO CON MERCADO PAGO (POST /orders/{id}/pay)
+
+class PayerIdentification(CamelModel):
+    type: Optional[str] = None
+    number: Optional[str] = None
+
+class PaymentPayer(CamelModel):
+    email: Optional[EmailStr] = None
+    identification: Optional[PayerIdentification] = None
+
+class PaymentSubmit(CamelModel):
+    """Shape del `formData` que entrega el `onSubmit` del Payment Brick (ver
+    payments_submissions/cards.md y other-payment-methods.md) - se reenvia tal cual."""
+    token: Optional[str] = Field(default=None, description="Token de tarjeta generado por el Brick (ausente en OXXO/otros metodos sin tarjeta)")
+    paymentMethodId: str = Field(description="p. ej. visa, oxxo, etc.")
+    issuerId: Optional[str] = None
+    installments: Optional[int] = Field(default=1)
+    payer: PaymentPayer
+
+class OrderPayResponse(CamelModel):
+    orderUuid: str = Field(description="UUID local de la orden")
+    status: str = Field(description="Estado local de la orden despues del intento de cobro: TO_PAY, PAID o CANCELLED")
+    mpPaymentId: Optional[str] = Field(default=None, description="ID del pago en Mercado Pago")
+    mpStatus: Optional[str] = Field(default=None, description="Estado crudo de Mercado Pago: approved/pending/in_process/rejected/cancelled")
+    mpStatusDetail: Optional[str] = Field(default=None, description="Detalle del estado, p. ej. motivo de rechazo")
+    ticketUrl: Optional[str] = Field(default=None, description="Liga a la ficha/barcode de pago (OXXO y similares) si aplica")
 
 # HISTORIAL DE ORDENES DEL CLIENTE (GET /auth/me/orders)
 

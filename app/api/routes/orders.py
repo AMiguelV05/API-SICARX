@@ -5,11 +5,12 @@ from sqlalchemy import select
 from app.core.database import DbDep
 from app.core.security import validate_api_key, CurrentClientHeaderDep
 from app.models.product import Product
-from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar, pay_order_in_sicar
+from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar
 from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
-from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id
-from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse
+from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment
+from app.services import payment_service
+from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -29,12 +30,18 @@ async def create_order(
 
     Requiere DOS tokens distintos, ninguno reemplaza al otro:
     - `Authorization`: JWT de sesión del cliente web en Sicar X (obtenido de
-      `POST /session/init`) — se usa para validar el carrito y crear la orden en Sicar X;
-      el pago se aplica internamente con el token admin/B2B, nunca con el del cliente.
+      `POST /session/init`) — se usa para validar el carrito y crear la orden en Sicar X.
     - `X-Client-Token`: JWT de la cuenta de cliente local (obtenido de `POST /auth/login`
       o `/auth/register`) — identifica qué `ClientAccount` queda dueña de la orden para
       que después pueda verla en `GET /auth/me/orders`. Login ahora es obligatorio para
       comprar; ya no existe checkout anónimo.
+
+    Esta llamada SOLO reserva el pedido en Sicar X (queda en `TO_PAY`) y prepara el cobro
+    con Mercado Pago — todavía no cobra nada. Devuelve `preferenceId`/`amount` para que
+    el frontend renderice el Payment Brick, y `orderUuid`/`id` para el siguiente paso:
+    `POST /orders/{id}/pay` con el `formData` del `onSubmit` del Brick (tarjeta/OXXO). Si
+    el comprador paga con Mercado Pago Wallet, esa vía nunca llama a este backend — el
+    webhook (`POST /payments/webhook`) es quien confirma el pago en ese caso.
     """
     if not authorization:
         logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
@@ -90,31 +97,29 @@ async def create_order(
             branch_id=branch_id,
             products_data=order_payload_dict["ecOrderDto"]["products"]
         )
-        order_id = sicar_response.get("id")
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
-
-        payment_response = await pay_order_in_sicar(
-            order_id=order_id,
-            total_amount=total_amount,
-            cash_register_uuid=settings.CASH_REGISTER_UUID,
-            branch_id=branch_id
-        )
 
         local_order = await create_local_order(
             db=db,
             client_account_id=client.id,
             order_payload_dict=order_payload_dict,
-            payment_response=payment_response,
+            sicar_response=sicar_response,
         )
 
-        logger.info(f"Orden creada y pagada exitosamente en la sucursal {branch_id} para cliente {client.email}.")
+        # No fatal: la orden sigue soportando tarjeta/OXXO sin la opcion de wallet si
+        # Mercado Pago no responde aqui - ver payment_service.create_preference.
+        preference = await payment_service.create_preference(local_order)
+
+        logger.info(f"Orden {local_order.uuid} reservada (TO_PAY) en la sucursal {branch_id} para cliente {client.email}.")
 
         return OrderResponse(
-            id=payment_response.get("id"),
-            serieFolio=payment_response.get("serieFolio"),
-            date=payment_response.get("date"),
-            status=payment_response.get("status"),
+            id=sicar_response.get("id"),
+            serieFolio=sicar_response.get("serieFolio"),
+            date=sicar_response.get("date"),
+            status=sicar_response.get("status") or "TO_PAY",
             orderUuid=local_order.uuid,
+            preferenceId=(preference or {}).get("id"),
+            amount=total_amount,
         )
 
     except HTTPException:
@@ -124,6 +129,54 @@ async def create_order(
         await db.rollback()
         logger.error(f"Error inesperado al crear la orden: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al procesar la orden. Intenta más tarde.")
+
+
+@router.post("/{order_id}/pay", response_model=OrderPayResponse, summary="Cobrar pedido con Mercado Pago")
+async def pay_order(
+    order_id: str,
+    client: CurrentClientHeaderDep,
+    db: DbDep,
+    submit: PaymentSubmit = Body(),
+):
+    """
+    Cobra, via Mercado Pago, el pedido creado por `POST /orders` (`order_id` es el `id`
+    devuelto por esa llamada). Recibe el `formData` tal cual lo entrega el `onSubmit` del
+    Payment Brick (tarjeta u OXXO/otros metodos con submit sincrono — el metodo Wallet no
+    llama a esta ruta, ver `POST /orders`). Requiere `X-Client-Token`; la orden debe
+    pertenecer a la cuenta autenticada (404 si no, mismo patron que `/cancel`).
+
+    El monto cobrado SIEMPRE es el `total` ya guardado en la orden — nunca un valor
+    enviado en el body — para no confiar en un precio que pueda venir manipulado desde
+    el cliente. Segun el resultado del cobro, la orden pasa a `PAID` (aprobado,
+    aplicando tambien el pago interno en Sicar X), sigue en `TO_PAY` (pendiente - OXXO,
+    tarjeta en revision) o pasa a `CANCELLED` (rechazado - libera el stock reservado).
+    """
+    local_order = await get_owned_order_by_sicar_id(db, client.id, order_id)
+
+    if local_order.status != "TO_PAY":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue pagada o cancelada.")
+
+    try:
+        mp_payment = await payment_service.create_payment(local_order, submit.model_dump())
+        local_order = await finalize_order_payment(db, local_order, mp_payment)
+
+        logger.info(f"Pago procesado para la orden {local_order.uuid} (cliente {client.email}): mp_status={local_order.mp_status} -> status={local_order.status}.")
+
+        return OrderPayResponse(
+            orderUuid=local_order.uuid,
+            status=local_order.status,
+            mpPaymentId=local_order.mp_payment_id,
+            mpStatus=local_order.mp_status,
+            mpStatusDetail=local_order.mp_status_detail,
+            ticketUrl=local_order.mp_ticket_url,
+        )
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error inesperado al procesar el pago de la orden {order_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al procesar el pago. Intenta más tarde.")
 
 
 @router.post("/{order_id}/cancel", response_model=OrderCancelResponse, summary="Cancelar pedido")
@@ -141,6 +194,11 @@ async def cancel_order(
     cuenta). `order_id` es el `id` devuelto por `POST /orders` (no un UUID real de Sicar);
     el backend lo resuelve internamente al identificador que Sicar X espera antes de
     cancelar.
+
+    Si la orden ya tiene un pago de Mercado Pago asociado, primero se limpia ese lado
+    (reembolso si ya estaba aprobado, o cancelacion si seguia pendiente/en proceso) antes
+    de tocar Sicar X — el dinero se resuelve antes que la contabilidad interna, mismo
+    orden que ya sigue `pay_order_in_sicar` en el flujo de cobro.
     """
     document_uuid = order_id
     cash_register_uuid = cancel_payload.cashRegisterUuid
@@ -153,6 +211,12 @@ async def cancel_order(
     local_order = await get_owned_order_by_sicar_id(db, client.id, document_uuid)
 
     try:
+        if local_order.mp_payment_id:
+            if local_order.mp_status == "approved":
+                await payment_service.refund_payment(local_order.mp_payment_id)
+            elif local_order.mp_status in ("pending", "in_process"):
+                await payment_service.cancel_payment(local_order.mp_payment_id)
+
         cancel_timestamp = await process_order_cancellation(
             db,
             document_uuid,

@@ -4,10 +4,18 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import settings
 from app.models.order import Order
-from app.services.cancel_service import fetch_document_dispatch_status
+from app.schemas.orders import ProductItem
+from app.services.cancel_service import fetch_document_dispatch_status, process_order_cancellation
+from app.services.order_service import pay_order_in_sicar
 
 logger = logging.getLogger(__name__)
+
+# Estados terminales de un pago de Mercado Pago - ver finalize_order_payment.
+MP_APPROVED_STATUSES = {"approved"}
+MP_PENDING_STATUSES = {"pending", "in_process"}
+MP_FAILED_STATUSES = {"rejected", "cancelled"}
 
 # Estados de nuestro campo local `status` que ya son definitivos - no tiene caso
 # refrescar el dispatchStatus de una orden cancelada.
@@ -33,18 +41,24 @@ def _parse_sicar_date(value) -> datetime | None:
         logger.warning(f"No se pudo interpretar la fecha de Sicar X: {value!r}")
         return None
 
-async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, payment_response: dict) -> Order:
-    """Persiste localmente la orden ya creada y pagada en Sicar X. Es la unica fuente
-    de historial de ordenes - Sicar X no expone un endpoint para listar ordenes por
-    cliente (ver CLAUDE.md)."""
+async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, sicar_response: dict) -> Order:
+    """Persiste localmente la orden recien creada (y reservada) en Sicar X, ANTES de
+    intentar cualquier cobro con Mercado Pago - status siempre "TO_PAY" en este punto
+    (pay_order_in_sicar todavia no corre; ver order_history_service.finalize_order_payment,
+    que es quien la transiciona a PAID/CANCELLED segun el resultado del pago). Es la
+    unica fuente de historial de ordenes - Sicar X no expone un endpoint para listar
+    ordenes por cliente (ver CLAUDE.md).
+
+    `sicar_response` es la respuesta de `create_order_in_sicar` (creacion del documento),
+    no la de `pay_order_in_sicar` (que ya no corre en este punto del flujo)."""
     eco_order = order_payload_dict["ecOrderDto"]
 
     order = Order(
         client_account_id=client_account_id,
-        sicar_order_id=str(payment_response.get("id")),
-        serie_folio=payment_response.get("serieFolio"),
-        sicar_date=_parse_sicar_date(payment_response.get("date")),
-        status=payment_response.get("status") or "PAID",
+        sicar_order_id=str(sicar_response.get("id")),
+        serie_folio=sicar_response.get("serieFolio"),
+        sicar_date=_parse_sicar_date(sicar_response.get("date")),
+        status="TO_PAY",
         # Toda orden REMOTE/PICKUP nueva entra al tablero de despacho de Sicar X en este
         # estado (confirmado en vivo) - se evita una llamada extra a Sicar en el camino
         # caliente de checkout solo para confirmar lo que ya sabemos.
@@ -59,7 +73,7 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
     await db.commit()
     await db.refresh(order)
 
-    logger.info(f"Orden local {order.uuid} creada para cliente {client_account_id} (sicar_order_id={order.sicar_order_id}).")
+    logger.info(f"Orden local {order.uuid} creada (TO_PAY) para cliente {client_account_id} (sicar_order_id={order.sicar_order_id}).")
     return order
 
 async def list_client_orders(db: AsyncSession, client_account_id: int, limit: int, offset: int) -> tuple[int, list[Order]]:
@@ -94,6 +108,13 @@ async def get_owned_order_by_sicar_id(db: AsyncSession, client_account_id: int, 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
     return order
 
+async def get_order_by_uuid(db: AsyncSession, order_uuid: str) -> Order | None:
+    """Sin filtro de cliente - usada por el webhook de Mercado Pago
+    (`POST /payments/webhook`), que no tiene identidad de cliente (lo llama Mercado
+    Pago, no el frontend). `order_uuid` es el `external_reference` que se manda a
+    Mercado Pago en `create_preference`/`create_payment`."""
+    return await db.scalar(select(Order).where(Order.uuid == order_uuid))
+
 async def refresh_order_status_if_needed(db: AsyncSession, order: Order) -> Order:
     """Refresca dispatch_status/dispatch_history desde Sicar X (generatedV2, ver
     cancel_service.fetch_document_dispatch_status) si la orden no esta en un estado
@@ -118,4 +139,54 @@ async def refresh_order_status_if_needed(db: AsyncSession, order: Order) -> Orde
         await db.commit()
         await db.refresh(order)
 
+    return order
+
+async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dict) -> Order:
+    """Aplica el resultado de un pago de Mercado Pago a una orden local - punto unico
+    compartido por `POST /orders/{id}/pay` (submit sincrono desde el Payment Brick) y el
+    webhook (`POST /payments/webhook`, unico camino para el metodo Wallet, que nunca
+    toca nuestro backend en el submit - ver payment_service.py). No duplicar esta logica
+    en ambos lugares.
+
+    `mp_payment` es la respuesta ya re-consultada de Mercado Pago (nunca el cuerpo crudo
+    de una notificacion de webhook, que no es autoritativo)."""
+    mp_status = mp_payment.get("status")
+
+    order.mp_payment_id = str(mp_payment.get("id")) if mp_payment.get("id") is not None else order.mp_payment_id
+    order.mp_status = mp_status
+    order.mp_status_detail = mp_payment.get("status_detail")
+    order.mp_payment_method_id = mp_payment.get("payment_method_id")
+    ticket_url = (mp_payment.get("transaction_details") or {}).get("external_resource_url")
+    if ticket_url:
+        order.mp_ticket_url = ticket_url
+
+    if mp_status in MP_APPROVED_STATUSES:
+        if order.status != "PAID":
+            await pay_order_in_sicar(
+                order_id=order.sicar_order_id,
+                total_amount=float(order.total),
+                cash_register_uuid=settings.CASH_REGISTER_UUID,
+                branch_id=order.branch_id,
+            )
+        order.status = "PAID"
+    elif mp_status in MP_PENDING_STATUSES:
+        order.status = "TO_PAY"
+    elif mp_status in MP_FAILED_STATUSES:
+        if order.status != "CANCELLED":
+            products_to_restore = [
+                ProductItem(uuid=item.get("uuid"), quantity=float(item.get("quantity", 0)))
+                for item in (order.items or [])
+            ]
+            await process_order_cancellation(
+                db,
+                order.sicar_order_id,
+                settings.CASH_REGISTER_UUID,
+                products_to_restore,
+            )
+        order.status = "CANCELLED"
+
+    await db.commit()
+    await db.refresh(order)
+
+    logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

@@ -21,7 +21,11 @@ class Order(Base):
     serie_folio = Column(String, nullable=True)
     sicar_date = Column(DateTime(timezone=True), nullable=True)
 
-    status = Column(String, nullable=False, default="PAID")
+    # PAID: pagado (via Mercado Pago o legado); TO_PAY: orden creada en Sicar pero el
+    # pago con Mercado Pago sigue pendiente/en proceso (OXXO, wallet, tarjeta en
+    # revision); CANCELLED: pago rechazado/cancelado o cancelacion manual - ver
+    # order_history_service.finalize_order_payment.
+    status = Column(String, nullable=False, default="TO_PAY")
 
     # Estado de cumplimiento/entrega segun Sicar X (dispatchStatus en document-graph/v1/graph-v2:
     # PENDING_ACCEPTANCE, PENDING, PREPARING, COMPLETE, DISPATCHED - confirmado en vivo contra
@@ -42,5 +46,14 @@ class Order(Base):
 
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
+
+    # Datos del pago con Mercado Pago (ver app/services/payment_service.py). Nulos
+    # mientras no se haya intentado ningun cobro (p. ej. justo despues de crear la
+    # orden, antes de que el Payment Brick haga submit).
+    mp_payment_id = Column(String, unique=True, index=True, nullable=True)
+    mp_status = Column(String, nullable=True)  # approved/pending/in_process/rejected/cancelled/refunded
+    mp_status_detail = Column(String, nullable=True)
+    mp_payment_method_id = Column(String, nullable=True)  # visa/oxxo/account_money/...
+    mp_ticket_url = Column(String, nullable=True)  # external_resource_url (p. ej. ficha OXXO)
 
     client_account = relationship("ClientAccount", back_populates="orders")

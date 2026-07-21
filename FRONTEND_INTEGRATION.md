@@ -78,13 +78,23 @@ después de armar el carrito sin sesión, por si el visitante inicia sesión o s
 ## Flujo típico de una compra
 
 ```
-1. POST /v1/auth/register o /v1/auth/login       → obtener token de cuenta (X-Client-Token), una vez
-2. POST /v1/session/init                          → obtener token de sesión de Sicar X (una vez)
-3. POST /v1/products                              → mostrar catálogo / resultados de filtro
-4. GET  /v1/products/{uuid}                       → detalle al abrir una ficha de producto
-5. POST /v1/orders                                → crear el pedido (usa los tokens de los pasos 1 y 2)
-6. (si aplica) POST /v1/orders/{order_id}/cancel  → cancelar el pedido creado en el paso 5 (usa el token del paso 1)
+1. POST /v1/auth/register o /v1/auth/login          → obtener token de cuenta (X-Client-Token), una vez
+2. POST /v1/session/init                             → obtener token de sesión de Sicar X (una vez)
+3. POST /v1/products                                 → mostrar catálogo / resultados de filtro
+4. GET  /v1/products/{uuid}                          → detalle al abrir una ficha de producto
+5. POST /v1/orders                                   → reservar el pedido en Sicar X (queda TO_PAY) + preparar el cobro
+6. Renderizar el Payment Brick (Mercado Pago) con `amount`/`preferenceId` del paso 5
+7. POST /v1/orders/{order_id}/pay                    → cobrar (tarjeta/OXXO — el Brick llama a esto en su onSubmit)
+   (el método Wallet de Mercado Pago NO llama a este paso — redirige directo a Mercado Pago)
+8. (si aplica) POST /v1/orders/{order_id}/cancel     → cancelar el pedido (usa el token del paso 1)
 ```
+
+**Importante — esto es un cambio incompatible sobre el flujo anterior**: `POST /v1/orders`
+ya **no** cobra ni deja el pedido pagado de inmediato — ahora solo lo reserva en Sicar X
+(`status: "TO_PAY"`) y prepara una preferencia de Mercado Pago. El pago real ocurre en el
+paso 7 (`POST /v1/orders/{order_id}/pay`) o, si el comprador elige pagar con su cuenta de
+Mercado Pago (Wallet), nunca pasa por este backend en absoluto — se confirma por webhook.
+Ver "Pagos con Mercado Pago" más abajo.
 
 `/v1/session/init` normalmente se llama **una sola vez** al iniciar la sesión de compra (p. ej. al
 cargar el carrito o al primer intento de checkout), no en cada request. Guarda el `token`
@@ -665,7 +675,7 @@ existente (ya fue fusionado antes, o nunca existió) — a diferencia de mandar 
 `404` explícito porque es una acción deliberada del usuario ya logueado, no un intento tolerante
 como el de login.
 
-### `POST /v1/orders` — crear pedido
+### `POST /v1/orders` — reservar pedido (todavía no cobra)
 
 Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, impuestos,
 sku, totales) lo calcula el backend.** Requiere **login** — ver punto 3 de "Dos capas de
@@ -704,28 +714,113 @@ Respuesta `200`:
   "id": "6a55165ada77fe7cd25d39e3",
   "serieFolio": "TL518",
   "date": 1783961178060.0,
-  "status": "ACTIVE",
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6"
+  "status": "TO_PAY",
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "preferenceId": "123456789-abcdef01-2345-6789-abcd-ef0123456789",
+  "amount": 129.99
 }
 ```
 
-**Guarda `id`** — es lo que se usa como `{order_id}` en la URL de `POST /v1/orders/{order_id}/cancel`
-si el cliente necesita cancelar. **Guarda también `orderUuid`** — es el identificador local del
-pedido, usado para verlo después en `GET /v1/auth/me/orders/{orderUuid}` (ver ese endpoint arriba).
-El pedido ya queda pagado y confirmado en Sicar X al recibir esta respuesta (no hay un paso de pago
-aparte del lado del frontend).
+**Esta llamada ya NO cobra ni deja el pedido pagado** — solo lo reserva en Sicar X (`status`
+viene `"TO_PAY"`) y prepara el cobro con Mercado Pago. **Guarda `id`** — se usa como
+`{order_id}` tanto en `POST /v1/orders/{order_id}/pay` (siguiente paso) como en
+`POST /v1/orders/{order_id}/cancel`. **Guarda `orderUuid`** — identificador local del pedido,
+usado en `GET /v1/auth/me/orders/{orderUuid}`. `preferenceId` puede venir `null` si Mercado
+Pago no respondió al crear la preferencia (no es fatal — el pedido igual se creó y sigue
+soportando tarjeta/OXXO, solo no tendrá la opción de pagar con cuenta/Wallet de Mercado Pago).
+`amount` es el total autoritativo calculado por el backend — úsalo en `initialization.amount`
+del Payment Brick, no un total calculado en el frontend.
 
 Errores esperables:
 - `401` — falta o expiró el token de sesión, o falta/es inválido `X-Client-Token` (llama de nuevo a
   `/v1/session/init` o `/v1/auth/login` según cuál haya fallado)
 - `400` — carrito vacío o datos de entrega inválidos
 - `409` — uno o más productos sin disponibilidad suficiente
-- `502` — Sicar X rechazó la orden o el pago (reintenta más tarde)
+- `502` — Sicar X rechazó la orden (reintenta más tarde)
+
+## Pagos con Mercado Pago (Checkout Bricks)
+
+Después de `POST /v1/orders`, renderiza el **Payment Brick** de Mercado Pago
+(`@mercadopago/sdk-react` o el script `sdk.mercadopago.com/js/v2`) con
+`initialization.{amount, preferenceId}` de la respuesta anterior. La clave pública de
+Mercado Pago (`NEXT_PUBLIC_MP_PUBLIC_KEY` o similar) vive en el **env del frontend** —
+esta API nunca la expone ni la necesita, solo usa el access token privado internamente.
+
+El Brick soporta tres caminos, y **solo dos de ellos llaman a esta API**:
+
+- **Tarjeta u OXXO/ticket** — el `onSubmit` del Brick entrega un `formData`
+  (`token` solo para tarjeta, `paymentMethodId`, `issuerId`, `installments`, `payer`).
+  Reenvíalo tal cual a `POST /v1/orders/{order_id}/pay` (ver abajo).
+- **Cuenta/Wallet de Mercado Pago** — el Brick redirige directo al sitio de Mercado Pago;
+  **esto nunca llama a esta API**. El comprador vuelve a tu sitio via los `back_urls` que
+  esta API configuró al crear la preferencia (`/checkout/success`, `/checkout/failure`,
+  `/checkout/pending` sobre tu propio dominio — esas páginas las implementa el frontend).
+  El pago se confirma por webhook del lado del backend; para saber si ya se aplicó, consulta
+  `GET /v1/auth/me/orders/{orderUuid}` (el `status` pasa a `"PAID"` cuando el webhook lo
+  confirma — puede tardar unos segundos tras el regreso a `/checkout/success`).
+
+### `POST /v1/orders/{order_id}/pay` — cobrar pedido (tarjeta/OXXO)
+
+Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada (mismo patrón
+de `404` que `/cancel`, no confirma si el pedido existe pero es de otra cuenta). `{order_id}`
+es el `id` que devolvió `POST /v1/orders`.
+
+```http
+POST /v1/orders/6a55165ada77fe7cd25d39e3/pay
+x-api-key: <api-key>
+X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
+Content-Type: application/json
+
+{
+  "token": "ff8080814c11e237014c1ff593b57b4d",
+  "paymentMethodId": "visa",
+  "issuerId": "310",
+  "installments": 1,
+  "payer": {
+    "email": "juan@example.com",
+    "identification": { "type": "RFC", "number": "XAXX010101000" }
+  }
+}
+```
+
+Manda exactamente el `formData` que entrega el `onSubmit` del Brick — `token` está ausente
+para métodos sin tarjeta (p. ej. OXXO). **No mandes ningún monto** — el backend siempre cobra
+el `amount` ya calculado en `POST /v1/orders`, nunca un valor que venga del frontend.
+
+Respuesta `200`:
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "status": "PAID",
+  "mpPaymentId": "123456789",
+  "mpStatus": "approved",
+  "mpStatusDetail": "accredited",
+  "ticketUrl": null
+}
+```
+
+`status` es el estado local del pedido después del intento de cobro:
+- `"PAID"` — aprobado. El pedido ya quedó pagado también en Sicar X.
+- `"TO_PAY"` — pendiente (tarjeta en revisión, o pago OXXO esperando que el comprador pague en
+  tienda). `ticketUrl` viene con la liga al comprobante/código de barras para métodos OXXO —
+  muéstrala al comprador para que pueda completar el pago. El pedido se confirma después via
+  webhook; consulta `GET /v1/auth/me/orders/{orderUuid}` más tarde para ver si ya pasó a `PAID`.
+- `"CANCELLED"` — rechazado. El stock reservado ya se liberó, no hace falta llamar a
+  `POST /v1/orders/{order_id}/cancel` aparte.
+
+Errores esperables:
+- `401` — falta o es inválido `X-Client-Token`
+- `404` — el pedido no existe o no pertenece a la cuenta autenticada
+- `409` — el pedido ya fue pagado o cancelado antes (no se puede volver a cobrar)
+- `502` — Mercado Pago rechazó la solicitud de cobro (reintenta más tarde)
 
 ### `POST /v1/orders/{order_id}/cancel` — cancelar pedido
 
 Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
-(sin revelar si el pedido existe pero es de otra cuenta).
+(sin revelar si el pedido existe pero es de otra cuenta). Si el pedido ya tenía un pago de
+Mercado Pago asociado, esta llamada también lo reembolsa (si ya estaba aprobado) o lo cancela
+(si seguía pendiente) automáticamente — no hace falta ningún paso aparte del lado del frontend
+para eso.
 
 ```http
 POST /v1/orders/6a55165ada77fe7cd25d39e3/cancel
@@ -861,6 +956,8 @@ async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
   return res.json();
 }
 
+// Ya NO cobra -- solo reserva el pedido en Sicar X (TO_PAY) y prepara el cobro con
+// Mercado Pago. Renderiza el Payment Brick con el `amount`/`preferenceId` de la respuesta.
 async function createOrder(sessionToken: string, clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
   const res = await fetch(`${API_URL}/v1/orders`, {
     method: "POST",
@@ -879,7 +976,26 @@ async function createOrder(sessionToken: string, clientToken: string, products: 
     const err = await res.json();
     throw new Error(err.detail ?? "No se pudo crear el pedido");
   }
-  return res.json(); // { id, serieFolio, date, status, orderUuid }
+  return res.json(); // { id, serieFolio, date, status, orderUuid, preferenceId, amount }
+}
+
+// Llamado desde el onSubmit del Payment Brick (tarjeta/OXXO) -- NO se llama para el
+// metodo Wallet, que redirige directo a Mercado Pago (ver "Pagos con Mercado Pago").
+async function payOrder(orderId: string, clientToken: string, formData: Record<string, unknown>) {
+  const res = await fetch(`${API_URL}/v1/orders/${orderId}/pay`, {
+    method: "POST",
+    headers: {
+      "x-api-key": API_KEY,
+      "X-Client-Token": clientToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(formData), // token/paymentMethodId/issuerId/installments/payer, tal cual del Brick
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail ?? "No se pudo procesar el pago");
+  }
+  return res.json(); // { orderUuid, status, mpPaymentId, mpStatus, mpStatusDetail, ticketUrl }
 }
 ```
 
@@ -892,7 +1008,12 @@ async function createOrder(sessionToken: string, clientToken: string, products: 
   `/v1/session/init` pasando el token viejo en `Authorization` para refrescarlo, y reintenta. Si
   en cambio es `X-Client-Token` el que expiró/falta, vuelve a llamar `/v1/auth/login`.
 - **Login es obligatorio para comprar** — no existe checkout anónimo; sin una cuenta autenticada
-  (`X-Client-Token` válido) `/v1/orders` y `/v1/orders/{order_id}/cancel` responden `401`.
+  (`X-Client-Token` válido) `/v1/orders`, `/v1/orders/{order_id}/pay` y
+  `/v1/orders/{order_id}/cancel` responden `401`.
+- **`POST /v1/orders` ya no cobra ni confirma el pedido de inmediato** — solo lo reserva
+  (`status: "TO_PAY"`). El cobro real ocurre en `POST /v1/orders/{order_id}/pay` (tarjeta/OXXO) o,
+  para el método Wallet de Mercado Pago, nunca pasa por este backend — se confirma por webhook.
+  No asumas que un pedido está pagado solo porque `POST /v1/orders` respondió `200`.
 - **Seguimiento post-compra sí existe**: `GET /v1/auth/me/orders` (lista) y
   `GET /v1/auth/me/orders/{orderUuid}` (detalle, con `dispatchStatus`/`dispatchHistory`) — ver
   referencia arriba.
