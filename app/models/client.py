@@ -54,6 +54,7 @@ class ClientAddress(Base):
     int_number = Column(String, nullable=True)
     neighborhood = Column(String, nullable=True)
     city = Column(String, nullable=True)
+    county = Column(String, nullable=True)  # Municipio - distinto de city, lo exige el "county" de Sicar X en deliveryInfo.contactInfo.address
     state = Column(String, nullable=True)
     country = Column(String, nullable=True)
     zip_code = Column(String, nullable=True)

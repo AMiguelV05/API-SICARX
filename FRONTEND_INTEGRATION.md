@@ -246,6 +246,7 @@ Respuesta `200`:
       "intNumber": null,
       "neighborhood": null,
       "city": "Culiacán",
+      "county": "Culiacán",
       "state": "Sinaloa",
       "country": "México",
       "zipCode": "80000",
@@ -255,6 +256,10 @@ Respuesta `200`:
   ]
 }
 ```
+
+`county` (municipio) es un campo nuevo — distinto de `city`, opcional como el resto de campos
+de dirección, pero **obligatorio si esa dirección se va a usar para un pedido con
+`deliveryType: "DELIVERYMAN"`** (ver `POST /v1/orders` más abajo).
 
 `addresses` viene incluido de una vez (no hace falta llamar a `GET /v1/auth/me/addresses` aparte
 solo para pintar "Mi cuenta"), pero para agregar/editar/eliminar una dirección sí se usan las
@@ -316,6 +321,7 @@ Content-Type: application/json
   "street": "Av. Siempre Viva",
   "extNumber": "123",
   "city": "Culiacán",
+  "county": "Culiacán",
   "state": "Sinaloa",
   "country": "México",
   "zipCode": "80000",
@@ -323,7 +329,10 @@ Content-Type: application/json
 }
 ```
 
-Solo `street` es obligatorio (`422` si falta). `isDefault: true` desmarca automáticamente
+Solo `street` es obligatorio (`422` si falta). Si esta dirección se va a usar para entrega a
+domicilio (`POST /v1/orders` con `deliveryType: "DELIVERYMAN"`), captura también
+`city`/`county`/`state`/`zipCode`/`extNumber` — son opcionales aquí, pero el pedido responde
+`400` si falta alguno al momento de usarla para entrega. `isDefault: true` desmarca automáticamente
 cualquier otra dirección default que el cliente ya tuviera — solo puede haber una a la vez.
 Responde `201` con la dirección creada (incluye su `uuid`, que es lo que identifica la dirección
 en `PATCH`/`DELETE` de abajo — nunca un índice de arreglo).
@@ -704,9 +713,39 @@ Content-Type: application/json
 }
 ```
 
-`deliveryType` soportado hoy: `"PICKUP"` (recoger en tienda) — es el único valor aceptado
-(`422` si se envía cualquier otro). `contactInfo.email` es opcional, pero si se envía debe ser
+`deliveryType` acepta `"PICKUP"` (recoger en tienda) o `"DELIVERYMAN"` (entrega a domicilio) —
+cualquier otro valor responde `422`. `contactInfo.email` es opcional, pero si se envía debe ser
 un correo válido (también `422` si no lo es).
+
+Para entrega a domicilio, manda `addressUuid` (el `uuid` de una dirección ya guardada — ver
+`POST /v1/auth/me/addresses` arriba) en vez de una dirección escrita a mano en cada pedido:
+
+```json
+{
+  "products": [
+    { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "quantity": 1 }
+  ],
+  "deliveryInfo": {
+    "contactInfo": {
+      "name": "Juan Pérez",
+      "phone": "3151234567",
+      "email": "juan@example.com"
+    },
+    "deliveryType": "DELIVERYMAN",
+    "addressUuid": "51cbf02f-cf83-470e-9313-c586d816c9c0"
+  }
+}
+```
+
+`addressUuid` es **obligatorio** cuando `deliveryType` es `"DELIVERYMAN"` y **no debe enviarse**
+cuando es `"PICKUP"` — `422` en cualquiera de los dos casos si no se cumple. El backend resuelve
+la dirección del lado del servidor (no hace falta mandar calle/ciudad/etc. en el body del
+pedido). `404` si `addressUuid` no existe o no pertenece a la cuenta autenticada. `400` si la
+dirección existe pero le faltan campos necesarios para la entrega (`street`/`city`/`county`/
+`state`/`zipCode`/`extNumber`) — revisa que la dirección guardada esté completa antes de
+ofrecerla como opción de entrega. El monto a cobrar (`amount`, y lo que después se cobra en
+`POST /v1/orders/{id}/pay`) **no incluye ningún costo de envío** todavía, para ningún tipo de
+entrega — sigue siendo solo el total de productos.
 
 Respuesta `200`:
 ```json
@@ -734,7 +773,9 @@ del Payment Brick, no un total calculado en el frontend.
 Errores esperables:
 - `401` — falta o expiró el token de sesión, o falta/es inválido `X-Client-Token` (llama de nuevo a
   `/v1/session/init` o `/v1/auth/login` según cuál haya fallado)
-- `400` — carrito vacío o datos de entrega inválidos
+- `400` — carrito vacío, datos de entrega inválidos, o (para `DELIVERYMAN`) la dirección
+  seleccionada existe pero le faltan campos necesarios para la entrega
+- `404` — (para `DELIVERYMAN`) `addressUuid` no existe o no pertenece a la cuenta autenticada
 - `409` — uno o más productos sin disponibilidad suficiente
 - `502` — Sicar X rechazó la orden (reintenta más tarde)
 

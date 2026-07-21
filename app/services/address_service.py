@@ -7,7 +7,7 @@ from app.schemas.client import ClientAddressCreate, ClientAddressUpdate
 
 logger = logging.getLogger(__name__)
 
-async def _get_owned_address(db: AsyncSession, client: ClientAccount, address_uuid: str) -> ClientAddress:
+async def get_owned_address(db: AsyncSession, client: ClientAccount, address_uuid: str) -> ClientAddress:
     address = await db.scalar(
         select(ClientAddress).where(
             ClientAddress.uuid == address_uuid,
@@ -40,7 +40,7 @@ async def create_address(db: AsyncSession, client: ClientAccount, data: ClientAd
     return address
 
 async def update_address(db: AsyncSession, client: ClientAccount, address_uuid: str, data: ClientAddressUpdate) -> ClientAddress:
-    address = await _get_owned_address(db, client, address_uuid)
+    address = await get_owned_address(db, client, address_uuid)
 
     if data.is_default:
         await _clear_existing_default(db, client.id, exclude_uuid=address_uuid)
@@ -55,7 +55,7 @@ async def update_address(db: AsyncSession, client: ClientAccount, address_uuid: 
     return address
 
 async def delete_address(db: AsyncSession, client: ClientAccount, address_uuid: str) -> None:
-    address = await _get_owned_address(db, client, address_uuid)
+    address = await get_owned_address(db, client, address_uuid)
     await db.delete(address)
     await db.commit()
 

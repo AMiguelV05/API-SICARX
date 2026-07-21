@@ -9,6 +9,7 @@ from app.services.order_service import validate_cart_items, build_order_payload,
 from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment
+from app.services.address_service import get_owned_address
 from app.services import payment_service
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse
 from app.core.config import settings
@@ -42,6 +43,14 @@ async def create_order(
     `POST /orders/{id}/pay` con el `formData` del `onSubmit` del Brick (tarjeta/OXXO). Si
     el comprador paga con Mercado Pago Wallet, esa vía nunca llama a este backend — el
     webhook (`POST /payments/webhook`) es quien confirma el pago en ese caso.
+
+    `deliveryInfo.deliveryType` acepta `PICKUP` (recoger en tienda) o `DELIVERYMAN`
+    (entrega a domicilio). Para `DELIVERYMAN`, `deliveryInfo.addressUuid` es obligatorio
+    y debe ser el `uuid` de una dirección ya guardada del cliente autenticado (ver
+    `GET /auth/me/addresses`) — se resuelve aquí mismo (404 si no existe o no pertenece
+    al cliente) y se traduce al formato exacto que espera Sicar X. No se calcula ni se
+    cobra ningún costo de envío en esta llamada (`amount` sigue siendo solo el total de
+    productos, igual que en `PICKUP`) — pendiente de una futura integración.
     """
     if not authorization:
         logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
@@ -77,11 +86,44 @@ async def create_order(
         result = await db.execute(select(Product).where(Product.sicar_uuid.in_(uuids)))
         local_products = {p.sicar_uuid: p for p in result.scalars().all()}
 
+        if order_payload.deliveryInfo.deliveryType == "DELIVERYMAN":
+            address = await get_owned_address(db, client, order_payload.deliveryInfo.addressUuid)
+
+            missing = [field for field, value in [
+                ("street", address.street),
+                ("city", address.city),
+                ("county", address.county),
+                ("state", address.state),
+                ("zipCode", address.zip_code),
+                ("extNumber", address.ext_number),
+            ] if not value]
+            if missing:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"La dirección seleccionada está incompleta para entrega a domicilio (faltan: {', '.join(missing)})."
+                )
+
+            delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True, exclude={"addressUuid"})
+            delivery_info_dict["contactInfo"]["address"] = {
+                "street": address.street,
+                "extNumber": address.ext_number,
+                "intNumber": address.int_number,
+                "district": address.neighborhood,
+                "city": address.city,
+                "county": address.county,
+                "state": address.state,
+                "zipCode": address.zip_code,
+                "country": "MEX",
+                "reference": address.references,
+            }
+        else:
+            delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True)
+
         order_payload_dict = build_order_payload(
             cart_data=cart_data,
             local_products=local_products,
             quantities=requested_quantities,
-            delivery_info=order_payload.deliveryInfo.model_dump(exclude_none=True),
+            delivery_info=delivery_info_dict,
             branch_id=branch_id,
             price_list_uuid=price_list_uuid,
             content_id=content_id,

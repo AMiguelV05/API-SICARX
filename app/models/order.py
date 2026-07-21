@@ -38,6 +38,12 @@ class Order(Base):
     total = Column(Numeric(10, 2), nullable=False)
     total_quantity = Column(Numeric(10, 2), nullable=False)
 
+    # Placeholder para una futura integracion de costo de envio (envia.com, API mexicana
+    # de tarifas de paqueteria). Intencionalmente sin usar hoy: no se calcula, no se suma
+    # al cobro de Mercado Pago (payment_service.py) ni a ecOrderDto.total enviado a Sicar X
+    # - ambos siguen reflejando solo el total de productos, para PICKUP y DELIVERYMAN por igual.
+    delivery_cost = Column(Numeric(10, 2), nullable=True)
+
     # Snapshot al momento de la orden (misma estructura que produce build_order_payload,
     # no se consulta dentro de estos campos, asi que JSON simple basta - igual que
     # Product.additional_skus/additional_images).

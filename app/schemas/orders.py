@@ -1,4 +1,4 @@
-from pydantic import EmailStr, Field
+from pydantic import EmailStr, Field, model_validator
 from typing import Any, List, Literal, Optional
 from datetime import datetime
 from app.core.config import settings
@@ -15,7 +15,16 @@ class ContactInfo(CamelModel):
 
 class DeliveryInfo(CamelModel):
     contactInfo: ContactInfo
-    deliveryType: Literal["PICKUP"] = Field(description="Unico valor soportado hoy")
+    deliveryType: Literal["PICKUP", "DELIVERYMAN"] = Field(description="PICKUP: recoger en tienda. DELIVERYMAN: entrega a domicilio, requiere addressUuid.")
+    addressUuid: Optional[str] = Field(default=None, description="UUID de una direccion guardada del cliente (GET /auth/me/addresses) - obligatorio si deliveryType es DELIVERYMAN, no debe enviarse si es PICKUP")
+
+    @model_validator(mode="after")
+    def validate_address_uuid_matches_delivery_type(self):
+        if self.deliveryType == "DELIVERYMAN" and not self.addressUuid:
+            raise ValueError("addressUuid es obligatorio cuando deliveryType es DELIVERYMAN.")
+        if self.deliveryType == "PICKUP" and self.addressUuid is not None:
+            raise ValueError("addressUuid no debe enviarse cuando deliveryType es PICKUP.")
+        return self
 
 # MODELOS PRINCIPALES
 

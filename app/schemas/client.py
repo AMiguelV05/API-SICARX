@@ -22,6 +22,7 @@ class ClientAddressBase(CamelModel):
     int_number: Optional[str] = None
     neighborhood: Optional[str] = None
     city: Optional[str] = None
+    county: Optional[str] = None
     state: Optional[str] = None
     country: Optional[str] = None
     zip_code: Optional[str] = None
@@ -38,6 +39,7 @@ class ClientAddressUpdate(CamelModel):
     int_number: Optional[str] = None
     neighborhood: Optional[str] = None
     city: Optional[str] = None
+    county: Optional[str] = None
     state: Optional[str] = None
     country: Optional[str] = None
     zip_code: Optional[str] = None
