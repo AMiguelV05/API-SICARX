@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Index, func, text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Index, func, text
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -59,6 +59,10 @@ class ClientAddress(Base):
     country = Column(String, nullable=True)
     zip_code = Column(String, nullable=True)
     references = Column(String, nullable=True)  # Referencias para ubicar el domicilio
+    # Pin del picker de Google Maps del frontend - este backend nunca llama a Google, solo
+    # persiste lo que el frontend ya resolvio con su propia key de Maps/Places.
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
     is_default = Column(Boolean, default=False)
 
     client_account = relationship("ClientAccount", back_populates="addresses")

@@ -320,22 +320,29 @@ Content-Type: application/json
   "label": "Casa",
   "street": "Av. Siempre Viva",
   "extNumber": "123",
+  "neighborhood": "Centro",
   "city": "Culiacán",
   "county": "Culiacán",
   "state": "Sinaloa",
   "country": "México",
   "zipCode": "80000",
+  "latitude": 24.809062,
+  "longitude": -107.394012,
   "isDefault": true
 }
 ```
 
-Solo `street` es obligatorio (`422` si falta). Si esta dirección se va a usar para entrega a
-domicilio (`POST /v1/orders` con `deliveryType: "DELIVERYMAN"`), captura también
-`city`/`county`/`state`/`zipCode`/`extNumber` — son opcionales aquí, pero el pedido responde
-`400` si falta alguno al momento de usarla para entrega. `isDefault: true` desmarca automáticamente
-cualquier otra dirección default que el cliente ya tuviera — solo puede haber una a la vez.
-Responde `201` con la dirección creada (incluye su `uuid`, que es lo que identifica la dirección
-en `PATCH`/`DELETE` de abajo — nunca un índice de arreglo).
+Solo `street` es obligatorio (`422` si falta). `zipCode`, si se envía, debe tener exactamente 5
+dígitos (`422` si no) — validación de formato propia del backend, independiente de que el
+frontend ya haya validado/autocompletado el CP contra `GET /v1/sepomex/zip/{zipCode}` (ver abajo).
+Si esta dirección se va a usar para entrega a domicilio (`POST /v1/orders` con
+`deliveryType: "DELIVERYMAN"`), captura también `city`/`county`/`state`/`zipCode`/`extNumber` — son
+opcionales aquí, pero el pedido responde `400` si falta alguno al momento de usarla para entrega.
+`latitude`/`longitude` son opcionales — el pin que el frontend obtiene de su propio picker de
+Google Maps (este backend no llama a Google, solo los guarda tal cual). `isDefault: true` desmarca
+automáticamente cualquier otra dirección default que el cliente ya tuviera — solo puede haber una a
+la vez. Responde `201` con la dirección creada (incluye su `uuid`, que es lo que identifica la
+dirección en `PATCH`/`DELETE` de abajo — nunca un índice de arreglo).
 
 ```http
 PATCH /v1/auth/me/addresses/{uuid}
@@ -360,6 +367,55 @@ Authorization: <token>
 
 `204` sin contenido si se elimina correctamente. `404` si el `uuid` no existe o no pertenece al
 cliente autenticado — igual que `PATCH`, nunca revela si la dirección de otro cliente existe.
+
+### `GET /v1/sepomex/*` — autocompletar dirección mexicana (código postal, estados, municipios)
+
+Solo requieren `x-api-key` (no hace falta `Authorization`/`X-Client-Token` — es un catálogo de
+referencia, igual que `GET /v1/taxonomy`). Pensado para el formulario de dirección: escribir el
+código postal autocompleta estado/ciudad/municipio y ofrece un dropdown de colonias; si en cambio
+el usuario elige el estado manualmente, se usa el segundo endpoint para poblar el dropdown de
+municipio.
+
+```http
+GET /v1/sepomex/zip/44100
+x-api-key: <api-key>
+```
+
+```json
+{
+  "zipCode": "44100",
+  "state": "Jalisco",
+  "city": "Guadalajara",
+  "county": "Guadalajara",
+  "colonias": ["Guadalajara Centro"]
+}
+```
+
+Un mismo código postal puede tener varias colonias (`colonias` es un arreglo — úsalo para el
+dropdown de colonia/asentamiento). `422` si `zipCode` no son 5 dígitos; `404` si tiene formato
+válido pero no existe.
+
+```http
+GET /v1/sepomex/states
+x-api-key: <api-key>
+```
+
+```json
+{ "states": ["Aguascalientes", "Baja California", "...", "Zacatecas"] }
+```
+
+```http
+GET /v1/sepomex/states/Jalisco/counties
+x-api-key: <api-key>
+```
+
+```json
+{ "state": "Jalisco", "counties": ["Acatic", "Acatlán de Juárez", "...", "Zapotlanejo"] }
+```
+
+`state` debe coincidir exactamente con uno de los valores de `GET /v1/sepomex/states` (mismos
+nombres oficiales que devuelve `estado` en `GET /v1/sepomex/zip/{zipCode}`, p. ej.
+"Michoacán de Ocampo", "Coahuila de Zaragoza") — `404` si no se reconoce.
 
 ### `GET /v1/auth/me/orders` — historial de pedidos del cliente
 
