@@ -1,15 +1,7 @@
-import re
 from typing import List, Optional
-from pydantic import EmailStr, Field, field_validator
+from pydantic import EmailStr, Field
 from app.schemas.base import CamelModel
 from app.schemas.cart import CartResponse
-
-_ZIP_CODE_RE = re.compile(r"^\d{5}$")
-
-def _validate_zip_code(v: Optional[str]) -> Optional[str]:
-    if v is not None and not _ZIP_CODE_RE.match(v):
-        raise ValueError("El código postal debe tener 5 dígitos.")
-    return v
 
 class ClientRegister(CamelModel):
     name: str = Field(min_length=1, description="Nombre completo del cliente")
@@ -35,13 +27,7 @@ class ClientAddressBase(CamelModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     references: Optional[str] = None
-    # Pin del picker de Google Maps del frontend (su propia key de Maps/Places) - este
-    # backend solo lo persiste, nunca llama a Google.
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
     is_default: bool = False
-
-    _validate_zip_code = field_validator("zip_code")(_validate_zip_code)
 
 class ClientAddressCreate(ClientAddressBase):
     pass
@@ -58,11 +44,7 @@ class ClientAddressUpdate(CamelModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     references: Optional[str] = None
-    latitude: Optional[float] = None
-    longitude: Optional[float] = None
     is_default: Optional[bool] = None
-
-    _validate_zip_code = field_validator("zip_code")(_validate_zip_code)
 
 class ClientAddressPublic(ClientAddressBase):
     uuid: str
