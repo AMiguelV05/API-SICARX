@@ -126,9 +126,15 @@ def build_order_payload(
     """
     Construye el documento de orden que espera Sicar X a partir de datos ya obtenidos
     (no hace llamadas de red). Replica el formato observado en un pedido real aceptado
-    por Sicar X: `priceBaseTax`, `priceTax` y `amountTax` usan el mismo valor
-    (`netPrice1`, precio final con impuesto incluido) — Sicar X no espera aquí el
-    desglose de impuesto pese al nombre de los campos.
+    por Sicar X: `priceBaseTax` y `priceTax` usan el mismo valor (`netPrice1`, precio
+    final con impuesto incluido) — Sicar X no espera aquí el desglose de impuesto pese
+    al nombre de los campos. `amountTax`, en cambio, es el TOTAL de la línea
+    (`netPrice1 * quantity`), no el precio unitario — confirmado comparando el payload
+    real del storefront (`agent-browser` contra ferreteriacharly.sicarx.shop) para un
+    producto con `quantity > 1`; con `quantity == 1` los tres valores coinciden por
+    casualidad, lo que originalmente ocultó el bug (Sicar rechazaba con
+    `"precio alterado|<uuid>"` en `POST /api/cart/order` para cualquier línea con
+    cantidad > 1).
     """
     products_by_uuid = {p.get("uuid"): p for p in (cart_data.get("products") or []) if isinstance(p, dict)}
     units_by_uuid = {
@@ -151,7 +157,9 @@ def build_order_payload(
             raise HTTPException(status_code=502, detail="No se pudo obtener el precio de uno o más productos.")
 
         net_price_decimal = _to_decimal(net_price)
-        total += net_price_decimal * _to_decimal(quantity)
+        quantity_decimal = _to_decimal(quantity)
+        line_total_decimal = net_price_decimal * quantity_decimal
+        total += line_total_decimal
         sales_unit_uuid = local_product.sales_unit_uuid if local_product else None
 
         order_lines.append({
@@ -163,7 +171,7 @@ def build_order_payload(
             "unit": units_by_uuid.get(sales_unit_uuid, "PZA"),
             "priceBaseTax": _format_amount(net_price_decimal),
             "priceTax": _format_amount(net_price_decimal),
-            "amountTax": _format_amount(net_price_decimal),
+            "amountTax": _format_amount(line_total_decimal),
             "taxesIds": price_list.get("saleTaxes") or [],
         })
 
