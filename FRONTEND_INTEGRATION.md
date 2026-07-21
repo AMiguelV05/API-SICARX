@@ -320,16 +320,25 @@ Content-Type: application/json
   "label": "Casa",
   "street": "Av. Siempre Viva",
   "extNumber": "123",
+  "neighborhood": "Centro",
   "city": "Culiacán",
   "county": "Culiacán",
   "state": "Sinaloa",
   "country": "México",
   "zipCode": "80000",
+  "latitude": 24.809062,
+  "longitude": -107.394012,
   "isDefault": true
 }
 ```
 
-Solo `street` es obligatorio (`422` si falta). Si esta dirección se va a usar para entrega a
+Solo `street` es obligatorio (`422` si falta). `zipCode`, si se envía, debe tener exactamente 5
+dígitos (`422` si no). Este backend **no** valida ni geocodifica códigos postales por su cuenta —
+resuelve el resto del formulario (estado/ciudad/municipio/colonias y coordenadas) directo desde el
+frontend contra la [Geocodes API de envia.com](https://docs.envia.com/docs/geocodes-api-overview)
+(`GET https://geocodes.envia.com/zipcode/{country}/{zipcode}`, sin API key, CORS abierto — se puede
+llamar directo desde el navegador) y luego manda los campos ya resueltos en este mismo body,
+incluyendo `latitude`/`longitude` si los tiene. Si esta dirección se va a usar para entrega a
 domicilio (`POST /v1/orders` con `deliveryType: "DELIVERYMAN"`), captura también
 `city`/`county`/`state`/`zipCode`/`extNumber` — son opcionales aquí, pero el pedido responde
 `400` si falta alguno al momento de usarla para entrega. `isDefault: true` desmarca automáticamente
