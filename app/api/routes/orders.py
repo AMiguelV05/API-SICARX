@@ -11,7 +11,7 @@ from app.services.session_service import get_or_refresh_customer_session
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment
 from app.services.address_service import get_owned_address
 from app.services import payment_service
-from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse
+from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse, ProductItem
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,7 @@ async def create_order(
                 ("state", address.state),
                 ("zipCode", address.zip_code),
                 ("extNumber", address.ext_number),
+                ("neighborhood", address.neighborhood),
             ] if not value]
             if missing:
                 raise HTTPException(
@@ -284,3 +285,62 @@ async def cancel_order(
         await db.rollback()
         logger.error(f"Error inesperado al cancelar el pedido {document_uuid}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al cancelar el pedido. Intenta más tarde.")
+
+
+@router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar pedido reservado sin pagar")
+async def delete_order(
+    order_id: str,
+    client: CurrentClientHeaderDep,
+    db: DbDep,
+):
+    """
+    Borra definitivamente una orden que quedo reservada en Sicar X (`TO_PAY`) pero nunca
+    se pago. A diferencia de `POST /orders/{id}/cancel` (que conserva la fila local con
+    `status=CANCELLED` como registro), esta ruta elimina la fila de `orders` por completo:
+    una reserva jamas pagada no es un registro financiero real que valga la pena
+    conservar. Requiere `X-Client-Token`; la orden debe pertenecer al cliente autenticado
+    (404 si no, mismo patron que `/cancel`). Solo aplica a ordenes en `TO_PAY` - 409 si ya
+    esta `PAID` o `CANCELLED` (esas si se conservan y no se pueden borrar por aqui).
+
+    Antes de borrar la fila: cancela cualquier pago de Mercado Pago que haya quedado
+    pendiente/en proceso (OXXO sin pagar, tarjeta en revision - nunca `approved`, porque
+    eso ya habria puesto la orden en `PAID` y quedo excluido arriba), y cancela la
+    reserva en Sicar X restaurando el stock local (mismo `process_order_cancellation`
+    que usa `/cancel`, con `order.items` ya guardados en la fila en vez de pedirselos
+    de nuevo al frontend).
+    """
+    local_order = await get_owned_order_by_sicar_id(db, client.id, order_id)
+
+    if local_order.status != "TO_PAY":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Solo se pueden eliminar ordenes reservadas que aun no han sido pagadas ni canceladas."
+        )
+
+    try:
+        if local_order.mp_payment_id and local_order.mp_status in ("pending", "in_process"):
+            await payment_service.cancel_payment(local_order.mp_payment_id)
+
+        products_to_restore = [
+            ProductItem(uuid=item.get("uuid"), quantity=float(item.get("quantity", 0)))
+            for item in (local_order.items or [])
+        ]
+        await process_order_cancellation(
+            db,
+            local_order.sicar_order_id,
+            settings.CASH_REGISTER_UUID,
+            products_to_restore,
+        )
+
+        await db.delete(local_order)
+        await db.commit()
+
+        logger.info(f"Orden {order_id} (reservada, nunca pagada) eliminada por cliente {client.email}.")
+
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error inesperado al eliminar el pedido {order_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al eliminar el pedido. Intenta más tarde.")

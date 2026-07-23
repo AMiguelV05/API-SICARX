@@ -340,8 +340,9 @@ frontend contra la [Geocodes API de envia.com](https://docs.envia.com/docs/geoco
 llamar directo desde el navegador) y luego manda los campos ya resueltos en este mismo body,
 incluyendo `latitude`/`longitude` si los tiene. Si esta dirección se va a usar para entrega a
 domicilio (`POST /v1/orders` con `deliveryType: "DELIVERYMAN"`), captura también
-`city`/`county`/`state`/`zipCode`/`extNumber` — son opcionales aquí, pero el pedido responde
-`400` si falta alguno al momento de usarla para entrega. `isDefault: true` desmarca automáticamente
+`city`/`county`/`state`/`zipCode`/`extNumber`/`neighborhood` — son opcionales aquí, pero el pedido
+responde `400` si falta alguno al momento de usarla para entrega (`neighborhood` es obligatorio
+porque Sicar X exige `district` no nulo en el pedido, y `district` se llena con este campo). `isDefault: true` desmarca automáticamente
 cualquier otra dirección default que el cliente ya tuviera — solo puede haber una a la vez.
 Responde `201` con la dirección creada (incluye su `uuid`, que es lo que identifica la dirección
 en `PATCH`/`DELETE` de abajo — nunca un índice de arreglo).
@@ -726,6 +727,19 @@ Content-Type: application/json
 cualquier otro valor responde `422`. `contactInfo.email` es opcional, pero si se envía debe ser
 un correo válido (también `422` si no lo es).
 
+Cuatro campos opcionales más a nivel raíz — normalmente no hace falta mandarlos, cada uno tiene
+su propio fallback si se omiten (o se mandan como `null`):
+
+- `contentId` — si se omite, usa el `contentId` devuelto por `/v1/session/init` y, si tampoco
+  está disponible ahí, genera uno nuevo (`uuid4`).
+- `branchId` — si se omite, usa el `branchId` de `/v1/session/init` y si tampoco está ahí, `151456`.
+- `priceListUuid` — si se omite, usa el `priceListUuid` de `/v1/session/init` y si tampoco está
+  ahí, el de configuración del servidor.
+- `wholesalePrices` — `false` por defecto; en `true` pide precios de mayoreo a Sicar X.
+
+En la práctica casi nunca hace falta enviarlos explícitamente — solo tiene sentido si se necesita
+forzar una sucursal/lista de precios distinta a la de la sesión activa.
+
 Para entrega a domicilio, manda `addressUuid` (el `uuid` de una dirección ya guardada — ver
 `POST /v1/auth/me/addresses` arriba) en vez de una dirección escrita a mano en cada pedido:
 
@@ -751,7 +765,7 @@ cuando es `"PICKUP"` — `422` en cualquiera de los dos casos si no se cumple. E
 la dirección del lado del servidor (no hace falta mandar calle/ciudad/etc. en el body del
 pedido). `404` si `addressUuid` no existe o no pertenece a la cuenta autenticada. `400` si la
 dirección existe pero le faltan campos necesarios para la entrega (`street`/`city`/`county`/
-`state`/`zipCode`/`extNumber`) — revisa que la dirección guardada esté completa antes de
+`state`/`zipCode`/`extNumber`/`neighborhood`) — revisa que la dirección guardada esté completa antes de
 ofrecerla como opción de entrega. El monto a cobrar (`amount`, y lo que después se cobra en
 `POST /v1/orders/{id}/pay`) **no incluye ningún costo de envío** todavía, para ningún tipo de
 entrega — sigue siendo solo el total de productos.
@@ -909,6 +923,28 @@ Respuesta `200`:
   "status": "CANCELLED"
 }
 ```
+
+### `DELETE /v1/orders/{order_id}` — eliminar pedido reservado sin pagar
+
+Distinto de `/cancel`: `/cancel` conserva el pedido en el historial con `status: "CANCELLED"`;
+`DELETE` lo borra por completo del historial del cliente (`GET /v1/auth/me/orders` ya no lo
+lista). Úsalo para "descartar" una reserva que el cliente nunca terminó de pagar (p. ej. un botón
+de "eliminar" sobre un pedido en `TO_PAY`, en vez de "cancelar pedido").
+
+Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
+(mismo criterio que `/cancel`). Solo funciona sobre pedidos en `status: "TO_PAY"` — `409` si el
+pedido ya está `PAID` o `CANCELLED` (esos no se pueden borrar). No lleva body: el stock a
+restaurar y el registro de Sicar X ya se toman de lo guardado al crear el pedido, y si había un
+pago de Mercado Pago pendiente (OXXO sin pagar, tarjeta en revisión) se cancela automáticamente,
+igual que en `/cancel`.
+
+```http
+DELETE /v1/orders/6a55165ada77fe7cd25d39e3
+x-api-key: <api-key>
+X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
+```
+
+Respuesta `204` (sin body) en éxito.
 
 ---
 
