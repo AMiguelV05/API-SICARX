@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.models.order import Order
 from app.schemas.orders import ProductItem
 from app.services.cancel_service import fetch_document_dispatch_status, process_order_cancellation
+from app.services.email_service import send_order_confirmation_email
 from app.services.order_service import pay_order_in_sicar
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,14 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     en ambos lugares.
 
     `mp_payment` es la respuesta ya re-consultada de Mercado Pago (nunca el cuerpo crudo
-    de una notificacion de webhook, que no es autoritativo)."""
+    de una notificacion de webhook, que no es autoritativo).
+
+    Al transicionar de TO_PAY a PAID (nunca en reintentos del webhook sobre una orden ya
+    PAID), tambien dispara el correo de confirmacion via Resend (email_service.py) - este
+    es el unico punto donde los tres caminos de pago (tarjeta/OXXO sincrono, y Wallet/OXXO
+    tardio via webhook) convergen, asi que es el unico lugar correcto para enviarlo; el
+    frontend no puede hacerlo por su cuenta porque el metodo Wallet nunca le llega una
+    respuesta sincrona (ver CLAUDE.md, "Payments with Mercado Pago")."""
     mp_status = mp_payment.get("status")
 
     order.mp_payment_id = str(mp_payment.get("id")) if mp_payment.get("id") is not None else order.mp_payment_id
@@ -160,8 +168,10 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     if ticket_url:
         order.mp_ticket_url = ticket_url
 
+    became_paid = False
     if mp_status in MP_APPROVED_STATUSES:
         if order.status != "PAID":
+            became_paid = True
             await pay_order_in_sicar(
                 order_id=order.sicar_order_id,
                 total_amount=float(order.total),
@@ -187,6 +197,9 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
 
     await db.commit()
     await db.refresh(order)
+
+    if became_paid:
+        await send_order_confirmation_email(order)
 
     logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

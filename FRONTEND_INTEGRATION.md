@@ -823,6 +823,14 @@ El Brick soporta tres caminos, y **solo dos de ellos llaman a esta API**:
   `GET /v1/auth/me/orders/{orderUuid}` (el `status` pasa a `"PAID"` cuando el webhook lo
   confirma — puede tardar unos segundos tras el regreso a `/checkout/success`).
 
+**El correo de confirmación de pedido ya lo manda este backend** (via Resend), en el
+momento exacto en que un pedido pasa a `"PAID"` — cubre los tres caminos de pago por
+igual (tarjeta/OXXO síncrono, y Wallet/OXXO tardío vía webhook), incluido el caso Wallet
+donde el frontend nunca recibe una respuesta síncrona para dispararlo por su cuenta. El
+frontend **no necesita (ni debe)** enviar su propio correo de confirmación de pedido —
+si se integra Resend del lado del frontend, resérvalo para otro tipo de notificaciones
+que no sean la confirmación de pago misma, para no duplicar el envío.
+
 ### `POST /v1/orders/{order_id}/pay` — cobrar pedido (tarjeta/OXXO)
 
 Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada (mismo patrón
