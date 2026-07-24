@@ -22,14 +22,17 @@ handler = RotatingFileHandler(
 )
 
 formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 handler.setFormatter(formatter)
 
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
 logging.basicConfig(
     level=logging.INFO,
-    handlers=[handler]
+    handlers=[handler, stream_handler]
 )
 
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)

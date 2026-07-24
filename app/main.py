@@ -7,12 +7,16 @@ from slowapi import _rate_limit_exceeded_handler
 from app.core.rate_limit import limiter
 from app.api.v1_router import v1_router
 
-logging.basicConfig(
-    filename="app.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+_log_formatter = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
+_file_handler = logging.FileHandler("app.log")
+_file_handler.setFormatter(_log_formatter)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_log_formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler])
 
 app = FastAPI(
     title="API Integración Sicar X",
