@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     FRONTEND_BASE_URL: str  # dominio real del frontend
     API_BASE_URL: str  # dominio publico la API
 
-    # Resend (correos de confirmacion de pedido) 
-    RESEND_API_KEY: str
-    RESEND_FROM_EMAIL: str
+    # Webhook saliente hacia el frontend (correo de confirmacion de pedido via Resend en
+    # el frontend) - ver CLAUDE.md, seccion "Payments with Mercado Pago", y FRONTEND_INTEGRATION.md
+    FRONTEND_WEBHOOK_SECRET: str
 
     class Config:
         env_file = ".env"

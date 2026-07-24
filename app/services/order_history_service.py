@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.models.order import Order
 from app.schemas.orders import ProductItem
 from app.services.cancel_service import fetch_document_dispatch_status, process_order_cancellation
-from app.services.email_service import send_order_confirmation_email
+from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_service import pay_order_in_sicar
 
 logger = logging.getLogger(__name__)
@@ -153,11 +153,15 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     de una notificacion de webhook, que no es autoritativo).
 
     Al transicionar de TO_PAY a PAID (nunca en reintentos del webhook sobre una orden ya
-    PAID), tambien dispara el correo de confirmacion via Resend (email_service.py) - este
-    es el unico punto donde los tres caminos de pago (tarjeta/OXXO sincrono, y Wallet/OXXO
-    tardio via webhook) convergen, asi que es el unico lugar correcto para enviarlo; el
-    frontend no puede hacerlo por su cuenta porque el metodo Wallet nunca le llega una
-    respuesta sincrona (ver CLAUDE.md, "Payments with Mercado Pago")."""
+    PAID), tambien notifica al frontend via un webhook firmado
+    (order_notification_service.notify_order_confirmed) para que el frontend envie el
+    correo de confirmacion con su propio template de react-email y su propia cuenta de
+    Resend - este es el unico punto donde los tres caminos de pago (tarjeta/OXXO
+    sincrono, y Wallet/OXXO tardio via webhook) convergen, asi que es el unico lugar
+    donde el trigger puede vivir de forma confiable; el frontend no puede dispararlo por
+    su cuenta (ni por polling) porque el metodo Wallet nunca le llega una respuesta
+    sincrona ni garantiza que el navegador siga abierto (ver CLAUDE.md, "Payments with
+    Mercado Pago")."""
     mp_status = mp_payment.get("status")
 
     order.mp_payment_id = str(mp_payment.get("id")) if mp_payment.get("id") is not None else order.mp_payment_id
@@ -199,7 +203,7 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     await db.refresh(order)
 
     if became_paid:
-        await send_order_confirmation_email(order)
+        await notify_order_confirmed(order)
 
     logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

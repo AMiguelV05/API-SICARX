@@ -823,13 +823,78 @@ El Brick soporta tres caminos, y **solo dos de ellos llaman a esta API**:
   `GET /v1/auth/me/orders/{orderUuid}` (el `status` pasa a `"PAID"` cuando el webhook lo
   confirma — puede tardar unos segundos tras el regreso a `/checkout/success`).
 
-**El correo de confirmación de pedido ya lo manda este backend** (via Resend), en el
-momento exacto en que un pedido pasa a `"PAID"` — cubre los tres caminos de pago por
-igual (tarjeta/OXXO síncrono, y Wallet/OXXO tardío vía webhook), incluido el caso Wallet
-donde el frontend nunca recibe una respuesta síncrona para dispararlo por su cuenta. El
-frontend **no necesita (ni debe)** enviar su propio correo de confirmación de pedido —
-si se integra Resend del lado del frontend, resérvalo para otro tipo de notificaciones
-que no sean la confirmación de pago misma, para no duplicar el envío.
+**El correo de confirmación de pedido lo envía el frontend, pero el disparo lo hace este
+backend** — en el momento exacto en que un pedido pasa a `"PAID"`, este backend llama a un
+webhook saliente en tu propio dominio (ver "Webhook saliente" más abajo). Cubre los tres
+caminos de pago por igual (tarjeta/OXXO síncrono, y Wallet/OXXO tardío vía webhook),
+incluido el caso Wallet donde nunca hay una respuesta síncrona ni garantía de que el
+navegador del comprador siga abierto — por eso el disparo no puede vivir en el navegador
+(ni por polling), tiene que ser esta llamada servidor-a-servidor.
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-confirmed`
+
+Este backend llama a esta ruta — **no la llama el navegador del comprador**, la llama
+este servidor directamente en cuanto `finalize_order_payment` confirma el pago. Implementa
+esta ruta en tu backend (p. ej. un API route de Next.js) para recibirla y disparar el
+envío real del correo con tu propio template de `react-email` y tu propia cuenta de
+Resend — este backend ya no llama a Resend.
+
+**Verificación de firma** (obligatoria — no proceses el body sin verificar primero):
+
+```http
+POST /api/webhooks/order-confirmed
+Content-Type: application/json
+X-Webhook-Timestamp: 1783961178
+X-Webhook-Signature: 3f2a9c...  (hex, HMAC-SHA256)
+```
+
+La firma se calcula así (mismo secreto compartido por el equipo de backend,
+`FRONTEND_WEBHOOK_SECRET`, nunca expuesto en este documento):
+
+```
+manifest = "{X-Webhook-Timestamp}." + <raw request body, tal cual, sin re-serializar>
+signature = hex(HMAC_SHA256(FRONTEND_WEBHOOK_SECRET, manifest))
+```
+
+Recalcula `signature` con el mismo secreto y compárala contra `X-Webhook-Signature` con
+una comparación en tiempo constante (`crypto.timingSafeEqual` en Node, no `===`). Rechaza
+también si `X-Webhook-Timestamp` tiene más de ~5 minutos de antigüedad (protección contra
+replay). Importante: usa el **body crudo** para el HMAC, no un objeto ya parseado y
+re-serializado — un JSON re-serializado puede no ser byte-a-byte idéntico al original y
+la firma no va a coincidir.
+
+**Body**: mismo shape que un elemento de `GET /v1/auth/me/orders/{orderUuid}` (ver
+arriba), más dos campos que esa ruta no incluye porque ahí la identidad ya viene del
+token de auth — aquí no hay token, así que van explícitos en el body:
+
+```json
+{
+  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "6a55165ada77fe7cd25d39e3",
+  "serieFolio": "TL518",
+  "status": "PAID",
+  "dispatchStatus": "PENDING_ACCEPTANCE",
+  "dispatchHistory": null,
+  "total": 129.99,
+  "totalQuantity": 3,
+  "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": "juan@example.com" }, "deliveryType": "PICKUP" },
+  "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA" } ],
+  "createdAt": "2026-07-10T18:32:05Z",
+  "clientEmail": "juan@example.com",
+  "clientName": "Juan Pérez"
+}
+```
+
+`clientEmail` es el destinatario a usar — viene de la cuenta del cliente, no de
+`deliveryInfo.contactInfo.email` (ese es opcional/capturado a mano en el checkout y puede
+faltar o estar desactualizado).
+
+**Sin reintentos de este lado** — a diferencia del webhook de Mercado Pago hacia este
+backend (que sí reintenta agresivamente), este backend **no** reintenta si tu endpoint
+falla o tarda. Responde `200` rápido y trata cualquier falla de tu lado como definitiva
+(no hay una segunda oportunidad automática todavía). Si necesitas reintentos, impleméntalos
+tú mismo del lado del frontend antes de disparar el correo, o avisa al equipo de backend
+para evaluar una cola de reintentos ahí.
 
 ### `POST /v1/orders/{order_id}/pay` — cobrar pedido (tarjeta/OXXO)
 
