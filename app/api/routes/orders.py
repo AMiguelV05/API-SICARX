@@ -242,10 +242,13 @@ async def cancel_order(
     (reembolso si ya estaba aprobado, o cancelacion si seguia pendiente/en proceso) antes
     de tocar Sicar X — el dinero se resuelve antes que la contabilidad interna, mismo
     orden que ya sigue `pay_order_in_sicar` en el flujo de cobro.
+
+    El stock se restaura a partir de `local_order.items` (lo realmente reservado al
+    crear la orden), no de `cancel_payload.products` — ese campo se sigue aceptando por
+    compatibilidad con el frontend pero ya no se usa para nada, ver FRONTEND_INTEGRATION.md.
     """
     document_uuid = order_id
     cash_register_uuid = cancel_payload.cashRegisterUuid
-    products_to_restore = cancel_payload.products
 
     if not cash_register_uuid:
         logger.warning("Intento de cancelacion fallido: Falta la caja registradora.")
@@ -253,12 +256,22 @@ async def cancel_order(
 
     local_order = await get_owned_order_by_sicar_id(db, client.id, document_uuid)
 
+    if local_order.status == "CANCELLED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
+
+    products_to_restore = [
+        ProductItem(uuid=item.get("uuid"), quantity=float(item.get("quantity", 0)))
+        for item in (local_order.items or [])
+    ]
+
     try:
         if local_order.mp_payment_id:
             if local_order.mp_status == "approved":
                 await payment_service.refund_payment(local_order.mp_payment_id)
+                local_order.mp_status = "refunded"
             elif local_order.mp_status in ("pending", "in_process"):
                 await payment_service.cancel_payment(local_order.mp_payment_id)
+                local_order.mp_status = "cancelled"
 
         cancel_timestamp = await process_order_cancellation(
             db,

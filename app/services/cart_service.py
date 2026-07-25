@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -8,6 +9,7 @@ from app.models.client import ClientAccount
 from app.models.product import Product
 from app.schemas.cart import CartItemPublic, CartResponse
 from app.schemas.orders import ProductItem
+from app.services.order_service import _to_decimal
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,7 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
         products_by_uuid = {p.sicar_uuid: p for p in result.scalars().all()}
 
     enriched = []
-    subtotal = 0.0
+    subtotal_decimal = Decimal("0")
     total_quantity = 0.0
     for raw in raw_items:
         product_uuid = raw.get("uuid")
@@ -31,8 +33,8 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
 
         total_quantity += quantity
         if available:
-            line_total = float(product.price) * quantity
-            subtotal += line_total
+            line_total_decimal = _to_decimal(product.price) * _to_decimal(quantity)
+            subtotal_decimal += line_total_decimal
             enriched.append(CartItemPublic(
                 productUuid=product_uuid,
                 sku=product.sku,
@@ -41,7 +43,7 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
                 price=float(product.price),
                 stock=product.stock,
                 quantity=quantity,
-                lineTotal=line_total,
+                lineTotal=float(line_total_decimal),
                 available=True,
             ))
         else:
@@ -51,6 +53,7 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
                 available=False,
             ))
 
+    subtotal = float(subtotal_decimal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     return enriched, subtotal, total_quantity
 
 async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartResponse:

@@ -56,15 +56,19 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
 async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, in_stock: bool = False):
     """Busqueda por substring (case-insensitive) en sku o name, acelerada por los
     indices GIN de pg_trgm. Los resultados donde sku o name empiezan con `q` se
-    ordenan primero, antes que las coincidencias que solo contienen `q` en medio."""
-    pattern = f"%{q}%"
-    prefix_pattern = f"{q}%"
-    starts_with = or_(Product.sku.ilike(prefix_pattern), Product.name.ilike(prefix_pattern))
+    ordenan primero, antes que las coincidencias que solo contienen `q` en medio.
+
+    `q` se escapa antes de armar el patron ILIKE - de lo contrario `%`/`_` en la busqueda
+    se interpretan como comodines de ILIKE en vez de caracteres literales."""
+    escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped_q}%"
+    prefix_pattern = f"{escaped_q}%"
+    starts_with = or_(Product.sku.ilike(prefix_pattern, escape="\\"), Product.name.ilike(prefix_pattern, escape="\\"))
 
     stmt = select(Product).where(
         Product.is_deleted == False,
         Product.is_active == True,
-        or_(Product.sku.ilike(pattern), Product.name.ilike(pattern))
+        or_(Product.sku.ilike(pattern, escape="\\"), Product.name.ilike(pattern, escape="\\"))
     )
 
     if department_uuid:

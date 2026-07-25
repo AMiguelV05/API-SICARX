@@ -973,10 +973,13 @@ Content-Type: application/json
 ```
 
 `{order_id}` en la URL es el `id` que devolvió `POST /v1/orders` (ya no va en el body — no requiere
-`Authorization`, no es un token de sesión). El body ya no lleva `uuid`: solo `products`, que debe
-repetir el mismo carrito del pedido original para que el stock local se restaure correctamente, y
+`Authorization`, no es un token de sesión). El body ya no lleva `uuid`: solo `products` y
 `cashRegisterUuid` (opcional — tiene un valor por defecto del lado del servidor, solo hace falta
-enviarlo si se necesita cancelar contra una caja distinta a la default):
+enviarlo si se necesita cancelar contra una caja distinta a la default).
+
+**`products` ya no se usa para nada** — se sigue aceptando por compatibilidad (puedes seguir
+enviándolo o dejar de hacerlo, cualquiera de las dos formas funciona) pero el stock se restaura
+siempre a partir de lo que quedó guardado del pedido original en el servidor, nunca de este campo:
 
 ```json
 {

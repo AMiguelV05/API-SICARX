@@ -161,7 +161,23 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     donde el trigger puede vivir de forma confiable; el frontend no puede dispararlo por
     su cuenta (ni por polling) porque el metodo Wallet nunca le llega una respuesta
     sincrona ni garantiza que el navegador siga abierto (ver CLAUDE.md, "Payments with
-    Mercado Pago")."""
+    Mercado Pago").
+
+    El pago sincrono (`/orders/{id}/pay`) y el webhook de Mercado Pago pueden llegar casi
+    al mismo tiempo para la misma orden (el webhook tambien sirve de respaldo para
+    tarjeta/OXXO, no solo Wallet) - cada uno con su propia sesion de DB. Por eso lo
+    primero que hace esta funcion es re-leer la fila con `SELECT ... FOR UPDATE`: eso
+    serializa a ambos llamadores contra el bloqueo de fila de Postgres, para que el
+    segundo en llegar vea el estado ya actualizado por el primero (status == PAID) en
+    vez de aplicar `pay_order_in_sicar`/`notify_order_confirmed` por duplicado."""
+    locked_result = await db.execute(
+        select(Order)
+        .where(Order.id == order.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    order = locked_result.scalar_one()
+
     mp_status = mp_payment.get("status")
 
     order.mp_payment_id = str(mp_payment.get("id")) if mp_payment.get("id") is not None else order.mp_payment_id
@@ -203,7 +219,10 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     await db.refresh(order)
 
     if became_paid:
-        await notify_order_confirmed(order)
+        try:
+            await notify_order_confirmed(order)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_order_confirmed) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

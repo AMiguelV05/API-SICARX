@@ -6,7 +6,7 @@ from app.schemas.base import CamelModel
 
 class ProductItem(CamelModel):
     uuid: str = Field(description="UUID del producto en Sicar")
-    quantity: float = Field(description="Cantidad a comprar o cancelar")
+    quantity: float = Field(gt=0, description="Cantidad a comprar o cancelar")
 
 class ContactInfo(CamelModel):
     name: str
@@ -44,7 +44,7 @@ class OrderCreate(CamelModel):
 
 class OrderCancel(CamelModel):
     cashRegisterUuid: str = Field(default_factory=lambda: settings.CASH_REGISTER_UUID, description="UUID de la caja registradora")
-    products: List[ProductItem]
+    products: List[ProductItem] = Field(default_factory=list, description="Aceptado por compatibilidad, pero ignorado - el stock se restaura desde la orden guardada localmente, no desde este campo.")
 
 class OrderResponse(CamelModel):
     id: str = Field(description="ID de la orden en Sicar")
