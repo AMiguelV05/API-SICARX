@@ -122,9 +122,12 @@ async def get_payment(payment_id: str) -> dict:
 
 async def refund_payment(payment_id: str) -> dict:
     """Reembolsa un pago ya aprobado - usado por /orders/{id}/cancel cuando el pago de
-    la orden a cancelar ya se habia capturado."""
+    la orden a cancelar ya se habia capturado. Mercado Pago exige X-Idempotency-Key en
+    este endpoint (confirmado en vivo: sin el header responde 400 "Header
+    X-Idempotency-Key can't be null") - se usa el propio payment_id, para que un reintento
+    sobre el mismo pago deduplique en vez de reembolsar dos veces."""
     async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.post(f"{PAYMENTS_URL}/{payment_id}/refunds", headers=_mp_headers())
+        response = await client.post(f"{PAYMENTS_URL}/{payment_id}/refunds", headers=_mp_headers(idempotency_key=payment_id))
 
     if response.status_code not in (200, 201):
         logger.error(f"Error al reembolsar el pago {payment_id} en Mercado Pago: {response.status_code} - {response.text}")
