@@ -885,9 +885,10 @@ token de auth — aquí no hay token, así que van explícitos en el body:
 }
 ```
 
-`clientEmail` es el destinatario a usar — viene de la cuenta del cliente, no de
-`deliveryInfo.contactInfo.email` (ese es opcional/capturado a mano en el checkout y puede
-faltar o estar desactualizado).
+`clientEmail` es el destinatario a usar — se toma de `deliveryInfo.contactInfo.email` cuando la
+orden trae uno, y solo cae de vuelta al email de la cuenta (`ClientAccount.email`) si la orden se
+creó sin ese campo (órdenes viejas, u otro caller de `POST /v1/orders` que lo omita). Esto
+garantiza que `clientEmail` nunca llegue vacío. `clientName` sigue viniendo siempre de la cuenta.
 
 **Sin reintentos de este lado** — a diferencia del webhook de Mercado Pago hacia este
 backend (que sí reintenta agresivamente), este backend **no** reintenta si tu endpoint

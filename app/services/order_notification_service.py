@@ -25,13 +25,15 @@ async def notify_order_confirmed(order: Order) -> None:
     reintento automatico si esto falla - ver CLAUDE.md."""
     try:
         client_account = await order.awaitable_attrs.client_account
-        if not client_account or not client_account.email:
+        contact_email = ((order.delivery_info or {}).get("contactInfo") or {}).get("email")
+        client_email = contact_email or (client_account.email if client_account else None)
+        if not client_email:
             logger.warning(f"Orden {order.uuid}: no se pudo resolver el email del cliente, se omite la notificacion al frontend.")
             return
 
         body = OrderPublic.model_validate(order).model_dump(by_alias=True, mode="json")
-        body["clientEmail"] = client_account.email
-        body["clientName"] = client_account.name
+        body["clientEmail"] = client_email
+        body["clientName"] = client_account.name if client_account else None
 
         raw_body = json.dumps(body, separators=(",", ":")).encode()
         ts = str(int(time.time()))
