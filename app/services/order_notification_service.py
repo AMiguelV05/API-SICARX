@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import json
 import logging
 import time
@@ -9,6 +7,7 @@ import httpx
 from app.core.config import settings
 from app.models.order import Order
 from app.schemas.orders import OrderPublic
+from app.core.webhook_signing import sign_hmac_sha256
 
 ORDER_CONFIRMED_WEBHOOK_PATH = "/api/webhooks/order-confirmed"
 WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
@@ -22,7 +21,11 @@ async def notify_order_confirmed(order: Order) -> None:
     fatal si falla - mismo patron que create_preference en payment_service.py: una
     notificacion que no llega no debe bloquear ni revertir el pago ya aplicado en
     finalize_order_payment (unico llamador). A diferencia de create_preference, no hay
-    reintento automatico si esto falla - ver CLAUDE.md."""
+    reintento automatico si esto falla - ver CLAUDE.md.
+
+    Esta firma (headers X-Webhook-*) es un esquema propio de este backend, sin relacion
+    con el esquema de Mercado Pago (x-signature/x-request-id, ver
+    payment_service.verify_mercadopago_webhook_signature) - no confundir ambos."""
     try:
         client_account = await order.awaitable_attrs.client_account
         contact_email = ((order.delivery_info or {}).get("contactInfo") or {}).get("email")
@@ -37,7 +40,7 @@ async def notify_order_confirmed(order: Order) -> None:
 
         raw_body = json.dumps(body, separators=(",", ":")).encode()
         ts = str(int(time.time()))
-        signature = hmac.new(settings.FRONTEND_WEBHOOK_SECRET.encode(), f"{ts}.".encode() + raw_body, hashlib.sha256).hexdigest()
+        signature = sign_hmac_sha256(settings.FRONTEND_WEBHOOK_SECRET, f"{ts}.".encode() + raw_body)
 
         url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}{ORDER_CONFIRMED_WEBHOOK_PATH}"
         async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:

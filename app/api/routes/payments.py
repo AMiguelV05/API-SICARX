@@ -2,6 +2,7 @@ import logging
 from fastapi import APIRouter, Request, status
 
 from app.core.database import DbDep
+from app.core.rate_limit import limiter
 from app.services import payment_service
 from app.services.order_history_service import get_order_by_uuid, finalize_order_payment
 
@@ -9,11 +10,12 @@ logger = logging.getLogger(__name__)
 
 # Sin dependencies=[Depends(validate_api_key)] a proposito: Mercado Pago no puede mandar
 # nuestra x-api-key estatica. La autenticidad de esta ruta se garantiza unicamente con
-# verify_webhook_signature (x-signature/x-request-id contra MP_WEBHOOK_SECRET) - ver
-# payment_service.py.
+# verify_mercadopago_webhook_signature (x-signature/x-request-id contra MP_WEBHOOK_SECRET)
+# - ver payment_service.py.
 router = APIRouter(prefix="/payments", tags=["Payments (Mercado Pago)"])
 
 @router.post("/webhook", summary="Notificaciones de Mercado Pago", status_code=status.HTTP_200_OK)
+@limiter.limit("60/minute")
 async def mercado_pago_webhook(request: Request, db: DbDep):
     """
     Unico camino para confirmar pagos hechos con Mercado Pago Wallet: ese metodo
@@ -26,8 +28,13 @@ async def mercado_pago_webhook(request: Request, db: DbDep):
     Responde 200 incluso en no-ops (tipo de evento desconocido, orden ya en estado
     terminal) - Mercado Pago reintenta agresivamente ante cualquier respuesta que no
     sea 2xx.
+
+    Limite generoso (60/min, por IP) a proposito: esta ruta no tiene x-api-key, y un
+    limite demasiado estricto arriesga bloquear los reintentos legitimos y agresivos de
+    Mercado Pago (peor que no tener limite). Si en produccion se confirma que las
+    notificaciones vienen de un conjunto estable de IPs, se puede ajustar mas abajo.
     """
-    if not await payment_service.verify_webhook_signature(request):
+    if not await payment_service.verify_mercadopago_webhook_signature(request):
         logger.warning("Notificacion de Mercado Pago rechazada: firma invalida.")
         return {"status": "invalid signature"}
 

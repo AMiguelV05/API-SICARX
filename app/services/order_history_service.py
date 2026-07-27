@@ -57,7 +57,13 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
     para build_order_payload) se usa solo para agregar `imageUrl` a cada item guardado
     aqui - una copia de `eco_order["products"]`, NUNCA el mismo objeto que ya se envio a
     Sicar X en create_order_in_sicar (ese ya salio por la red antes de llegar aqui, asi
-    que agregarle un campo extra en este punto no afecta lo que Sicar X recibio)."""
+    que agregarle un campo extra en este punto no afecta lo que Sicar X recibio).
+
+    NO hace commit — solo `flush()` (para que `order.id`/`order.uuid` queden disponibles
+    para el llamador, p.ej. payment_service.create_preference). El llamador
+    (routes/orders.py::create_order) hace el único commit, junto con el descuento de
+    stock ya preparado por create_order_in_sicar, para que ambos se persistan o se
+    reviertan juntos."""
     eco_order = order_payload_dict["ecOrderDto"]
     local_products = local_products or {}
 
@@ -85,10 +91,9 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
         items=items,
     )
     db.add(order)
-    await db.commit()
-    await db.refresh(order)
+    await db.flush()
 
-    logger.info(f"Orden local {order.uuid} creada (TO_PAY) para cliente {client_account_id} (sicar_order_id={order.sicar_order_id}).")
+    logger.info(f"Orden local {order.uuid} creada (TO_PAY, pendiente de commit) para cliente {client_account_id} (sicar_order_id={order.sicar_order_id}).")
     return order
 
 async def list_client_orders(db: AsyncSession, client_account_id: int, limit: int, offset: int) -> tuple[int, list[Order]]:
@@ -183,7 +188,17 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     primero que hace esta funcion es re-leer la fila con `SELECT ... FOR UPDATE`: eso
     serializa a ambos llamadores contra el bloqueo de fila de Postgres, para que el
     segundo en llegar vea el estado ya actualizado por el primero (status == PAID) en
-    vez de aplicar `pay_order_in_sicar`/`notify_order_confirmed` por duplicado."""
+    vez de aplicar `pay_order_in_sicar`/`notify_order_confirmed` por duplicado.
+
+    Nota sobre atomicidad: `pay_order_in_sicar`/`process_order_cancellation` (llamadas HTTP
+    reales a Sicar/restauracion de stock, esta ultima ya no hace su propio commit - ver
+    cancel_service.process_order_cancellation) ocurren ANTES del unico `db.commit()` de
+    esta funcion, que es lo mas cerca que se puede quedar de "un solo commit para todos
+    los cambios locales" sin una infraestructura de outbox/saga (que este codebase no
+    tiene). Si esa llamada HTTP externa ya tuvo exito pero el commit de abajo falla, el
+    estado local queda desincronizado de lo que realmente paso en Sicar/Mercado Pago -
+    ese caso no se puede cerrar del todo aqui, solo se vuelve diagnosticable (ver el log
+    CRITICAL mas abajo) en vez de silencioso."""
     locked_result = await db.execute(
         select(Order)
         .where(Order.id == order.id)
@@ -229,7 +244,17 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             )
         order.status = "CANCELLED"
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        logger.critical(
+            f"Fallo el commit final de finalize_order_payment para la orden "
+            f"{order.sicar_order_id} (mp_payment_id={mp_payment.get('id')}, "
+            f"mp_status='{mp_status}') DESPUES de que la llamada externa a Sicar/Mercado "
+            f"Pago ya se aplico - el estado local puede haber quedado desincronizado, "
+            f"revisar manualmente."
+        )
+        raise
     await db.refresh(order)
 
     if became_paid:

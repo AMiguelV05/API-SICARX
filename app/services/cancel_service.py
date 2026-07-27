@@ -1,12 +1,17 @@
 import httpx
 import logging
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import update
-from app.models.product import Product
 from app.services.sicar_auth import sicar_auth
+from app.services.product_stock_service import apply_stock_deltas
 from app.core.sicar_headers import admin_app_headers
 from app.core.sicar_validation import is_safe_sicar_id
+from app.core.upstream_errors import raise_upstream_error
+
+def _to_decimal(value) -> Decimal:
+    """Convierte a Decimal via str() para no heredar el error de representación binaria de float."""
+    return Decimal(str(value))
 
 CANCEL_URL = "https://api.sicarx.com/documents/v1/sale/cancel"
 DOCUMENT_GRAPH_URL = "https://api.sicarx.com/document-graph/v1/graph-v2"
@@ -32,8 +37,7 @@ async def _resolve_document_uuid(object_id: str) -> str:
     response = await sicar_auth.request_with_retry(attempt_lookup)
 
     if response.status_code != 200:
-        logger.error(f"Error al resolver el uuid del documento {object_id}: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="No se pudo resolver el documento a cancelar en Sicar X.")
+        raise_upstream_error(response, f"Error al resolver el uuid del documento {object_id}", "No se pudo resolver el documento a cancelar en Sicar X.")
 
     payload = response.json()
     document_uuid = ((payload.get("data") or {}).get("generatedV2") or {}).get("uuid")
@@ -75,7 +79,12 @@ async def process_order_cancellation(db: AsyncSession, object_id: str, cash_regi
     """Cancela en Sicar usando el Token B2B del Administrador y revierte stock local.
 
     `object_id` es el `id` que Sicar X devolvió al crear la orden (formato Mongo), no el
-    `uuid` que espera el endpoint de cancelación — se resuelve primero con generatedV2."""
+    `uuid` que espera el endpoint de cancelación — se resuelve primero con generatedV2.
+
+    NO hace commit — solo deja la restauración de stock preparada (`db.execute`) en la
+    sesión. El llamador es responsable de un único `db.commit()` que incluya esta
+    restauración junto con su propio cambio (status de la orden local, borrado de la
+    fila, etc.), para que ambas cosas se persistan o se reviertan juntas."""
     document_uuid = await _resolve_document_uuid(object_id)
 
     async def attempt_cancel(admin_token: str):
@@ -88,19 +97,13 @@ async def process_order_cancellation(db: AsyncSession, object_id: str, cash_regi
     response = await sicar_auth.request_with_retry(attempt_cancel)
 
     if response.status_code != 200:
-        logger.error(f"Sicar X rechazo la cancelación del documento {document_uuid}: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="Sicar X rechazó la cancelación del pedido.")
+        raise_upstream_error(response, f"Sicar X rechazo la cancelación del documento {document_uuid}", "Sicar X rechazó la cancelación del pedido.")
 
-    cancel_timestamp = response.text 
+    cancel_timestamp = response.text
 
-    # Restauración local en Postgres
-    for item in products:
-        product_uuid = item.uuid
-        quantity = float(item.quantity)
+    # Restauración local en Postgres, en una sola sentencia por lote en vez de un UPDATE
+    # awaited por linea.
+    deltas = [(item.uuid, _to_decimal(item.quantity)) for item in products]
+    await apply_stock_deltas(db, deltas)
 
-        if product_uuid and quantity > 0:
-            stmt = update(Product).where(Product.sicar_uuid == product_uuid).values(stock=Product.stock + quantity)
-            await db.execute(stmt)
-            
-    await db.commit()
     return cancel_timestamp

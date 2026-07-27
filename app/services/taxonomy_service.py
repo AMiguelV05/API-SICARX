@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.models.taxonomy import Department, Category, department_category
 from app.services.session_service import get_or_refresh_customer_session
 from app.core.sicar_headers import storefront_headers
+from app.core.upstream_errors import raise_upstream_error
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +38,11 @@ async def fetch_taxonomy_from_sicar() -> dict:
         response = await client.post(STORE_URL, content=TAXONOMY_QUERY, headers=headers)
 
     if response.status_code != 200:
-        logger.error(f"Error obteniendo taxonomia de Sicar: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="No se pudo obtener la taxonomía de Sicar X.")
+        raise_upstream_error(response, "Error obteniendo taxonomia de Sicar", "No se pudo obtener la taxonomía de Sicar X.")
 
     payload = response.json()
     if "errors" in payload:
-        logger.error(f"Errores GraphQL obteniendo taxonomia: {payload['errors']}")
-        raise HTTPException(status_code=502, detail="No se pudo obtener la taxonomía de Sicar X.")
+        raise_upstream_error(response, "Errores GraphQL obteniendo taxonomia", "No se pudo obtener la taxonomía de Sicar X.")
 
     catalog = payload.get("data", {}).get("content", {}).get("catalog") or {}
     return {

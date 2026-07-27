@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Numeric, JSON, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Numeric, JSON, DateTime, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -65,4 +65,27 @@ class Order(Base):
     mp_payment_method_id = Column(String, nullable=True)  # visa/oxxo/account_money/...
     mp_ticket_url = Column(String, nullable=True)  # external_resource_url (p. ej. ficha OXXO)
 
+    # Antes solo vivia como variable local en routes/orders.py::create_order - persistido
+    # para poder reconstruir OrderResponse en un reintento idempotente (ver
+    # OrderIdempotencyKey) sin volver a llamar a Mercado Pago.
+    mp_preference_id = Column(String, nullable=True)
+
     client_account = relationship("ClientAccount", back_populates="orders")
+
+
+class OrderIdempotencyKey(Base):
+    """Soporte de idempotencia para POST /orders: un reintento/doble-submit del mismo
+    checkout (con el mismo header `Idempotency-Key`) no debe crear una segunda orden en
+    Sicar X ni una segunda fila local. Ver app/services/order_idempotency_service.py."""
+    __tablename__ = "order_idempotency_keys"
+    __table_args__ = (
+        UniqueConstraint("client_account_id", "idempotency_key", name="ux_order_idempotency_client_key"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_account_id = Column(Integer, ForeignKey("client_accounts.id"), nullable=False, index=True)
+    idempotency_key = Column(String, nullable=False)
+    # NULL mientras la orden todavia se esta creando (o si un intento previo se abandono
+    # a medio camino) - ver order_idempotency_service.claim_idempotency_key.
+    order_uuid = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

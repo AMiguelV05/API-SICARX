@@ -150,7 +150,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "is_bulk": p.get("bulk", False),
                     "is_active": not p.get("hidden", False),
                     "price": Decimal(str(prices_obj.get(price_key, 0.0))),
-                    "stock": p.get("stock", 0.0),
+                    "stock": Decimal(str(p.get("stock", 0.0))),
                     "is_deleted": False,
                     "deleted_at": None,
                     "last_sync_id": current_sync_id

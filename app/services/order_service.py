@@ -5,11 +5,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import update
-from app.models.product import Product
 from app.services.sicar_auth import sicar_auth
+from app.services.product_stock_service import apply_stock_deltas
 from app.core.sicar_headers import storefront_headers, admin_app_headers
 from app.core.sicar_validation import is_safe_sicar_id
+from app.core.upstream_errors import raise_upstream_error
 
 STORE_URL = "https://api.sicarx.com/store/"
 ORDER_URL = "https://ferreteriacharly.sicarx.shop/api/cart/order"
@@ -61,13 +61,11 @@ async def validate_cart_items(uuids: list, requested_quantities: dict, token: st
     async with httpx.AsyncClient(timeout=SICAR_TIMEOUT) as client:
         response = await client.post(STORE_URL, content=query, headers=headers)
         if response.status_code != 200:
-            logger.error(f"Error en pre-validacion de carrito en Sicar: {response.status_code} - {response.text}")
-            raise HTTPException(status_code=502, detail="No se pudo validar el carrito con Sicar X. Intenta nuevamente.")
+            raise_upstream_error(response, "Error en pre-validacion de carrito en Sicar", "No se pudo validar el carrito con Sicar X. Intenta nuevamente.")
         payload = response.json()
 
     if "errors" in payload:
-        logger.error(f"Errores GraphQL en pre-validacion de carrito: {payload['errors']}")
-        raise HTTPException(status_code=502, detail="No se pudo validar el carrito con Sicar X. Intenta nuevamente.")
+        raise_upstream_error(response, "Errores GraphQL en pre-validacion de carrito", "No se pudo validar el carrito con Sicar X. Intenta nuevamente.")
 
     data = payload.get("data", payload)
     products = data.get("products") or []
@@ -201,28 +199,27 @@ def build_order_payload(
     }
 
 async def create_order_in_sicar(db: AsyncSession, order_payload: dict, client_token: str, branch_id: str, products_data: list):
-    """Confirma la orden en Sicar y descuenta el stock localmente."""
+    """Confirma la orden en Sicar y deja el descuento de stock local preparado.
+
+    NO hace commit — el llamador (routes/orders.py::create_order) es responsable de un
+    único commit que incluya este descuento junto con la creación de la fila local
+    `Order` (order_history_service.create_local_order), para que ambas cosas se
+    persistan o se reviertan juntas."""
     order_headers = storefront_headers(client_token, content_type="application/json", branch_id=branch_id)
 
     async with httpx.AsyncClient(timeout=SICAR_TIMEOUT) as client:
         response = await client.post(ORDER_URL, json=order_payload, headers=order_headers)
         logger.info(f"Respuesta de Sicar al crear orden: {response.status_code}")
         if response.status_code not in (200, 201):
-            logger.error(f"Error confirmando la orden en Sicar: {response.status_code} - {response.text}")
-            raise HTTPException(status_code=502, detail="No se pudo confirmar la orden en Sicar X. Intenta nuevamente más tarde.")
+            raise_upstream_error(response, "Error confirmando la orden en Sicar", "No se pudo confirmar la orden en Sicar X. Intenta nuevamente más tarde.")
 
         sicar_response = response.json()
 
-    # Descuento local de inventario
-    for item in products_data:
-        product_uuid = item.get("uuid")
-        quantity = float(item.get("quantity", 0))
+    # Descuento local de inventario, en una sola sentencia por lote en vez de un UPDATE
+    # awaited por linea.
+    deltas = [(item.get("uuid"), -_to_decimal(item.get("quantity", 0))) for item in products_data]
+    await apply_stock_deltas(db, deltas)
 
-        if product_uuid and quantity > 0:
-            stmt = update(Product).where(Product.sicar_uuid == product_uuid).values(stock=Product.stock - quantity)
-            await db.execute(stmt)
-
-    await db.commit()
     return sicar_response
 
 async def pay_order_in_sicar(order_id: str, total_amount: float, cash_register_uuid: str, branch_id: str):
@@ -249,8 +246,7 @@ async def pay_order_in_sicar(order_id: str, total_amount: float, cash_register_u
     response = await sicar_auth.request_with_retry(attempt_payment)
 
     if response.status_code != 200:
-        logger.error(f"Error al aplicar el pago a la orden {order_id}: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="La orden se creó, pero falló el pago. Contacta a soporte.")
+        raise_upstream_error(response, f"Error al aplicar el pago a la orden {order_id}", "La orden se creó, pero falló el pago. Contacta a soporte.")
 
     logger.debug(f"Respuesta de pago en Sicar: {response.status_code}")
 

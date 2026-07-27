@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Numeric, Float, Boolean, Text, JSON, DateTime, Index
+from decimal import Decimal
+from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from app.core.database import Base
 
@@ -8,6 +9,12 @@ class Product(Base):
         # jsonb_path_ops: solo necesitamos el operador de contencion (@>) para el filtro
         # `tag` de /catalog, y ese opclass da un indice 2-3x mas chico que el default.
         Index("ix_products_tags_gin", "tags", postgresql_using="gin", postgresql_ops={"tags": "jsonb_path_ops"}),
+        # Declarados aqui (no solo en la migracion 224799e4444b que los creo originalmente)
+        # para que autogenerate los reconozca como parte del metadata y deje de proponer
+        # su drop como falso positivo - eso fue exactamente lo que paso en bda8078263da,
+        # recortado manualmente en 6 migraciones anteriores pero no en esa. Ver 806cd48b3b2a.
+        Index("ix_products_sku_trgm", "sku", postgresql_using="gin", postgresql_ops={"sku": "gin_trgm_ops"}),
+        Index("ix_products_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
     )
 
     # ID local
@@ -33,7 +40,10 @@ class Product(Base):
 
     # Precios e Inventario
     price = Column(Numeric(10, 2), nullable=False)
-    stock = Column(Float, default=0.0)
+    # Numeric (no Float) por la misma razon que price: evita el error de representacion
+    # binaria de float en la aritmetica de stock que hace product_stock_service.py en cada
+    # orden/cancelacion. 3 decimales para productos vendidos por peso (is_bulk).
+    stock = Column(Numeric(12, 3), default=Decimal("0"))
     is_bulk = Column(Boolean, default=False)
     
     # Estado

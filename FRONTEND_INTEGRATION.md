@@ -734,6 +734,19 @@ Content-Type: application/json
 cualquier otro valor responde `422`. `contactInfo.email` es opcional, pero si se envía debe ser
 un correo válido (también `422` si no lo es).
 
+**`Idempotency-Key` (header, opcional, recomendado).** Un reintento de red o un doble-click en
+"pagar" puede reenviar el mismo `POST /v1/orders` — sin este header, cada intento crea una orden
+nueva en Sicar X. Si se envía, genera un UUID una sola vez por click en el botón de checkout y
+reenvía **exactamente el mismo valor** en cualquier reintento automático de esa misma solicitud
+(no uno nuevo por reintento). Si la clave ya se usó antes para este cliente:
+- Si la orden original ya terminó de crearse, se devuelve esa misma orden (mismo `200`, mismos
+  datos) en vez de crear una segunda.
+- Si la solicitud original sigue en proceso, responde `409` — reintenta en unos segundos con la
+  misma clave.
+
+Es opcional y retrocompatible: si no se envía, el comportamiento es igual que antes de este
+header existir.
+
 Cuatro campos opcionales más a nivel raíz — normalmente no hace falta mandarlos, cada uno tiene
 su propio fallback si se omiten (o se mandan como `null`):
 

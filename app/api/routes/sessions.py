@@ -1,14 +1,17 @@
 import logging
-from fastapi import APIRouter, HTTPException, Header, Depends, status
+from fastapi import APIRouter, HTTPException, Header, Depends, Request, status
 from app.services.session_service import get_or_refresh_customer_session
 from app.core.security import validate_api_key
+from app.core.rate_limit import limiter
 from app.schemas.session import SessionResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/session", tags=["Session"], dependencies=[Depends(validate_api_key)])
 
 @router.post("/init", response_model=SessionResponse, summary="Iniciar o refrescar sesión de cliente")
+@limiter.limit("30/minute")
 async def initialize_or_refresh_session(
+    request: Request,
     authorization: str = Header(None, description="Token JWT actual del cliente (opcional)"),
 ):
     """

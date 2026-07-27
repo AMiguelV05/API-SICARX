@@ -1,14 +1,17 @@
 import logging
 from uuid import uuid4
-from fastapi import APIRouter, Depends, HTTPException, Body, Header, status
+from fastapi import APIRouter, Depends, HTTPException, Body, Header, Request, status
 from sqlalchemy import select
 from app.core.database import DbDep
 from app.core.security import validate_api_key, CurrentClientHeaderDep
+from app.core.rate_limit import limiter
 from app.models.product import Product
+from app.models.order import Order
 from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar
 from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment
+from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
 from app.services.address_service import get_owned_address
 from app.services import payment_service
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse, ProductItem
@@ -18,16 +21,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orders", tags=["Orders Creation and Cancellation"], dependencies=[Depends(validate_api_key)])
 
 @router.post("", response_model=OrderResponse, summary="Crear pedido")
+@limiter.limit("10/minute")
 async def create_order(
+    request: Request,
     client: CurrentClientHeaderDep,
     db: DbDep,
     order_payload: OrderCreate = Body(),
     authorization: str = Header(None, alias="Authorization", description="Token de sesión del cliente web"),
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key", description="Opcional. Si se repite la misma clave (p. ej. un reintento de red del mismo submit de checkout), se devuelve la orden ya creada en vez de crear una duplicada."),
 ):
     """
     Contrato semiautomático: el frontend solo envía `products: [{uuid, quantity}]` y
     `deliveryInfo`; precios, impuestos, sku, descripción, unidad y totales se calculan
     en el backend a partir de Sicar X y del catálogo local (`order_service.build_order_payload`).
+
+    `Idempotency-Key` (opcional): un identificador generado por el frontend (p. ej. un
+    UUID por click en "pagar") que, si se reenvía sin cambios en un reintento, hace que
+    esta llamada devuelva la orden ya creada la primera vez en vez de crear una segunda
+    orden en Sicar X. Sin este header el comportamiento es igual que antes.
 
     Requiere DOS tokens distintos, ninguno reemplaza al otro:
     - `Authorization`: JWT de sesión del cliente web en Sicar X (obtenido de
@@ -78,6 +89,40 @@ async def create_order(
     if not uuids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El carrito no contiene productos válidos.")
 
+    # Idempotencia: reclamo en su propia mini-transaccion, independiente del commit
+    # atomico de mas abajo (creacion de la orden). `claim`/`claim_pending` solo se usan
+    # si se recibio el header - sin el, este bloque entero es un no-op.
+    claim = None
+    claim_pending = False
+    if idempotency_key:
+        claim, is_new = await claim_idempotency_key(db, client.id, idempotency_key)
+        if not is_new:
+            if claim.order_uuid:
+                result = await db.execute(select(Order).where(Order.uuid == claim.order_uuid))
+                cached_order = result.scalar_one_or_none()
+                if cached_order is not None:
+                    logger.info(f"POST /orders con Idempotency-Key repetida ({idempotency_key}) para cliente {client.id} - devolviendo orden ya creada {cached_order.uuid}.")
+                    return OrderResponse(
+                        id=cached_order.sicar_order_id,
+                        serieFolio=cached_order.serie_folio,
+                        date=cached_order.sicar_date.timestamp() if cached_order.sicar_date else 0,
+                        status=cached_order.status,
+                        orderUuid=cached_order.uuid,
+                        preferenceId=cached_order.mp_preference_id,
+                        amount=float(cached_order.total),
+                    )
+            if not is_claim_abandoned(claim):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya hay una solicitud en proceso con esta clave de idempotencia. Espera unos segundos e intenta de nuevo.")
+            # Reclamo abandonado (el proceso se interrumpio antes de terminar la orden la
+            # vez anterior) - se descarta y se reintenta como si la clave fuera nueva.
+            await discard_claim(db, claim)
+            claim, is_new = await claim_idempotency_key(db, client.id, idempotency_key)
+            if not is_new:
+                # Carrera con otra solicitud concurrente que reclamo la clave justo ahora.
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya hay una solicitud en proceso con esta clave de idempotencia. Espera unos segundos e intenta de nuevo.")
+        claim_pending = True
+
+    sicar_response = None
     try:
         # Pre-validación de stock/disponibilidad y datos de precio/impuestos usando el token fresco
         cart_data = await validate_cart_items(uuids, requested_quantities, valid_client_token, branch_id, price_list_uuid)
@@ -153,6 +198,18 @@ async def create_order(
         # No fatal: la orden sigue soportando tarjeta/OXXO sin la opcion de wallet si
         # Mercado Pago no responde aqui - ver payment_service.create_preference.
         preference = await payment_service.create_preference(local_order)
+        if preference:
+            local_order.mp_preference_id = preference.get("id")
+
+        if claim is not None:
+            claim.order_uuid = local_order.uuid
+            claim_pending = False
+
+        # Único commit: el descuento de stock (create_order_in_sicar), la fila local
+        # Order (create_local_order) y el reclamo de idempotencia (si aplica) se
+        # persisten juntos o se revierten juntos.
+        await db.commit()
+        await db.refresh(local_order)
 
         logger.info(f"Orden {local_order.uuid} reservada (TO_PAY) en la sucursal {branch_id} para cliente {client.email}.")
 
@@ -162,21 +219,38 @@ async def create_order(
             date=sicar_response.get("date"),
             status=sicar_response.get("status") or "TO_PAY",
             orderUuid=local_order.uuid,
-            preferenceId=(preference or {}).get("id"),
+            preferenceId=local_order.mp_preference_id,
             amount=total_amount,
         )
 
     except HTTPException:
         await db.rollback()
+        if claim_pending:
+            await discard_claim(db, claim)
         raise
     except Exception as e:
         await db.rollback()
-        logger.error(f"Error inesperado al crear la orden: {e}")
+        if claim_pending:
+            await discard_claim(db, claim)
+        if sicar_response is not None:
+            # La orden ya existe en Sicar X (reservo stock ahi) pero el guardado local
+            # fallo despues - no hay forma de reconciliar automaticamente (Sicar X no
+            # expone un endpoint para listar ordenes por cliente), asi que se deja este
+            # log para que soporte pueda actuar manualmente con el folio.
+            logger.critical(
+                f"Orden ya creada en Sicar X (id={sicar_response.get('id')}, "
+                f"folio={sicar_response.get('serieFolio')}) pero fallo el guardado local "
+                f"para cliente {client.id}: {e}"
+            )
+        else:
+            logger.error(f"Error inesperado al crear la orden: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al procesar la orden. Intenta más tarde.")
 
 
 @router.post("/{order_id}/pay", response_model=OrderPayResponse, summary="Cobrar pedido con Mercado Pago")
+@limiter.limit("10/minute")
 async def pay_order(
+    request: Request,
     order_id: str,
     client: CurrentClientHeaderDep,
     db: DbDep,
@@ -224,7 +298,9 @@ async def pay_order(
 
 
 @router.post("/{order_id}/cancel", response_model=OrderCancelResponse, summary="Cancelar pedido")
+@limiter.limit("15/minute")
 async def cancel_order(
+    request: Request,
     order_id: str,
     client: CurrentClientHeaderDep,
     db: DbDep,
@@ -302,7 +378,9 @@ async def cancel_order(
 
 
 @router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar pedido reservado sin pagar")
+@limiter.limit("15/minute")
 async def delete_order(
+    request: Request,
     order_id: str,
     client: CurrentClientHeaderDep,
     db: DbDep,

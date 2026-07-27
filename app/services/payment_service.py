@@ -1,12 +1,12 @@
-import hashlib
-import hmac
 import logging
 
 import httpx
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 from app.core.config import settings
 from app.models.order import Order
+from app.core.upstream_errors import raise_upstream_error
+from app.core.webhook_signing import verify_hmac_sha256
 
 PREFERENCES_URL = "https://api.mercadopago.com/checkout/preferences"
 PAYMENTS_URL = "https://api.mercadopago.com/v1/payments"
@@ -102,8 +102,7 @@ async def create_payment(order: Order, submit_data: dict) -> dict:
         response = await client.post(PAYMENTS_URL, json=payload, headers=_mp_headers(idempotency_key=order.uuid))
 
     if response.status_code not in (200, 201):
-        logger.error(f"Mercado Pago rechazo el cobro de la orden {order.uuid}: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="No se pudo procesar el pago con Mercado Pago. Intenta nuevamente.")
+        raise_upstream_error(response, f"Mercado Pago rechazo el cobro de la orden {order.uuid}", "No se pudo procesar el pago con Mercado Pago. Intenta nuevamente.")
 
     return response.json()
 
@@ -115,8 +114,7 @@ async def get_payment(payment_id: str) -> dict:
         response = await client.get(f"{PAYMENTS_URL}/{payment_id}", headers=_mp_headers())
 
     if response.status_code != 200:
-        logger.error(f"Error al consultar el pago {payment_id} en Mercado Pago: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="No se pudo consultar el estado del pago en Mercado Pago.")
+        raise_upstream_error(response, f"Error al consultar el pago {payment_id} en Mercado Pago", "No se pudo consultar el estado del pago en Mercado Pago.")
 
     return response.json()
 
@@ -130,8 +128,7 @@ async def refund_payment(payment_id: str) -> dict:
         response = await client.post(f"{PAYMENTS_URL}/{payment_id}/refunds", headers=_mp_headers(idempotency_key=payment_id))
 
     if response.status_code not in (200, 201):
-        logger.error(f"Error al reembolsar el pago {payment_id} en Mercado Pago: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="No se pudo reembolsar el pago en Mercado Pago.")
+        raise_upstream_error(response, f"Error al reembolsar el pago {payment_id} en Mercado Pago", "No se pudo reembolsar el pago en Mercado Pago.")
 
     return response.json()
 
@@ -143,13 +140,16 @@ async def cancel_payment(payment_id: str) -> dict:
         response = await client.put(f"{PAYMENTS_URL}/{payment_id}", json={"status": "cancelled"}, headers=_mp_headers())
 
     if response.status_code not in (200, 201):
-        logger.error(f"Error al cancelar el pago {payment_id} en Mercado Pago: {response.status_code} - {response.text}")
-        raise HTTPException(status_code=502, detail="No se pudo cancelar el pago pendiente en Mercado Pago.")
+        raise_upstream_error(response, f"Error al cancelar el pago {payment_id} en Mercado Pago", "No se pudo cancelar el pago pendiente en Mercado Pago.")
 
     return response.json()
 
-async def verify_webhook_signature(request: Request) -> bool:
-    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET.
+async def verify_mercadopago_webhook_signature(request: Request) -> bool:
+    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET. Nombre explicito (no solo
+    `verify_webhook_signature`) porque este codebase tiene un segundo esquema de firma de
+    webhooks, no relacionado: el saliente hacia el frontend en
+    order_notification_service.notify_order_confirmed (headers X-Webhook-*, propio de
+    este backend). No confundir ambos - ver el docstring de ese modulo.
 
     NOTA IMPORTANTE: el manifest exacto ya no aparece verbatim en la documentacion
     publica actual de Mercado Pago (empuja a usar su SDK oficial, que es sincrono y por
@@ -176,6 +176,4 @@ async def verify_webhook_signature(request: Request) -> bool:
         return False
 
     manifest = f"id:{data_id.lower()};request-id:{x_request_id};ts:{ts};"
-    expected = hmac.new(settings.MP_WEBHOOK_SECRET.encode(), manifest.encode(), hashlib.sha256).hexdigest()
-
-    return hmac.compare_digest(expected, v1)
+    return verify_hmac_sha256(settings.MP_WEBHOOK_SECRET, manifest.encode(), v1)
