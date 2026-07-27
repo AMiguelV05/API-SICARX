@@ -12,7 +12,23 @@ class ClientAccount(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     phone = Column(String, nullable=True)
-    hashed_password = Column(String, nullable=False)
+    # Nullable: las cuentas via Google (auth_provider="google") no tienen contraseña local -
+    # ver app/services/google_auth_service.py y CLAUDE.md.
+    hashed_password = Column(String, nullable=True)
+
+    # "local" | "google". String plano (sin enum de BD), mismo patron que Order.status/
+    # deliveryType en este codebase - la vocabulario se restringe en la capa de aplicacion.
+    auth_provider = Column(String, nullable=False, default="local")
+    # `sub` de Google (identificador estable de la cuenta de Google) - solo poblado para
+    # auth_provider="google". Unico: un mismo sub no puede mapear a mas de una cuenta local.
+    google_sub = Column(String, unique=True, index=True, nullable=True)
+
+    # Verificacion de correo "suave" hoy: no bloquea login ni checkout, solo se expone en
+    # ClientPublic para que el frontend decida que hacer con ella (p. ej. un banner). Las
+    # cuentas de Google entran ya verificadas (Google ya confirmo el correo); las locales
+    # entran sin verificar y reciben un webhook de verificacion - ver client_service.py.
+    is_verified = Column(Boolean, nullable=False, default=False)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
 
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

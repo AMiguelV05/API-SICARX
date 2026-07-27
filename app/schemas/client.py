@@ -23,6 +23,13 @@ class ClientLogin(CamelModel):
     password: str = Field(min_length=1)
     cart_token: Optional[str] = Field(default=None, description="cartToken de un carrito anonimo a fusionar, si existe")
 
+class GoogleLogin(CamelModel):
+    id_token: str = Field(min_length=1, description="ID token JWT emitido por Google Identity Services del lado del frontend")
+    cart_token: Optional[str] = Field(default=None, description="cartToken de un carrito anonimo a fusionar, si existe")
+
+class VerifyEmailRequest(CamelModel):
+    token: str = Field(min_length=1, description="Token de verificación recibido por correo")
+
 class ClientAddressBase(CamelModel):
     label: Optional[str] = None
     street: str = Field(min_length=1)
@@ -72,6 +79,8 @@ class ClientPublic(CamelModel):
     name: str
     email: str
     phone: Optional[str]
+    is_verified: bool
+    auth_provider: str
     addresses: List[ClientAddressPublic] = []
 
 class ClientAuthResponse(CamelModel):

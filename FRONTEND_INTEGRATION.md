@@ -178,7 +178,9 @@ que `/v1/auth/login` — el registro inicia sesión automáticamente, no hace fa
     "uuid": "f6bacfb9-cb38-4f96-adab-2593a14345bc",
     "name": "Juan Pérez",
     "email": "juan@example.com",
-    "phone": "3151234567"
+    "phone": "3151234567",
+    "isVerified": false,
+    "authProvider": "local"
   },
   "cart": {
     "items": [ { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO", "imageUrl": null, "price": 8.62, "stock": 2.0, "quantity": 2, "lineTotal": 17.24, "available": true } ],
@@ -194,7 +196,16 @@ que `/v1/auth/login` — el registro inicia sesión automáticamente, no hace fa
 fusionado (o vacío si la cuenta no tenía ninguno y no se mandó `cartToken`). Úsalo para hidratar el
 estado del carrito en el frontend inmediatamente después de registrarse, sin un `GET /v1/cart`
 aparte. `cartToken` dentro de `cart` siempre viene `null` aquí — ya es el carrito de la cuenta, no
-uno anónimo. `409` si el correo ya está registrado.
+uno anónimo. `409` si el correo ya está registrado (o, si ese correo ya está vinculado a Google,
+`409` con un mensaje distinto pidiendo iniciar sesión con Google).
+
+`isVerified` empieza en `false` para una cuenta nueva por registro local — este backend dispara un
+correo de verificación automáticamente (ver el webhook `verification-requested` más abajo), pero
+**no bloquea nada mientras tanto**: la cuenta puede iniciar sesión y comprar de inmediato. Es
+responsabilidad del frontend decidir qué hacer con `isVerified: false` (p. ej. mostrar un banner
+"verifica tu correo"), no una restricción de este backend. `authProvider` es `"local"` o
+`"google"` — útil, por ejemplo, para ocultar la opción de "cambiar contraseña" en "Mi cuenta" si
+la cuenta es `"google"` (no tiene contraseña local, ver `PATCH /v1/auth/me` más abajo).
 
 ```http
 POST /v1/auth/login
@@ -222,6 +233,69 @@ autenticación" arriba — ahí sí importa la cabecera exacta, `Authorization` 
 token de sesión de Sicar X en esas dos rutas). Login es obligatorio para comprar — ya no existe
 checkout anónimo.
 
+### `POST /v1/auth/google` — iniciar sesión o registrarse con Google
+
+```http
+POST /v1/auth/google
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "idToken": "eyJhbGciOiJSUzI1NiIs...",
+  "cartToken": "5a5c479d-9aeb-49ce-bfcd-3ff285a64188"
+}
+```
+
+`idToken` es el ID token que **tu frontend obtiene directamente de Google** (Google Identity
+Services, flujo client-side — no un authorization code, no un redirect a este backend). Este
+backend solo verifica la firma/`aud`/`iss` del token, nunca habla con Google directamente. Mismo
+manejo de `cartToken` que `/v1/auth/register`/`/v1/auth/login` (opcional, tolerante). Responde
+`200` con el mismo shape que login/registro (`token`/`client`/`cart`), `authProvider: "google"` y
+`isVerified: true` (Google ya confirmó el correo, salvo un caso raro donde Google mismo reporte lo
+contrario). Primera vez que ese usuario de Google entra → crea la cuenta. Ya existía (mismo Google
+`sub`) → inicia sesión en la misma cuenta.
+
+`409` si el correo de la cuenta de Google ya está registrado **localmente con contraseña** — este
+backend deliberadamente no fusiona las cuentas automáticamente (evita que la contraseña de quien
+haya registrado ese correo primero, sin probar que le pertenece, se quede vigente sobre lo que el
+dueño real ahora cree que es una cuenta asegurada por Google). En ese caso, muéstrale al usuario
+que inicie sesión con su contraseña — todavía no existe un flujo de "vincular Google a mi cuenta
+existente". Limitado a 10 intentos por minuto por IP.
+
+### `POST /v1/auth/verify-email` — confirmar verificación de correo
+
+```http
+POST /v1/auth/verify-email
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "token": "eyJhbGciOiJIUzI1NiIs..."
+}
+```
+
+`token` es el que llega en el webhook `verification-requested` (ver más abajo) — tu backend arma
+el link de verificación con ese valor (p. ej. `https://tudominio.com/verificar-correo?token=...`)
+y esta ruta lo confirma cuando el usuario lo abre. **No requiere sesión activa** — el usuario puede
+estar en un dispositivo distinto al que usó para registrarse, el token en sí prueba que puede leer
+ese correo. Responde `200` con el mismo shape que `GET /v1/auth/me` (ya con `isVerified: true`).
+Idempotente — confirmar un token ya usado no falla, solo no vuelve a hacer nada. `401` si el token
+es inválido o venció (vigencia 24h desde que se generó) — en ese caso, ofrece reenviar desde
+`/v1/auth/resend-verification`. Limitado a 10 por minuto por IP.
+
+### `POST /v1/auth/resend-verification` — reenviar correo de verificación
+
+```http
+POST /v1/auth/resend-verification
+x-api-key: <api-key>
+Authorization: <token de /v1/auth/login o /v1/auth/register>
+```
+
+Requiere sesión activa a propósito (no acepta un correo suelto sin autenticar, para no habilitar
+enumeración de cuentas registradas) — solo tiene sentido desde "Mi cuenta" o un banner post-login,
+no desde una pantalla pública. `204` sin contenido si se reenvía. `400` si la cuenta ya está
+verificada. Limitado a 5 por minuto por IP.
+
 ### `GET /v1/auth/me` — datos de la cuenta (para "Mi cuenta")
 
 ```http
@@ -237,6 +311,8 @@ Respuesta `200`:
   "name": "Juan Pérez",
   "email": "juan@example.com",
   "phone": "3151234567",
+  "isVerified": true,
+  "authProvider": "local",
   "addresses": [
     {
       "uuid": "51cbf02f-cf83-470e-9313-c586d816c9c0",
@@ -293,9 +369,12 @@ Para cambiar la contraseña, hay que enviar **ambas**: la actual y la nueva, en 
 ```
 
 `newPassword` requiere mínimo 8 caracteres (`422` si es más corta). `401` si `currentPassword`
-no coincide con la actual. Responde `200` con el mismo shape que `GET /v1/auth/me`, ya actualizado
-(este endpoint no toca `email` ni `addresses` — usa las rutas de abajo para direcciones). Limitado
-a 10 llamadas por minuto por IP (`429` si se excede).
+no coincide con la actual. `400` si la cuenta es `authProvider: "google"` (no tiene contraseña
+local que cambiar) — usa `authProvider` de `GET /v1/auth/me` para ocultar esta opción de la UI en
+ese caso, en vez de dejar que el usuario la intente y reciba el error. Responde `200` con el mismo
+shape que `GET /v1/auth/me`, ya actualizado (este endpoint no toca `email` ni `addresses` — usa
+las rutas de abajo para direcciones). Limitado a 10 llamadas por minuto por IP (`429` si se
+excede).
 
 ### `GET/POST/PATCH/DELETE /v1/auth/me/addresses` — libro de direcciones
 
@@ -916,6 +995,40 @@ falla o tarda. Responde `200` rápido y trata cualquier falla de tu lado como de
 (no hay una segunda oportunidad automática todavía). Si necesitas reintentos, impleméntalos
 tú mismo del lado del frontend antes de disparar el correo, o avisa al equipo de backend
 para evaluar una cola de reintentos ahí.
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/verification-requested`
+
+Mismo mecanismo que el webhook `order-confirmed` de arriba — este backend llama a esta
+ruta directamente (nunca el navegador) cuando hay que enviar un correo de verificación:
+justo después de `POST /v1/auth/register`, o cuando se llama a
+`POST /v1/auth/resend-verification`. Implementa esta ruta para disparar el envío real con
+tu propio template y tu propia cuenta de Resend, igual que con `order-confirmed`.
+
+**Verificación de firma**: exactamente el mismo esquema que `order-confirmed` — mismos
+headers (`X-Webhook-Timestamp`/`X-Webhook-Signature`), mismo secreto compartido
+(`FRONTEND_WEBHOOK_SECRET`), misma fórmula de manifest, mismas recomendaciones (comparación
+en tiempo constante, rechazar timestamps viejos, usar el body crudo). No la repetimos aquí
+— consulta la sección de `order-confirmed` arriba, es el mismo código de verificación.
+
+**Body**:
+
+```json
+{
+  "clientUuid": "f6bacfb9-cb38-4f96-adab-2593a14345bc",
+  "clientName": "Juan Pérez",
+  "clientEmail": "juan@example.com",
+  "token": "eyJhbGciOiJIUzI1NiIs..."
+}
+```
+
+`token` es el que hay que meter en el link del correo (p. ej.
+`https://tudominio.com/verificar-correo?token={token}`) — cuando el usuario lo abre, esa
+página del frontend llama a `POST /v1/auth/verify-email` con ese mismo valor. Vigencia de
+24h desde que se generó este webhook; pasado ese tiempo, `/v1/auth/verify-email` responde
+`401` y el usuario necesita pedir uno nuevo desde `/v1/auth/resend-verification`.
+
+**Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde
+`200` rápido, no hay reintento automático si tu endpoint falla.
 
 ### `POST /v1/orders/{order_id}/pay` — cobrar pedido (tarjeta/OXXO)
 

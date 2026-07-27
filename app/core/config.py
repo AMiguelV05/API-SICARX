@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # el frontend) - ver CLAUDE.md, seccion "Payments with Mercado Pago", y FRONTEND_INTEGRATION.md
     FRONTEND_WEBHOOK_SECRET: str
 
+    # Login con Google (verificacion de ID token, ver app/services/google_auth_service.py) -
+    # no es secreto (va embebido en el JS del frontend para Google Identity Services), solo
+    # se usa aqui para validar el claim `aud` del token. No requiere GOOGLE_CLIENT_SECRET:
+    # este backend nunca intercambia tokens con Google directamente.
+    GOOGLE_CLIENT_ID: str
+
     class Config:
         env_file = ".env"
 

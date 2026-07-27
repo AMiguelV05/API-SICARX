@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, Body, Request, Response
+from fastapi import APIRouter, Depends, Body, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import DbDep
@@ -9,8 +9,12 @@ from app.core.rate_limit import limiter
 from app.core.cookies import clear_cart_cookie
 from app.models.client import ClientAccount
 from app.models.cart import Cart
-from app.schemas.client import ClientRegister, ClientLogin, ClientAuthResponse, ClientPublic, ClientUpdate
-from app.services.client_service import register_client, authenticate_client, update_client
+from app.schemas.client import ClientRegister, ClientLogin, GoogleLogin, VerifyEmailRequest, ClientAuthResponse, ClientPublic, ClientUpdate
+from app.services.client_service import (
+    register_client, authenticate_client, update_client,
+    get_or_create_google_client, verify_client_email, resend_verification_email,
+)
+from app.services.google_auth_service import verify_google_id_token
 from app.services.cart_service import get_cart_response, try_merge_cart_token
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,47 @@ async def login(request: Request, response: Response, db: DbDep, data: ClientLog
     """
     client = await authenticate_client(db, data)
     return await _build_auth_response(db, client, data.cart_token, response)
+
+@router.post("/auth/google", response_model=ClientAuthResponse, summary="Iniciar sesión o registrarse con Google")
+@limiter.limit("10/minute")
+async def google_login(request: Request, response: Response, db: DbDep, data: GoogleLogin = Body()):
+    """
+    Verifica un ID token de Google Identity Services (obtenido del lado del frontend) y
+    resuelve la cuenta local correspondiente — la crea si es la primera vez que ese
+    usuario de Google inicia sesión. Devuelve la misma forma que `/auth/login`. Si el
+    correo de la cuenta de Google ya está registrado localmente con contraseña, responde
+    `409` en vez de fusionar las cuentas automáticamente (evita que la contraseña de
+    quien haya registrado ese correo primero quede vigente sobre una cuenta que el dueño
+    real ahora cree asegurada por Google) — inicia sesión con tu contraseña en ese caso.
+    Las cuentas creadas por esta vía entran ya verificadas (Google ya confirmó el correo),
+    sin necesidad del flujo de `/auth/verify-email`.
+    """
+    identity = await verify_google_id_token(data.id_token)
+    client = await get_or_create_google_client(db, identity)
+    return await _build_auth_response(db, client, data.cart_token, response)
+
+@router.post("/auth/verify-email", response_model=ClientPublic, summary="Confirmar verificación de correo")
+@limiter.limit("10/minute")
+async def verify_email(request: Request, db: DbDep, data: VerifyEmailRequest = Body()):
+    """
+    Confirma el token enviado por correo tras `/auth/register` (o reenviado por
+    `/auth/resend-verification`) y marca la cuenta como verificada. No requiere sesión
+    activa — el token en sí prueba propiedad del correo, y el usuario puede estar en un
+    dispositivo/navegador distinto al que usó para registrarse. Verificación "suave": hoy
+    no bloquea login ni checkout, solo se refleja en `isVerified` de `ClientPublic`.
+    """
+    return await verify_client_email(db, data.token)
+
+@router.post("/auth/resend-verification", status_code=status.HTTP_204_NO_CONTENT, summary="Reenviar correo de verificación")
+@limiter.limit("5/minute")
+async def resend_verification(request: Request, client: CurrentClientDep, db: DbDep):
+    """
+    Reenvía el correo de verificación a la cuenta autenticada (requiere `Authorization`
+    con el token de sesión de la cuenta) — deliberadamente no acepta un correo suelto sin
+    sesión, para no habilitar enumeración de cuentas registradas. `400` si la cuenta ya
+    está verificada. Limitado a 5 por minuto por IP.
+    """
+    await resend_verification_email(db, client)
 
 @router.get("/auth/me", response_model=ClientPublic, summary="Obtener datos de la cuenta del cliente")
 async def get_me(client: CurrentClientDep):

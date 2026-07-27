@@ -69,6 +69,36 @@ def create_client_token(client_uuid: str) -> str:
     payload = {"sub": client_uuid, "exp": expire}
     return jwt.encode(payload, settings.CLIENT_JWT_SECRET, algorithm=CLIENT_JWT_ALGORITHM)
 
+EMAIL_VERIFICATION_EXPIRE_MINUTES = 60 * 24  # 24 horas
+
+def create_email_verification_token(client_uuid: str) -> str:
+    """Token de un solo proposito para confirmar propiedad de un correo (POST
+    /auth/verify-email). Reusa CLIENT_JWT_SECRET (no un secreto nuevo - si CLIENT_JWT_SECRET
+    se filtra, ya se pueden forjar tokens de sesion directamente, que es estrictamente peor)
+    pero lleva un claim `purpose` que _resolve_client_from_token rechaza explicitamente, para
+    que este token nunca sirva como token de sesion aunque se filtre."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=EMAIL_VERIFICATION_EXPIRE_MINUTES)
+    payload = {"sub": client_uuid, "exp": expire, "purpose": "email_verify"}
+    return jwt.encode(payload, settings.CLIENT_JWT_SECRET, algorithm=CLIENT_JWT_ALGORITHM)
+
+def decode_email_verification_token(token: str) -> str:
+    """Inverso de create_email_verification_token. A diferencia de
+    _resolve_client_from_token (que rechaza CUALQUIER `purpose`, por compatibilidad con
+    tokens de sesion ya emitidos antes de que este claim existiera), aqui se exige
+    explicitamente purpose == "email_verify" - todo token de este tipo es nuevo, no hay
+    compatibilidad hacia atras que preservar."""
+    try:
+        payload = jwt.decode(token, settings.CLIENT_JWT_SECRET, algorithms=[CLIENT_JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="El enlace de verificación expiró, solicita uno nuevo.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Enlace de verificación inválido.")
+
+    if payload.get("purpose") != "email_verify":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Enlace de verificación inválido.")
+
+    return payload.get("sub")
+
 async def _resolve_client_from_token(token: str, db: AsyncSession) -> ClientAccount:
     """
     Decodifica un JWT de cuenta de cliente (emitido por `create_client_token`) y
@@ -83,6 +113,14 @@ async def _resolve_client_from_token(token: str, db: AsyncSession) -> ClientAcco
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La sesión expiró, inicia sesión nuevamente.")
     except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
+
+    # Los tokens de un solo proposito (p. ej. verificacion de correo, ver
+    # create_email_verification_token) se firman con el mismo CLIENT_JWT_SECRET pero
+    # llevan un claim `purpose` que un token de sesion real nunca tiene - si esta presente,
+    # se rechaza aqui para que un enlace de verificacion filtrado no sirva tambien como
+    # token de sesion valido (misma firma, mismo sub/exp).
+    if payload.get("purpose") is not None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
 
     client = await db.scalar(select(ClientAccount).where(ClientAccount.uuid == payload.get("sub")))
