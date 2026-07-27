@@ -398,12 +398,19 @@ Respuesta `200`:
       "total": 129.99,
       "totalQuantity": 3,
       "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": null }, "deliveryType": "PICKUP" },
-      "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA" } ],
+      "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
       "createdAt": "2026-07-10T18:32:05Z"
     }
   ]
 }
 ```
+
+Cada elemento de `items` lleva `imageUrl` (la `image_url` del producto en el catálogo local al
+momento de crear la orden, `null` si el producto no la tenía) — pensado para que el frontend pueda
+mostrar la imagen de cada producto en el historial de pedidos y en el correo de confirmación
+(mismo campo también viaja en el webhook `order-confirmed`, ver más abajo). Órdenes creadas antes
+de este cambio no tienen `imageUrl` en sus `items` — trátalo como opcional/posiblemente ausente,
+no solo posiblemente `null`.
 
 ### `GET /v1/auth/me/orders/{orderUuid}` — detalle de un pedido
 
@@ -878,7 +885,7 @@ token de auth — aquí no hay token, así que van explícitos en el body:
   "total": 129.99,
   "totalQuantity": 3,
   "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": "juan@example.com" }, "deliveryType": "PICKUP" },
-  "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA" } ],
+  "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
   "createdAt": "2026-07-10T18:32:05Z",
   "clientEmail": "juan@example.com",
   "clientName": "Juan Pérez"

@@ -42,7 +42,7 @@ def _parse_sicar_date(value) -> datetime | None:
         logger.warning(f"No se pudo interpretar la fecha de Sicar X: {value!r}")
         return None
 
-async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, sicar_response: dict) -> Order:
+async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, sicar_response: dict, local_products: dict | None = None) -> Order:
     """Persiste localmente la orden recien creada (y reservada) en Sicar X, ANTES de
     intentar cualquier cobro con Mercado Pago - status siempre "TO_PAY" en este punto
     (pay_order_in_sicar todavia no corre; ver order_history_service.finalize_order_payment,
@@ -51,8 +51,22 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
     ordenes por cliente (ver CLAUDE.md).
 
     `sicar_response` es la respuesta de `create_order_in_sicar` (creacion del documento),
-    no la de `pay_order_in_sicar` (que ya no corre en este punto del flujo)."""
+    no la de `pay_order_in_sicar` (que ya no corre en este punto del flujo).
+
+    `local_products` (sicar_uuid -> Product, el mismo dict ya cargado en routes/orders.py
+    para build_order_payload) se usa solo para agregar `imageUrl` a cada item guardado
+    aqui - una copia de `eco_order["products"]`, NUNCA el mismo objeto que ya se envio a
+    Sicar X en create_order_in_sicar (ese ya salio por la red antes de llegar aqui, asi
+    que agregarle un campo extra en este punto no afecta lo que Sicar X recibio)."""
     eco_order = order_payload_dict["ecOrderDto"]
+    local_products = local_products or {}
+
+    items = []
+    for line in eco_order.get("products") or []:
+        item = dict(line)
+        product = local_products.get(item.get("uuid"))
+        item["imageUrl"] = product.image_url if product else None
+        items.append(item)
 
     order = Order(
         client_account_id=client_account_id,
@@ -68,7 +82,7 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
         total=Decimal(str(eco_order.get("total"))),
         total_quantity=Decimal(str(order_payload_dict.get("totalQuantity"))),
         delivery_info=eco_order.get("deliveryInfo"),
-        items=eco_order.get("products"),
+        items=items,
     )
     db.add(order)
     await db.commit()

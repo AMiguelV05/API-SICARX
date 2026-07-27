@@ -46,7 +46,10 @@ class Order(Base):
 
     # Snapshot al momento de la orden (misma estructura que produce build_order_payload,
     # no se consulta dentro de estos campos, asi que JSON simple basta - igual que
-    # Product.additional_skus/additional_images).
+    # Product.additional_skus/additional_images). `items` es una COPIA de
+    # ecOrderDto["products"] con un campo extra, `imageUrl` (Product.image_url por linea,
+    # agregado en order_history_service.create_local_order) - nunca el mismo objeto
+    # enviado a Sicar X, que no lleva ese campo.
     delivery_info = Column(JSON, nullable=False)
     items = Column(JSON, nullable=False)
 

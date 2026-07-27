@@ -147,6 +147,7 @@ async def create_order(
             client_account_id=client.id,
             order_payload_dict=order_payload_dict,
             sicar_response=sicar_response,
+            local_products=local_products,
         )
 
         # No fatal: la orden sigue soportando tarjeta/OXXO sin la opcion de wallet si
