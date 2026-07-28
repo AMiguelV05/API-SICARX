@@ -218,7 +218,20 @@ async def create_order_in_sicar(db: AsyncSession, order_payload: dict, client_to
     # Descuento local de inventario, en una sola sentencia por lote en vez de un UPDATE
     # awaited por linea.
     deltas = [(item.get("uuid"), -_to_decimal(item.get("quantity", 0))) for item in products_data]
-    await apply_stock_deltas(db, deltas)
+    try:
+        await apply_stock_deltas(db, deltas)
+    except Exception:
+        # La orden ya existe en Sicar X (reservo stock ahi) pero el descuento local fallo -
+        # se registra aqui, con el id/folio de Sicar todavia disponibles, porque una falla
+        # en este punto nunca completa la asignacion `sicar_response = await
+        # create_order_in_sicar(...)` en el llamador, así que su propio log de "orden
+        # huerfana" (routes/orders.py) nunca se dispara para este caso.
+        logger.critical(
+            f"Orden ya creada en Sicar X (id={sicar_response.get('id')}, "
+            f"folio={sicar_response.get('serieFolio')}) pero fallo el descuento de stock local: "
+            "requiere reconciliacion manual."
+        )
+        raise
 
     return sicar_response
 

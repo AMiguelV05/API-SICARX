@@ -10,7 +10,7 @@ class ProductItem(CamelModel):
 
 class ContactInfo(CamelModel):
     name: str
-    phone: str
+    phone: str = Field(max_length=10, description="Sicar X rechaza telefonos de mas de 10 caracteres")
     email: Optional[EmailStr] = None
 
 class DeliveryInfo(CamelModel):
