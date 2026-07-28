@@ -19,6 +19,6 @@ async def apply_stock_deltas(db: AsyncSession, deltas: list[tuple[str, Decimal]]
         update(Product)
         .where(Product.sicar_uuid == bindparam("p_uuid"))
         .values(stock=Product.stock + bindparam("p_delta"))
-        .execution_options(synchronize_session=False)
+        .execution_options(dml_strategy="core_only")
     )
     await db.execute(stmt, params)
