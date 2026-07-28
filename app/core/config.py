@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -27,6 +28,16 @@ class Settings(BaseSettings):
     # se usa aqui para validar el claim `aud` del token. No requiere GOOGLE_CLIENT_SECRET:
     # este backend nunca intercambia tokens con Google directamente.
     GOOGLE_CLIENT_ID: str
+
+    # Webhook saliente hacia un futuro dashboard admin (order-cancelled, ver
+    # app/services/admin_notification_service.py) - a diferencia de TODAS las demas
+    # variables de este archivo, estas dos son deliberadamente OPCIONALES (no "New
+    # required var alert" de CLAUDE.md): el dashboard admin todavia no existe, asi que
+    # no hay un valor real que darles hoy. admin_notification_service se queda callado
+    # (solo loggea a INFO) si cualquiera de las dos falta, en vez de romper el arranque
+    # de pydantic-settings para api/worker por infraestructura que aun no existe.
+    ADMIN_DASHBOARD_BASE_URL: Optional[str] = None
+    ADMIN_WEBHOOK_SECRET: Optional[str] = None
 
     class Config:
         env_file = ".env"

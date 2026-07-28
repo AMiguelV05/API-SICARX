@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Numeric, JSON, DateTime, ForeignKey, UniqueConstraint, func
+from sqlalchemy import Column, Integer, String, Numeric, JSON, DateTime, ForeignKey, Index, UniqueConstraint, func, text
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -18,6 +18,12 @@ class Order(Base):
 
     # Identificadores de Sicar X
     sicar_order_id = Column(String, unique=True, index=True, nullable=False)  # "id" de la respuesta de pago/dispatch
+    # uuid RFC4122 real del documento (distinto de sicar_order_id, que es el "id" estilo
+    # Mongo) - lo exige /documents/v1/sale/cancel. Nulo hasta la primera cancelacion:
+    # se resuelve una vez via cancel_service._resolve_document_uuid y se cachea aqui para
+    # que los reintentos del worker (app/worker/sicar_sync_worker.py) no repitan esa
+    # consulta en cada intento.
+    sicar_document_uuid = Column(String, nullable=True)
     serie_folio = Column(String, nullable=True)
     sicar_date = Column(DateTime(timezone=True), nullable=True)
 
@@ -56,6 +62,17 @@ class Order(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 
+    # Soft-delete para DELETE /orders/{id}: antes borraba la fila por completo, pero eso
+    # rompia el patron de cancelacion local-first (el worker necesita que la fila siga
+    # existiendo para poder seguir intentando la cancelacion en Sicar X - ver
+    # app/worker/sicar_sync_worker.py). En vez de eso se marca aqui y se filtra en las
+    # consultas de cara al cliente (list_client_orders, get_client_order,
+    # get_owned_order_by_sicar_id, get_order_by_uuid) para que siga desapareciendo del
+    # historial exactamente como documenta FRONTEND_INTEGRATION.md. Un solo columna
+    # nullable (a diferencia del par is_deleted/deleted_at de Product, que es un
+    # accidente historico de dos migraciones seguidas, no un patron a propósito).
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
     # Datos del pago con Mercado Pago (ver app/services/payment_service.py). Nulos
     # mientras no se haya intentado ningun cobro (p. ej. justo despues de crear la
     # orden, antes de que el Payment Brick haga submit).
@@ -89,3 +106,41 @@ class OrderIdempotencyKey(Base):
     # a medio camino) - ver order_idempotency_service.claim_idempotency_key.
     order_uuid = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class SicarSyncOutbox(Base):
+    """Cola de sincronizacion asincrona hacia Sicar X: cancelar una orden localmente
+    (order_history_service.prepare_local_cancellation) ya no espera a que Sicar X
+    confirme - restaura stock, marca CANCELLED y encola una fila aqui en la misma
+    transaccion. app/worker/sicar_sync_worker.py drena esta tabla en un job aparte,
+    con reintentos, para que un Sicar X caido nunca bloquee una cancelacion. `action`
+    es deliberadamente generico ("CANCEL" hoy) para poder reusar este mecanismo con
+    otras operaciones a futuro (p. ej. pay_order_in_sicar) sin necesitar otra tabla.
+
+    `status` incluye IN_PROGRESS (ademas de PENDING/SUCCEEDED/FAILED) para que el
+    worker pueda reclamar una fila y soltar el lock de inmediato en vez de mantenerlo
+    abierto durante toda la llamada HTTP a Sicar X - ver sicar_sync_worker.py. Una fila
+    IN_PROGRESS cuyo updated_at ya es viejo (worker caido a medio proceso) vuelve a ser
+    reclamable despues de un tiempo, en vez de quedar huerfana para siempre."""
+    __tablename__ = "sicar_sync_outbox"
+    __table_args__ = (
+        Index("ix_sicar_sync_outbox_order_id", "order_id"),
+        Index("ix_sicar_sync_outbox_status_next_attempt_at", "status", "next_attempt_at"),
+        Index(
+            "ix_sicar_sync_outbox_one_pending_per_order_action",
+            "order_id", "action",
+            unique=True,
+            postgresql_where=text("status in ('PENDING', 'IN_PROGRESS')"),
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
+    action = Column(String, nullable=False)  # "CANCEL" hoy
+    cash_register_uuid = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="PENDING")  # PENDING/IN_PROGRESS/SUCCEEDED/FAILED
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(String, nullable=True)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())

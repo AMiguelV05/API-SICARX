@@ -5,11 +5,12 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
-from app.models.order import Order
-from app.schemas.orders import ProductItem
-from app.services.cancel_service import fetch_document_dispatch_status, process_order_cancellation
+from app.models.order import Order, SicarSyncOutbox
+from app.services.cancel_service import fetch_document_dispatch_status
 from app.services.order_notification_service import notify_order_confirmed
-from app.services.order_service import pay_order_in_sicar
+from app.services.order_cancellation_notification_service import notify_order_cancelled
+from app.services.order_service import pay_order_in_sicar, _to_decimal
+from app.services.product_stock_service import apply_stock_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -98,11 +99,12 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
 
 async def list_client_orders(db: AsyncSession, client_account_id: int, limit: int, offset: int) -> tuple[int, list[Order]]:
     total = await db.scalar(
-        select(func.count()).select_from(Order).where(Order.client_account_id == client_account_id)
+        select(func.count()).select_from(Order)
+        .where(Order.client_account_id == client_account_id, Order.deleted_at.is_(None))
     )
     result = await db.execute(
         select(Order)
-        .where(Order.client_account_id == client_account_id)
+        .where(Order.client_account_id == client_account_id, Order.deleted_at.is_(None))
         .order_by(Order.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -111,7 +113,9 @@ async def list_client_orders(db: AsyncSession, client_account_id: int, limit: in
 
 async def get_client_order(db: AsyncSession, client_account_id: int, order_uuid: str) -> Order:
     order = await db.scalar(
-        select(Order).where(Order.uuid == order_uuid, Order.client_account_id == client_account_id)
+        select(Order).where(
+            Order.uuid == order_uuid, Order.client_account_id == client_account_id, Order.deleted_at.is_(None)
+        )
     )
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
@@ -120,9 +124,18 @@ async def get_client_order(db: AsyncSession, client_account_id: int, order_uuid:
 async def get_owned_order_by_sicar_id(db: AsyncSession, client_account_id: int, sicar_order_id: str) -> Order:
     """Usada por POST /cancel para verificar que la orden a cancelar pertenece al
     cliente autenticado antes de proceder - 404 en vez de 403 para no filtrar la
-    existencia de ordenes de otros clientes (mismo patron que address_service)."""
+    existencia de ordenes de otros clientes (mismo patron que address_service).
+
+    Filtra `deleted_at.is_(None)`: una orden ya borrada via DELETE /orders/{id} debe
+    resolver como "no encontrada" - sin esto, un segundo DELETE o un /cancel posterior
+    sobre la misma orden encontraria la fila (soft-deleted) y reabriria un camino que
+    con el borrado duro de antes era imposible (ver Riesgo R2 del plan)."""
     order = await db.scalar(
-        select(Order).where(Order.sicar_order_id == sicar_order_id, Order.client_account_id == client_account_id)
+        select(Order).where(
+            Order.sicar_order_id == sicar_order_id,
+            Order.client_account_id == client_account_id,
+            Order.deleted_at.is_(None),
+        )
     )
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
@@ -132,8 +145,13 @@ async def get_order_by_uuid(db: AsyncSession, order_uuid: str) -> Order | None:
     """Sin filtro de cliente - usada por el webhook de Mercado Pago
     (`POST /payments/webhook`), que no tiene identidad de cliente (lo llama Mercado
     Pago, no el frontend). `order_uuid` es el `external_reference` que se manda a
-    Mercado Pago en `create_preference`/`create_payment`."""
-    return await db.scalar(select(Order).where(Order.uuid == order_uuid))
+    Mercado Pago en `create_preference`/`create_payment`.
+
+    Filtra `deleted_at.is_(None)` por la misma razon que get_owned_order_by_sicar_id:
+    una orden borrada por el cliente (DELETE /orders/{id}) no debe poder ser
+    resucitada/mutada por una notificacion de pago tardia (p. ej. una ficha OXXO
+    pagada despues de "eliminar" la reserva) - ver Riesgo R2 del plan."""
+    return await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
 
 async def refresh_order_status_if_needed(db: AsyncSession, order: Order) -> Order:
     """Refresca dispatch_status/dispatch_history desde Sicar X (generatedV2, ver
@@ -158,6 +176,68 @@ async def refresh_order_status_if_needed(db: AsyncSession, order: Order) -> Orde
     if changed:
         await db.commit()
         await db.refresh(order)
+
+    return order
+
+async def prepare_local_cancellation(
+    db: AsyncSession, order: Order, *, cash_register_uuid: str | None = None, require_status: str | None = None,
+) -> Order:
+    """Deja una orden lista para cancelarse LOCALMENTE, sin tocar Sicar X todavia:
+    relockea la fila, restaura stock, marca CANCELLED y encola una fila en
+    sicar_sync_outbox para que app/worker/sicar_sync_worker.py le avise a Sicar X de
+    forma asincrona, con reintentos. Es el unico punto que llaman las 3 rutas de
+    cancelacion (POST /cancel, DELETE, y la rama rejected/cancelled de
+    finalize_order_payment mas abajo) - no duplicar esta logica en ninguna de ellas.
+
+    Relockea con SELECT...FOR UPDATE y re-chequea el status DENTRO del lock (no antes):
+    al quitar la llamada sincrona a Sicar X de la ruta de cancelacion, se perdio el
+    mutex accidental que esa llamada representaba (hoy, dos cancelaciones concurrentes
+    sobre la misma orden se resuelven porque Sicar X rechaza la segunda antes de que
+    llegue a restaurar stock). Sin este lock, dos intentos concurrentes (doble click, o
+    /cancel corriendo contra un webhook de Mercado Pago tardio) podrian pasar ambos un
+    chequeo "todavia no esta CANCELLED" sin lock y restaurar stock por duplicado.
+    Re-entrante y no-op seguro para finalize_order_payment, que ya sostiene este mismo
+    lock cuando llama aqui.
+
+    `require_status` permite que DELETE (solo valido sobre TO_PAY) lo exija DENTRO del
+    lock, no solo en un chequeo previo a el - sin esto, un /pay que gane la carrera
+    contra un DELETE podria dejar la orden en PAID y que DELETE la cancelara de todos
+    modos.
+
+    `cash_register_uuid` se captura aqui (en la fila de outbox) porque, una vez que la
+    llamada real a Sicar X se difiere al worker, ya no hay acceso a la caja registradora
+    que el cliente pidio en el request original (OrderCancel.cashRegisterUuid) - sin
+    esto se perderia silenciosamente. Si no se especifica, usa la caja por default.
+
+    NO hace commit - mismo patron que el resto de este archivo, el llamador es
+    responsable de un unico commit."""
+    locked_result = await db.execute(
+        select(Order)
+        .where(Order.id == order.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    order = locked_result.scalar_one()
+
+    if order.status == "CANCELLED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
+    if require_status is not None and order.status != require_status:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Esta orden ya no está en el estado esperado para esta operación.",
+        )
+
+    deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
+    await apply_stock_deltas(db, deltas)
+
+    order.status = "CANCELLED"
+    db.add(SicarSyncOutbox(
+        order_id=order.id,
+        action="CANCEL",
+        cash_register_uuid=cash_register_uuid or settings.CASH_REGISTER_UUID,
+        status="PENDING",
+        next_attempt_at=datetime.now(timezone.utc),
+    ))
 
     return order
 
@@ -190,15 +270,17 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     segundo en llegar vea el estado ya actualizado por el primero (status == PAID) en
     vez de aplicar `pay_order_in_sicar`/`notify_order_confirmed` por duplicado.
 
-    Nota sobre atomicidad: `pay_order_in_sicar`/`process_order_cancellation` (llamadas HTTP
-    reales a Sicar/restauracion de stock, esta ultima ya no hace su propio commit - ver
-    cancel_service.process_order_cancellation) ocurren ANTES del unico `db.commit()` de
-    esta funcion, que es lo mas cerca que se puede quedar de "un solo commit para todos
-    los cambios locales" sin una infraestructura de outbox/saga (que este codebase no
-    tiene). Si esa llamada HTTP externa ya tuvo exito pero el commit de abajo falla, el
-    estado local queda desincronizado de lo que realmente paso en Sicar/Mercado Pago -
-    ese caso no se puede cerrar del todo aqui, solo se vuelve diagnosticable (ver el log
-    CRITICAL mas abajo) en vez de silencioso."""
+    Nota sobre atomicidad: esto ya solo aplica al camino PAID. `pay_order_in_sicar`
+    (llamada HTTP real a Sicar X) ocurre ANTES del unico `db.commit()` de esta funcion,
+    que es lo mas cerca que se puede quedar de "un solo commit para todos los cambios
+    locales" sin una infraestructura de outbox/saga para ese camino especifico. Si esa
+    llamada HTTP externa ya tuvo exito pero el commit de abajo falla, el estado local
+    queda desincronizado de lo que realmente paso en Sicar/Mercado Pago - ese caso no se
+    puede cerrar del todo aqui, solo se vuelve diagnosticable (ver el log CRITICAL mas
+    abajo) en vez de silencioso. El camino CANCELLED ya no tiene este problema: desde
+    que existe sicar_sync_outbox (ver prepare_local_cancellation arriba), la cancelacion
+    en Sicar X es asincrona y con reintentos - si el commit de abajo falla, Sicar X
+    nunca llego a tocarse, asi que no hay nada que reconciliar."""
     locked_result = await db.execute(
         select(Order)
         .where(Order.id == order.id)
@@ -218,6 +300,7 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
         order.mp_ticket_url = ticket_url
 
     became_paid = False
+    became_cancelled = False
     if mp_status in MP_APPROVED_STATUSES:
         if order.status != "PAID":
             became_paid = True
@@ -232,17 +315,8 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
         order.status = "TO_PAY"
     elif mp_status in MP_FAILED_STATUSES:
         if order.status != "CANCELLED":
-            products_to_restore = [
-                ProductItem(uuid=item.get("uuid"), quantity=float(item.get("quantity", 0)))
-                for item in (order.items or [])
-            ]
-            await process_order_cancellation(
-                db,
-                order.sicar_order_id,
-                settings.CASH_REGISTER_UUID,
-                products_to_restore,
-            )
-        order.status = "CANCELLED"
+            became_cancelled = True
+            order = await prepare_local_cancellation(db, order)
 
     try:
         await db.commit()
@@ -262,6 +336,11 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             await notify_order_confirmed(order)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_order_confirmed) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
+    if became_cancelled:
+        try:
+            await notify_order_cancelled(order)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

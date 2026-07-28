@@ -22,7 +22,7 @@ con un error de CORS aunque la petición en sí llegue bien al backend.
 
 ## Dos capas de autenticación — no confundirlas
 
-### 1. `x-api-key` — obligatorio en **todas** las rutas
+### 1. `x-api-key` — obligatorio en **todas** las rutas que llama el frontend
 
 Header estático que autentica al frontend contra esta API (no contra Sicar X). Un solo valor,
 provisto por el equipo backend, se manda igual en cada request:
@@ -31,7 +31,10 @@ provisto por el equipo backend, se manda igual en cada request:
 x-api-key: <valor provisto por backend>
 ```
 
-Sin este header, cualquier ruta responde `403`.
+Sin este header, cualquier ruta responde `403`. La única excepción en todo el backend es
+`POST /v1/payments/webhook` (lo llama Mercado Pago, no el frontend — no puede mandar este
+header; se autentica distinto, ver esa sección más abajo) — no es una ruta que el frontend
+necesite llamar nunca.
 
 ### 2. Token de sesión de Sicar X — solo para `POST /v1/orders`
 
@@ -138,7 +141,9 @@ Respuesta `200`:
 }
 ```
 
-Guarda `token` — es lo que se reenvía como `Authorization` en `/v1/orders`.
+Guarda `token` — es lo que se reenvía como `Authorization` en `/v1/orders`. Limitado a 30
+solicitudes por minuto por IP (`429` si se excede). `502` si Sicar X no responde al crear o
+refrescar la sesión — reintenta más tarde.
 
 ### `POST /v1/auth/register` / `POST /v1/auth/login` — cuentas de cliente (login propio, separado de Sicar X)
 
@@ -221,7 +226,9 @@ Content-Type: application/json
 
 Misma respuesta `200` que arriba (incluyendo `cart`), mismo comportamiento de `cartToken`
 (opcional, tolerante a token ausente/inválido, fusiona en la misma llamada si es válido). `401` si
-el correo o la contraseña son incorrectos. El correo no distingue mayúsculas/minúsculas
+el correo o la contraseña son incorrectos. `403` si la cuenta existe y la contraseña es correcta
+pero fue desactivada (`is_active: false` — no hay flujo de autoservicio para reactivarla hoy,
+requiere intervención manual). El correo no distingue mayúsculas/minúsculas
 (`Juan@x.com` y `juan@x.com` son la misma cuenta), así que no hace falta normalizar nada del lado
 del frontend. `/v1/auth/login` está limitado a 5 intentos por minuto por IP — pasado ese límite
 responde `429` con `{"error": "Rate limit exceeded: ..."}`.
@@ -230,8 +237,7 @@ Guarda el `token` de la respuesta — se reenvía en dos lugares distintos: como
 `GET`/`PATCH /v1/auth/me` (y las rutas de direcciones/historial de pedidos abajo), y como
 `X-Client-Token` en `POST /v1/orders`/`POST /v1/orders/{order_id}/cancel` (ver "Dos capas de
 autenticación" arriba — ahí sí importa la cabecera exacta, `Authorization` está ocupada por el
-token de sesión de Sicar X en esas dos rutas). Login es obligatorio para comprar — ya no existe
-checkout anónimo.
+token de sesión de Sicar X en esas dos rutas).
 
 ### `POST /v1/auth/google` — iniciar sesión o registrarse con Google
 
@@ -260,7 +266,8 @@ backend deliberadamente no fusiona las cuentas automáticamente (evita que la co
 haya registrado ese correo primero, sin probar que le pertenece, se quede vigente sobre lo que el
 dueño real ahora cree que es una cuenta asegurada por Google). En ese caso, muéstrale al usuario
 que inicie sesión con su contraseña — todavía no existe un flujo de "vincular Google a mi cuenta
-existente". Limitado a 10 intentos por minuto por IP.
+existente". `403` si la cuenta de Google ya existente fue desactivada (mismo caso que en
+`/v1/auth/login`). Limitado a 10 intentos por minuto por IP.
 
 ### `POST /v1/auth/verify-email` — confirmar verificación de correo
 
@@ -613,9 +620,45 @@ GET /v1/products/3Cny4OOxdX1GoSzL9rEsTZNL7un
 x-api-key: <api-key>
 ```
 
-Respuesta `200` incluye todos los campos de `POST /v1/products` más `tags`, `additionalImages`,
-`descriptionDetails` (puede tardar un poco más la primera vez si el detalle está desactualizado
-— internamente refresca desde Sicar X antes de responder).
+`404` si el `uuid` no existe, o si el producto fue descontinuado/ocultado del catálogo
+(`isDeleted`/`isActive` — mismo filtro que `/v1/products`/`/v1/search`).
+
+Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `sku`, `name`,
+`descriptionDetails`, `imageUrl`, `price`, `stock`) más varios que solo trae el detalle:
+
+```json
+{
+  "id": 40213,
+  "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+  "sku": "PR2057",
+  "additionalSkus": null,
+  "name": "PORTAROLLO",
+  "descriptionDetails": "Portarollo de acero inoxidable...",
+  "imageUrl": null,
+  "tags": ["oferta"],
+  "additionalImages": null,
+  "salesUnitUuid": "0b8b0848-3880-4085-b213-3b3d30c79429",
+  "departmentUuid": "4aa3e82c-3ea2-4018-b8a7-12e727247cfa",
+  "categoryUuid": "137bcaba-5aa2-4559-8545-2cab151d8369",
+  "price": 8.62069,
+  "stock": 2.0,
+  "isBulk": false,
+  "isActive": true,
+  "isDeleted": false,
+  "lastSyncId": "a1b2c3d4",
+  "detailsUpdatedAt": "2026-07-27T10:15:00Z",
+  "deletedAt": null
+}
+```
+
+`tags`/`additionalImages`/`additionalSkus` pueden venir `null` en vez de un arreglo vacío si
+Sicar X no tiene nada que reportar. `isActive`/`isDeleted` siempre vienen `true`/`false`
+respectivamente en esta ruta (el `404` de arriba ya descarta cualquier otro caso) — no hace
+falta revisarlos en el frontend, solo se incluyen porque son parte del modelo interno.
+`id`/`lastSyncId` son identificadores internos de sincronización, no pensados para mostrarse
+en la UI. Puede tardar un poco más la primera vez que se pide un producto (o si
+`detailsUpdatedAt` tiene más de 24h) — internamente refresca `tags`/`additionalImages`/
+`additionalSkus`/`descriptionDetails`/`salesUnitUuid` desde Sicar X antes de responder.
 
 ### `GET /v1/taxonomy` — departamentos y categorías (para filtros)
 
@@ -783,9 +826,8 @@ como el de login.
 ### `POST /v1/orders` — reservar pedido (todavía no cobra)
 
 Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, impuestos,
-sku, totales) lo calcula el backend.** Requiere **login** — ver punto 3 de "Dos capas de
-autenticación" arriba: `X-Client-Token` es obligatorio junto con `Authorization`, ya no existe
-checkout anónimo.
+sku, totales) lo calcula el backend.** Requiere **login** (ver punto 3 de "Dos capas de
+autenticación" arriba): `X-Client-Token` es obligatorio junto con `Authorization`.
 
 ```http
 POST /v1/orders
@@ -996,6 +1038,33 @@ falla o tarda. Responde `200` rápido y trata cualquier falla de tu lado como de
 tú mismo del lado del frontend antes de disparar el correo, o avisa al equipo de backend
 para evaluar una cola de reintentos ahí.
 
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-cancelled`
+
+Mismo mecanismo que `order-confirmed` de arriba — este backend llama a esta ruta
+directamente (nunca el navegador) en el momento exacto en que un pedido pasa a
+`"CANCELLED"`, ya sea porque el cliente lo canceló (`POST /v1/orders/{order_id}/cancel`),
+lo eliminó (`DELETE /v1/orders/{order_id}`), o porque un pago con Mercado Pago fue
+rechazado/cancelado (webhook de Mercado Pago o el `POST /v1/orders/{order_id}/pay`
+síncrono). Implementa esta ruta para disparar tu propio correo de cancelación, igual que
+con `order-confirmed`.
+
+**Verificación de firma**: exactamente el mismo esquema que `order-confirmed` — mismos
+headers, mismo secreto compartido (`FRONTEND_WEBHOOK_SECRET`), misma fórmula de manifest.
+No la repetimos aquí — consulta la sección de `order-confirmed` arriba.
+
+**Body**: mismo shape que `order-confirmed` (un elemento de `GET /v1/auth/me/orders/{orderUuid}`
+más `clientEmail`/`clientName`), con `"status": "CANCELLED"`.
+
+**Importante — la cancelación en Sicar X puede seguir en curso cuando llega este
+webhook.** La cancelación local ya es un hecho consumado antes de que Sicar X confirme
+nada — ver la nota sobre `sicarTimestamp`/sincronización asíncrona en
+`POST /v1/orders/{order_id}/cancel` más abajo, no la repetimos aquí. Para el correo al
+cliente esto no importa: la cancelación ya es definitiva de su lado en cuanto reciben
+esta notificación.
+
+**Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde
+`200` rápido, no hay reintento automático si tu endpoint falla o tarda.
+
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/verification-requested`
 
 Mismo mecanismo que el webhook `order-confirmed` de arriba — este backend llama a esta
@@ -1134,12 +1203,23 @@ Respuesta `200`:
 }
 ```
 
+**Importante — esta respuesta ya no espera a Sicar X.** El pedido queda `CANCELLED` y el
+stock restaurado de inmediato en cuanto responde esta llamada (así un Sicar X caído nunca
+bloquea que un cliente cancele), pero avisarle a Sicar X ahora ocurre de forma asíncrona
+del lado del backend, con reintentos. `sicarTimestamp` pasó a significar "cuándo se aceptó
+la cancelación localmente", ya no "cuándo lo confirmó Sicar X" — para el frontend esto no
+cambia nada práctico, la cancelación ya es definitiva desde el punto de vista del cliente
+en cuanto llega esta respuesta `200`.
+
 ### `DELETE /v1/orders/{order_id}` — eliminar pedido reservado sin pagar
 
 Distinto de `/cancel`: `/cancel` conserva el pedido en el historial con `status: "CANCELLED"`;
 `DELETE` lo borra por completo del historial del cliente (`GET /v1/auth/me/orders` ya no lo
 lista). Úsalo para "descartar" una reserva que el cliente nunca terminó de pagar (p. ej. un botón
-de "eliminar" sobre un pedido en `TO_PAY`, en vez de "cancelar pedido").
+de "eliminar" sobre un pedido en `TO_PAY`, en vez de "cancelar pedido"). El contrato de cara al
+frontend no cambia con el cambio de `/cancel` de arriba (misma sincronización asíncrona con
+Sicar X de fondo, ver esa sección) — esta ruta sigue devolviendo `204` de inmediato y el pedido
+sigue desapareciendo de `GET /v1/auth/me/orders` en el acto.
 
 Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
 (mismo criterio que `/cancel`). Solo funciona sobre pedidos en `status: "TO_PAY"` — `409` si el

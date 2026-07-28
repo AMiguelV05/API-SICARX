@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 from app.core.sicar_headers import bearer_json_headers
+from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 handler = RotatingFileHandler(
@@ -207,8 +208,12 @@ async def scheduled_job():
 
 async def main():
     scheduler = AsyncIOScheduler()
-    
+
     scheduler.add_job(scheduled_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
+    # Drena sicar_sync_outbox (cancelaciones locales pendientes de avisarle a Sicar X) -
+    # cadencia mas corta que el sync de catalogo porque una cancelacion es sensible al
+    # tiempo, no un simple refresco de datos. Ver app/worker/sicar_sync_worker.py.
+    scheduler.add_job(scheduled_sicar_sync_job, 'interval', minutes=1, max_instances=1, coalesce=True, next_run_time=datetime.now())
     scheduler.start()
     
     # Mantiene el hilo principal vivo

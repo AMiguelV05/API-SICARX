@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Body, Header, Request, status
 from sqlalchemy import select
@@ -8,13 +9,13 @@ from app.core.rate_limit import limiter
 from app.models.product import Product
 from app.models.order import Order
 from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar
-from app.services.cancel_service import process_order_cancellation
 from app.services.session_service import get_or_refresh_customer_session
-from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment
+from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment, prepare_local_cancellation
+from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
 from app.services.address_service import get_owned_address
 from app.services import payment_service
-from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse, ProductItem
+from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -98,7 +99,12 @@ async def create_order(
         claim, is_new = await claim_idempotency_key(db, client.id, idempotency_key)
         if not is_new:
             if claim.order_uuid:
-                result = await db.execute(select(Order).where(Order.uuid == claim.order_uuid))
+                # deleted_at.is_(None): una orden borrada (DELETE /orders/{id}) no debe
+                # resucitarse via un reintento de idempotencia - debe caer al camino de
+                # crear una orden nueva, como si la clave no tuviera nada asociado.
+                result = await db.execute(
+                    select(Order).where(Order.uuid == claim.order_uuid, Order.deleted_at.is_(None))
+                )
                 cached_order = result.scalar_one_or_none()
                 if cached_order is not None:
                     logger.info(f"POST /orders con Idempotency-Key repetida ({idempotency_key}) para cliente {client.id} - devolviendo orden ya creada {cached_order.uuid}.")
@@ -307,73 +313,88 @@ async def cancel_order(
     cancel_payload: OrderCancel = Body(),
 ):
     """
-    Cancela un pedido en Sicar X y restaura el stock local. Usa el token admin/B2B
-    internamente para hablar con Sicar X, pero ahora también requiere el header
-    `X-Client-Token` (cuenta de cliente local): la orden debe pertenecer al cliente
-    autenticado, o se responde 404 (sin revelar si la orden existe pero es de otra
-    cuenta). `order_id` es el `id` devuelto por `POST /orders` (no un UUID real de Sicar);
-    el backend lo resuelve internamente al identificador que Sicar X espera antes de
-    cancelar.
+    Cancela un pedido localmente de inmediato (status, stock, notificaciones) y requiere
+    el header `X-Client-Token` (cuenta de cliente local): la orden debe pertenecer al
+    cliente autenticado, o se responde 404 (sin revelar si la orden existe pero es de
+    otra cuenta). `order_id` es el `id` devuelto por `POST /orders`.
 
-    Si la orden ya tiene un pago de Mercado Pago asociado, primero se limpia ese lado
-    (reembolso si ya estaba aprobado, o cancelacion si seguia pendiente/en proceso) antes
-    de tocar Sicar X — el dinero se resuelve antes que la contabilidad interna, mismo
-    orden que ya sigue `pay_order_in_sicar` en el flujo de cobro.
+    La cancelacion en Sicar X ya NO ocurre en esta llamada: se encola en
+    `sicar_sync_outbox` y la procesa `app/worker/sicar_sync_worker.py` de forma
+    asincrona, con reintentos - asi un Sicar X caido nunca bloquea que un cliente
+    cancele su pedido. `sicarTimestamp` en la respuesta es ahora el momento en que la
+    cancelacion se acepto localmente, no una confirmacion de Sicar X (ver
+    FRONTEND_INTEGRATION.md).
+
+    Si la orden ya tiene un pago de Mercado Pago asociado, se limpia ese lado
+    (reembolso si ya estaba aprobado, o cancelacion si seguia pendiente/en proceso) -
+    eso si sigue siendo sincrono, Mercado Pago es un sistema aparte con su propio
+    esquema de reintentos/webhooks. Si esta llamada pierde la carrera para cancelar la
+    orden (otra solicitud concurrente ya la marco CANCELLED primero) DESPUES de haber
+    resuelto el pago con Mercado Pago, el nuevo `mp_status` se conserva de todos modos
+    en vez de perderse en un rollback - ver el manejo de `mp_resolved_here` mas abajo.
 
     El stock se restaura a partir de `local_order.items` (lo realmente reservado al
     crear la orden), no de `cancel_payload.products` — ese campo se sigue aceptando por
     compatibilidad con el frontend pero ya no se usa para nada, ver FRONTEND_INTEGRATION.md.
     """
-    document_uuid = order_id
     cash_register_uuid = cancel_payload.cashRegisterUuid
 
     if not cash_register_uuid:
         logger.warning("Intento de cancelacion fallido: Falta la caja registradora.")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Falta la caja registradora.")
 
-    local_order = await get_owned_order_by_sicar_id(db, client.id, document_uuid)
+    local_order = await get_owned_order_by_sicar_id(db, client.id, order_id)
 
     if local_order.status == "CANCELLED":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
 
-    products_to_restore = [
-        ProductItem(uuid=item.get("uuid"), quantity=float(item.get("quantity", 0)))
-        for item in (local_order.items or [])
-    ]
+    # True si esta solicitud ya resolvio (reembolso/cancelacion) el pago de Mercado Pago
+    # - un hecho externo, no reversible - antes de intentar la cancelacion local. Si
+    # `prepare_local_cancellation` termina rechazando esta solicitud (409, otra
+    # solicitud concurrente ya cancelo la orden primero), el except de abajo usa esta
+    # bandera para NO revertir ese cambio de mp_status: el pago ya se resolvio de
+    # verdad, perderlo en un rollback dejaria la contabilidad local desincronizada de
+    # lo que realmente paso en Mercado Pago.
+    mp_resolved_here = False
 
     try:
         if local_order.mp_payment_id:
             if local_order.mp_status == "approved":
                 await payment_service.refund_payment(local_order.mp_payment_id)
                 local_order.mp_status = "refunded"
+                mp_resolved_here = True
             elif local_order.mp_status in ("pending", "in_process"):
                 await payment_service.cancel_payment(local_order.mp_payment_id)
                 local_order.mp_status = "cancelled"
+                mp_resolved_here = True
 
-        cancel_timestamp = await process_order_cancellation(
-            db,
-            document_uuid,
-            cash_register_uuid,
-            products_to_restore
-        )
-
-        local_order.status = "CANCELLED"
+        local_order = await prepare_local_cancellation(db, local_order, cash_register_uuid=cash_register_uuid)
+        cancel_timestamp = datetime.now(timezone.utc).timestamp() * 1000
         await db.commit()
 
-        logger.info(f"Pedido {document_uuid} cancelado exitosamente por cliente {client.email}. Stock restaurado.")
+        logger.info(f"Pedido {order_id} cancelado localmente por cliente {client.email}. Stock restaurado, sincronizacion con Sicar X encolada.")
+
+        try:
+            await notify_order_cancelled(local_order)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {local_order.uuid}: {type(e).__name__}: {e!r}")
+
         return OrderCancelResponse(
-            documentUuid=document_uuid,
+            documentUuid=order_id,
             sicarTimestamp=cancel_timestamp,
             message="Pedido cancelado exitosamente.",
             status="CANCELLED"
         )
 
     except HTTPException:
-        await db.rollback()
+        if mp_resolved_here:
+            await db.commit()
+        else:
+            await db.rollback()
         raise
     except Exception as e:
         await db.rollback()
-        logger.error(f"Error inesperado al cancelar el pedido {document_uuid}: {e}")
+        logger.error(f"Error inesperado al cancelar el pedido {order_id}: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al cancelar el pedido. Intenta más tarde.")
 
 
@@ -386,20 +407,31 @@ async def delete_order(
     db: DbDep,
 ):
     """
-    Borra definitivamente una orden que quedo reservada en Sicar X (`TO_PAY`) pero nunca
-    se pago. A diferencia de `POST /orders/{id}/cancel` (que conserva la fila local con
-    `status=CANCELLED` como registro), esta ruta elimina la fila de `orders` por completo:
-    una reserva jamas pagada no es un registro financiero real que valga la pena
-    conservar. Requiere `X-Client-Token`; la orden debe pertenecer al cliente autenticado
-    (404 si no, mismo patron que `/cancel`). Solo aplica a ordenes en `TO_PAY` - 409 si ya
-    esta `PAID` o `CANCELLED` (esas si se conservan y no se pueden borrar por aqui).
+    Descarta una orden que quedo reservada en Sicar X (`TO_PAY`) pero nunca se pago. Ya
+    NO borra la fila de `orders` por completo — la marca con `deleted_at` (soft-delete)
+    en su lugar, para que `app/worker/sicar_sync_worker.py` siga teniendo la fila
+    disponible y pueda avisarle a Sicar X de la cancelacion de forma asincrona (mismo
+    mecanismo que `/cancel`, ver `sicar_sync_outbox`). De cara al cliente el contrato no
+    cambia: `deleted_at` se filtra en todas las consultas de historial
+    (`list_client_orders`, `get_client_order`, `get_owned_order_by_sicar_id`,
+    `get_order_by_uuid`), asi que la orden desaparece de `GET /auth/me/orders` de
+    inmediato, exactamente como documenta FRONTEND_INTEGRATION.md - solo que ahora la
+    fila persiste (oculta) en vez de perderse, lo cual es estrictamente mejor: nada que
+    reconciliar se pierde si la sincronizacion con Sicar X llegara a fallar.
 
-    Antes de borrar la fila: cancela cualquier pago de Mercado Pago que haya quedado
-    pendiente/en proceso (OXXO sin pagar, tarjeta en revision - nunca `approved`, porque
-    eso ya habria puesto la orden en `PAID` y quedo excluido arriba), y cancela la
-    reserva en Sicar X restaurando el stock local (mismo `process_order_cancellation`
-    que usa `/cancel`, con `order.items` ya guardados en la fila en vez de pedirselos
-    de nuevo al frontend).
+    Requiere `X-Client-Token`; la orden debe pertenecer al cliente autenticado (404 si
+    no, mismo patron que `/cancel` — y sigue siendo 404, no 409, en una segunda llamada
+    sobre la misma orden ya borrada, porque el filtro de arriba hace que ya no se
+    encuentre: la ruta se mantiene idempotente). Solo aplica a ordenes en `TO_PAY` - 409
+    si ya esta `PAID` o `CANCELLED` (esas si se conservan visibles y no se pueden borrar
+    por aqui).
+
+    Antes de encolar la cancelacion: cancela cualquier pago de Mercado Pago que haya
+    quedado pendiente/en proceso (OXXO sin pagar, tarjeta en revision - nunca
+    `approved`, porque eso ya habria puesto la orden en `PAID` y quedo excluido arriba).
+    Si esta llamada pierde la carrera para cancelar la orden (otra solicitud
+    concurrente ya la marco CANCELLED primero) DESPUES de haber cancelado el pago con
+    Mercado Pago, el nuevo `mp_status` se conserva de todos modos - ver `mp_resolved_here`.
     """
     local_order = await get_owned_order_by_sicar_id(db, client.id, order_id)
 
@@ -409,28 +441,31 @@ async def delete_order(
             detail="Solo se pueden eliminar ordenes reservadas que aun no han sido pagadas ni canceladas."
         )
 
+    # Ver el comentario equivalente en cancel_order - misma razon.
+    mp_resolved_here = False
+
     try:
         if local_order.mp_payment_id and local_order.mp_status in ("pending", "in_process"):
             await payment_service.cancel_payment(local_order.mp_payment_id)
+            local_order.mp_status = "cancelled"
+            mp_resolved_here = True
 
-        products_to_restore = [
-            ProductItem(uuid=item.get("uuid"), quantity=float(item.get("quantity", 0)))
-            for item in (local_order.items or [])
-        ]
-        await process_order_cancellation(
-            db,
-            local_order.sicar_order_id,
-            settings.CASH_REGISTER_UUID,
-            products_to_restore,
-        )
-
-        await db.delete(local_order)
+        local_order = await prepare_local_cancellation(db, local_order, require_status="TO_PAY")
+        local_order.deleted_at = datetime.now(timezone.utc)
         await db.commit()
 
-        logger.info(f"Orden {order_id} (reservada, nunca pagada) eliminada por cliente {client.email}.")
+        logger.info(f"Orden {order_id} (reservada, nunca pagada) eliminada (soft-delete) por cliente {client.email}. Sincronizacion con Sicar X encolada.")
+
+        try:
+            await notify_order_cancelled(local_order)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {local_order.uuid}: {type(e).__name__}: {e!r}")
 
     except HTTPException:
-        await db.rollback()
+        if mp_resolved_here:
+            await db.commit()
+        else:
+            await db.rollback()
         raise
     except Exception as e:
         await db.rollback()

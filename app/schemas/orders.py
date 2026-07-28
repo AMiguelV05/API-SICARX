@@ -56,8 +56,8 @@ class OrderResponse(CamelModel):
     amount: float = Field(description="Total autoritativo de la orden - usar en initialization.amount del Payment Brick")
 
 class OrderCancelResponse(CamelModel):
-    documentUuid: str = Field(description="UUID del documento cancelado")
-    sicarTimestamp: float = Field(description="Timestamp de cancelación en Sicar")
+    documentUuid: str = Field(description="ID de la orden (sicar_order_id) cancelada")
+    sicarTimestamp: float = Field(description="Momento (epoch ms) en que la cancelación se aceptó localmente. Ya no es una confirmación de Sicar X: la sincronización con Sicar X ahora es asíncrona (ver sicar_sync_outbox) y ocurre después de esta respuesta.")
     message: str = Field(description="Mensaje de confirmación de cancelación")
     status: str = Field(description="Estado de la orden después de la cancelación")
 
