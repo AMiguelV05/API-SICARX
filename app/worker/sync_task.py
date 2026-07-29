@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
 from app.core.database import AsyncSessionLocal
-from app.models.product import Product
+from app.models.product import Product, SyncStatus
 from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
@@ -175,6 +175,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         logger.info(f"Sincronizacion finalizada")
         
     # Fase de limpieza
+    deactivated_count = 0
     if sync_completed_successfully:
         logger.info("Iniciando limpieza de productos eliminados")
         try:
@@ -189,22 +190,70 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     deleted_at=datetime.now(timezone.utc)
                 )
             )
-            
+
             result = await db.execute(stmt)
             await db.commit()
+            deactivated_count = result.rowcount
 
             logger.info(f"Limpieza completada. {result.rowcount} productos fueron desactivados.")
-                
+
         except Exception as e:
             await db.rollback()
             logger.error(f"Error de base de datos durante la limpieza: {e}")
 
+    return total_procesados, deactivated_count, sync_completed_successfully
+
+async def _record_sync_start() -> None:
+    """Upsert de la fila unica (id=1) de SyncStatus - ver GET /v1/admin/sync/catalog-status.
+    Sesion propia y corta, independiente de la sesion larga que sync_sicar_catalog usa
+    para las paginas de upsert de Product, para que un fallo dentro de esta escritura
+    nunca interfiera con la sincronizacion real."""
+    async with AsyncSessionLocal() as session:
+        stmt = insert(SyncStatus).values(id=1, last_run_started_at=datetime.now(timezone.utc))
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["id"],
+            set_={"last_run_started_at": stmt.excluded.last_run_started_at},
+        )
+        await session.execute(stmt)
+        await session.commit()
+
+async def _record_sync_result(*, success: bool, products_processed: int | None, products_deactivated: int | None, error: str | None) -> None:
+    async with AsyncSessionLocal() as session:
+        now = datetime.now(timezone.utc)
+        values = {
+            "id": 1,
+            "last_run_finished_at": now,
+            "products_processed": products_processed,
+            "products_deactivated": products_deactivated,
+            "last_error": error,
+        }
+        update_cols = {
+            "last_run_finished_at": None,
+            "products_processed": None,
+            "products_deactivated": None,
+            "last_error": None,
+        }
+        if success:
+            values["last_success_at"] = now
+            update_cols["last_success_at"] = None
+        stmt = insert(SyncStatus).values(**values)
+        update_cols = {k: getattr(stmt.excluded, k) for k in update_cols}
+        stmt = stmt.on_conflict_do_update(index_elements=["id"], set_=update_cols)
+        await session.execute(stmt)
+        await session.commit()
+
 async def scheduled_job():
     try:
+        await _record_sync_start()
         async with AsyncSessionLocal() as session:
-            await sync_sicar_catalog(session)
+            processed, deactivated, completed = await sync_sicar_catalog(session)
+        await _record_sync_result(success=completed, products_processed=processed, products_deactivated=deactivated, error=None)
     except Exception as e:
         logger.error(f"Fallo en la tarea programada: {e}")
+        try:
+            await _record_sync_result(success=False, products_processed=None, products_deactivated=None, error=str(e)[:2000])
+        except Exception as inner_e:
+            logger.error(f"Fallo tambien al registrar el error del sync en SyncStatus: {inner_e}")
 
 async def main():
     scheduler = AsyncIOScheduler()

@@ -87,6 +87,23 @@ class Order(Base):
     # OrderIdempotencyKey) sin volver a llamar a Mercado Pago.
     mp_preference_id = Column(String, nullable=True)
 
+    # Aceptacion administrativa (ver app/api/routes/admin.py, POST /admin/orders/{uuid}/accept).
+    # `accepted_by` es texto libre (identificador/nombre de quien acepto) - no existe un
+    # modelo de usuarios admin todavia, solo la llave estatica ADMIN_API_KEY, asi que no hay
+    # una FK real a la que apuntar. Independiente de dispatch_status (arriba): accepted_at
+    # es el gesto local de "un humano de este lado ya vio y acepto esta orden", que hoy en
+    # dia no empuja nada a Sicar X todavia - ver el stub de accion "ACCEPT" en
+    # app/worker/sicar_sync_worker.py.
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_by = Column(String, nullable=True)
+
+    # Metadato local de mensajeria (ver POST /admin/orders/{uuid}/assign-delivery).
+    # Deliberadamente texto libre, sin llamada a ninguna API de paqueteria (envia.com u
+    # otra) - mismo espiritu de placeholder que delivery_cost arriba, para no bloquear la
+    # funcionalidad admin en una integracion de courier que todavia no existe.
+    delivery_company = Column(String, nullable=True)
+    delivery_assigned_at = Column(DateTime(timezone=True), nullable=True)
+
     client_account = relationship("ClientAccount", back_populates="orders")
 
 

@@ -12,8 +12,14 @@ from app.models.order import Order, SicarSyncOutbox
 # ('ClientAccount')". El proceso api lo obtiene gratis via sus rutas de auth/addresses;
 # el worker no importa nada de app.models.client, asi que se agrega aqui explicitamente.
 from app.models.client import ClientAccount  # noqa: F401
-from app.services.cancel_service import process_order_cancellation
+from app.services.cancel_service import process_order_cancellation, advance_dispatch_status
 from app.services import admin_notification_service
+
+# dispatchStatus al que "aceptar" (ACCEPT) avanza un pedido - PENDING_ACCEPTANCE -> PENDING,
+# confirmado en vivo (ver cancel_service.advance_dispatch_status). El mismo endpoint de
+# Sicar X acepta cualquier valor de la secuencia PENDING/PREPARING/COMPLETE/DISPATCHED, pero
+# la accion ACCEPT del outbox solo cubre este primer avance por ahora.
+ACCEPT_TARGET_DISPATCH_STATUS = "PENDING"
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +89,14 @@ async def _process_claimed_row(row_id: int) -> None:
         try:
             if row.action == "CANCEL":
                 await process_order_cancellation(order, row.cash_register_uuid)
+            elif row.action == "ACCEPT":
+                # Mutacion real capturada en vivo (agent-browser contra el tablero de
+                # despacho de app.sicarx.com, 2026-07-29) - ver
+                # cancel_service.advance_dispatch_status. A diferencia de CANCEL, esta
+                # mutacion usa order.sicar_order_id directamente (no requiere resolver
+                # sicar_document_uuid primero).
+                await advance_dispatch_status(order, ACCEPT_TARGET_DISPATCH_STATUS)
+                order.dispatch_status = ACCEPT_TARGET_DISPATCH_STATUS
             else:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
 

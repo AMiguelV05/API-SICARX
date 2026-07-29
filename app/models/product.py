@@ -52,3 +52,21 @@ class Product(Base):
     last_sync_id = Column(String, index=True, nullable=True) # Columna para detectar productos a eliminar
     details_updated_at = Column(DateTime(timezone=True), nullable=True)  # Fecha de actualización de detalles
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # Fecha de eliminación del producto en Sicar
+
+
+class SyncStatus(Base):
+    """Fila unica (id=1) con el estado de la corrida mas reciente de sync_task.py -
+    last_sync_id de Product es un uuid4() por pasada, no una fecha, asi que antes de esta
+    tabla no habia forma de consultar "cuando corrio el ultimo sync exitoso" sin leer
+    sync.log directamente (invisible en Railway, ver CLAUDE.md). Escrita por
+    sync_sicar_catalog al iniciar y terminar cada pasada; leida por
+    GET /v1/admin/sync/catalog-status (app/api/routes/admin.py)."""
+    __tablename__ = "sync_status"
+
+    id = Column(Integer, primary_key=True)
+    last_run_started_at = Column(DateTime(timezone=True), nullable=True)
+    last_run_finished_at = Column(DateTime(timezone=True), nullable=True)
+    last_success_at = Column(DateTime(timezone=True), nullable=True)
+    products_processed = Column(Integer, nullable=True)
+    products_deactivated = Column(Integer, nullable=True)
+    last_error = Column(String, nullable=True)

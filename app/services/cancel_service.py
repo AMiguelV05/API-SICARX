@@ -9,6 +9,7 @@ from app.core.upstream_errors import raise_upstream_error
 
 CANCEL_URL = "https://api.sicarx.com/documents/v1/sale/cancel"
 DOCUMENT_GRAPH_URL = "https://api.sicarx.com/document-graph/v1/graph-v2"
+DISPATCH_URL = "https://api.sicarx.com/external/v1/dispatch"
 CANCEL_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 logger = logging.getLogger(__name__)
 
@@ -98,3 +99,54 @@ async def process_order_cancellation(order: Order, cash_register_uuid: str) -> s
         raise_upstream_error(response, f"Sicar X rechazo la cancelación del documento {order.sicar_document_uuid}", "Sicar X rechazó la cancelación del pedido.")
 
     return response.text
+
+async def advance_dispatch_status(order: Order, dispatch_status: str) -> None:
+    """Avanza el dispatchStatus de una orden en Sicar X (p. ej. PENDING_ACCEPTANCE -> PENDING
+    al aceptar un pedido). Mutacion real capturada en vivo (agent-browser contra
+    app.sicarx.com, tablero de despacho) el 2026-07-29 - PUT /external/v1/dispatch con el
+    admin token, usando `documentId` = order.sicar_order_id (el "id" estilo Mongo, NO el
+    uuid RFC4122 que exige la cancelacion - esta mutacion no necesita _resolve_document_uuid
+    en absoluto). El mismo endpoint acepta cualquier valor de la secuencia
+    PENDING/PREPARING/COMPLETE/DISPATCHED, confirmado probando la secuencia completa en vivo;
+    un valor fuera de esa vocabulario (se probo "FINISHED") responde 409.
+
+    `deliveryInfo` debe reenviarse completo en cada llamada (Sicar X no lo trata como un
+    PATCH parcial) - se reconstruye aqui desde `order.delivery_info`, el mismo snapshot que
+    ya se guarda en create_local_order. `deliveryManId`/`deliveryMan` van siempre en null:
+    son un concepto propio de Sicar X (repartidor interno) confirmado en la captura pero
+    nunca poblado en las ordenes de esta integracion - no representan lo mismo que
+    Order.delivery_company (mensajeria externa asignada via /admin, ver admin_service.py),
+    asi que no se mapean entre si."""
+    delivery_info = order.delivery_info or {}
+    contact_info = delivery_info.get("contactInfo") or {}
+
+    payload = {
+        "documentId": order.sicar_order_id,
+        "warehouseId": None,
+        "dispatchStatus": dispatch_status,
+        "deliveryInfo": {
+            "contactInfo": {
+                "name": contact_info.get("name"),
+                "phone": contact_info.get("phone"),
+                "email": contact_info.get("email"),
+                "address": contact_info.get("address"),
+            },
+            "deliveryType": delivery_info.get("deliveryType"),
+            "deliveryManId": None,
+            "deliveryMan": None,
+        },
+    }
+
+    async def attempt_advance(admin_token: str):
+        headers = admin_app_headers(admin_token)
+        async with httpx.AsyncClient(timeout=CANCEL_TIMEOUT) as client:
+            return await client.put(DISPATCH_URL, json=payload, headers=headers)
+
+    response = await sicar_auth.request_with_retry(attempt_advance)
+
+    if response.status_code != 200:
+        raise_upstream_error(
+            response,
+            f"Sicar X rechazo el avance de dispatchStatus a '{dispatch_status}' para el documento {order.sicar_order_id}",
+            "Sicar X rechazó el avance del estado de despacho del pedido.",
+        )

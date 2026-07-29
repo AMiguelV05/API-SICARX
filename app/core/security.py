@@ -41,6 +41,21 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
 
     return api_key
 
+async def validate_admin_key(x_admin_key: str = Header(None, alias="X-Admin-Key")):
+    """
+    Dependencia para el router /v1/admin/*. `ADMIN_API_KEY` es Optional (ver
+    app/core/config.py) porque todavia no existe un dashboard admin real - mientras no se
+    configure, `settings.ADMIN_API_KEY` es None y esta dependencia rechaza toda peticion
+    sin importar la cabecera, en vez de intentar comparar contra un valor que no existe.
+    """
+    if not settings.ADMIN_API_KEY or not x_admin_key or not secrets.compare_digest(x_admin_key, settings.ADMIN_API_KEY):
+        logger.error("Acceso denegado a ruta admin: X-Admin-Key invalida, ausente, o ADMIN_API_KEY sin configurar.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Acceso denegado."
+        )
+    return x_admin_key
+
 def _hash_password_sync(password: str) -> str:
     """Genera el hash bcrypt de una contraseña en texto plano. Sincrona a proposito: solo
     debe llamarse directamente en contexto sync (p. ej. el bootstrap de _DUMMY_HASH al

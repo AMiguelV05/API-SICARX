@@ -29,15 +29,23 @@ class Settings(BaseSettings):
     # este backend nunca intercambia tokens con Google directamente.
     GOOGLE_CLIENT_ID: str
 
-    # Webhook saliente hacia un futuro dashboard admin (order-cancelled, ver
-    # app/services/admin_notification_service.py) - a diferencia de TODAS las demas
-    # variables de este archivo, estas dos son deliberadamente OPCIONALES (no "New
-    # required var alert" de CLAUDE.md): el dashboard admin todavia no existe, asi que
-    # no hay un valor real que darles hoy. admin_notification_service se queda callado
-    # (solo loggea a INFO) si cualquiera de las dos falta, en vez de romper el arranque
-    # de pydantic-settings para api/worker por infraestructura que aun no existe.
+    # Webhook saliente hacia el dashboard admin (order-cancelled/sicar-sync-failed, ver
+    # app/services/admin_notification_service.py). Configurado en produccion desde 2026-07-29
+    # apuntando al mismo dominio que FRONTEND_BASE_URL (https://ferreteriacharly.com/) - el
+    # panel admin vive dentro de la misma app Next.js, no es un servicio separado. Siguen
+    # siendo Optional (a diferencia de TODAS las demas variables de este archivo, que no
+    # son "New required var alert") para que un ambiente local/de pruebas sin dashboard real
+    # (o sin ese valor en su .env) no rompa el arranque de pydantic-settings -
+    # admin_notification_service se queda callado (solo loggea a INFO) si cualquiera falta.
     ADMIN_DASHBOARD_BASE_URL: Optional[str] = None
     ADMIN_WEBHOOK_SECRET: Optional[str] = None
+
+    # Llave estatica para /v1/admin/* (ver app/core/security.py::validate_admin_key). Igual
+    # de opcional que el par de arriba - no existe todavia un dashboard admin real que la
+    # necesite, asi que mientras no se configure, las rutas admin simplemente responden 401
+    # (a diferencia de ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET, cuya ausencia hace que
+    # el envio de notificaciones sea un no-op silencioso en vez de bloquear nada).
+    ADMIN_API_KEY: Optional[str] = None
 
     class Config:
         env_file = ".env"
