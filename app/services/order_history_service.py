@@ -312,9 +312,19 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             )
         order.status = "PAID"
     elif mp_status in MP_PENDING_STATUSES:
-        order.status = "TO_PAY"
+        # Solo aplica si la orden sigue en TO_PAY: un pedido puede tener mas de un intento
+        # de pago (p. ej. un ticket OXXO pendiente mientras el cliente tambien prueba una
+        # tarjeta) - una notificacion "pending"/"in_process" tardia de un intento distinto
+        # al que realmente termino aprobando/cancelando la orden NO debe regresarla a
+        # TO_PAY. Ver CLAUDE.md / hallazgo de auditoria sobre este mismo bug.
+        if order.status == "TO_PAY":
+            order.status = "TO_PAY"
     elif mp_status in MP_FAILED_STATUSES:
-        if order.status != "CANCELLED":
+        # Misma razon que arriba: solo cancelar si la orden sigue en TO_PAY. Sin este
+        # guard, una notificacion rechazada/cancelada de un intento de pago distinto
+        # (p. ej. un ticket OXXO que expira) podia cancelar una orden que otro intento ya
+        # habia dejado PAID, restaurando stock sobre un cobro ya aplicado.
+        if order.status == "TO_PAY":
             became_cancelled = True
             order = await prepare_local_cancellation(db, order)
 

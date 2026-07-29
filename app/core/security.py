@@ -28,14 +28,14 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
     if not api_key:
         logger.error("Falta la cabecera de autenticacion x-api-key.")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Falta la cabecera de autenticación x-api-key."
         )
-        
+
     if not secrets.compare_digest(api_key, settings.X_API_KEY):
         logger.error("Acceso denegado: API Key invalida o expirada.")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Acceso denegado: API Key invalida o expirada."
         )
 

@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.client import ClientAccount
 from app.schemas.client import ClientRegister, ClientLogin, ClientUpdate
@@ -35,7 +36,16 @@ async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccou
         hashed_password=await hash_password(data.password),
     )
     db.add(client)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Dos registros casi simultaneos con el mismo correo (doble submit, reintento del
+        # cliente) pueden pasar ambos el `select` de arriba antes de que cualquiera haga
+        # commit - el segundo en llegar choca aqui contra el unique constraint de email.
+        # Mismo patron que order_idempotency_service.claim_idempotency_key.
+        await db.rollback()
+        logger.info(f"Intento de registro con email ya existente (deteccion tardia via IntegrityError): {email}")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe una cuenta con ese correo.")
     await db.refresh(client)
     await client.awaitable_attrs.addresses  # necesario para serializar ClientPublic.addresses
 

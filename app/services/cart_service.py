@@ -82,6 +82,7 @@ async def replace_cart(
     raw_items = [{"uuid": item.uuid, "quantity": item.quantity} for item in items]
 
     if existing_cart is not None:
+        existing_cart = await _lock_cart(db, existing_cart.id)
         existing_cart.items = raw_items
         cart = existing_cart
     else:
@@ -96,6 +97,17 @@ async def replace_cart(
 
     logger.info(f"Carrito {cart.uuid} actualizado ({'cliente ' + str(cart.client_account_id) if cart.client_account_id else 'anonimo'}).")
     return await get_cart_response(db, cart)
+
+async def _lock_cart(db: AsyncSession, cart_id: int) -> Cart:
+    """Relockea el carrito con SELECT...FOR UPDATE antes de leer/mutar `items`. Sin esto,
+    dos solicitudes concurrentes sobre el mismo carrito (doble click, dos pestañas) leen el
+    mismo estado inicial y cada una escribe de vuelta de forma independiente - un lost
+    update clasico donde uno de los ajustes desaparece. Mismo patron ya usado para `Order`
+    en order_history_service.prepare_local_cancellation/finalize_order_payment."""
+    result = await db.execute(
+        select(Cart).where(Cart.id == cart_id).with_for_update().execution_options(populate_existing=True)
+    )
+    return result.scalar_one()
 
 async def clear_cart(db: AsyncSession, cart: Optional[Cart]) -> None:
     if cart is None:
@@ -183,6 +195,7 @@ async def adjust_cart_item(
         )
         db.add(cart)
     else:
+        existing_cart = await _lock_cart(db, existing_cart.id)
         raw_items = list(existing_cart.items or [])
         idx = next((i for i, it in enumerate(raw_items) if it.get("uuid") == product_uuid), None)
         if idx is None:

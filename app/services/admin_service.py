@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from app.models.order import Order, SicarSyncOutbox
 from app.models.product import SyncStatus
 from app.schemas.admin import AdminHealthResponse, SyncStatusResponse, AdminOrderPublic
@@ -103,7 +104,9 @@ async def list_orders_admin(
     join en la consulta comun sin ese filtro)."""
     from app.models.client import ClientAccount  # import perezoso: evita ciclo import-time con order.py
 
-    query = select(Order)
+    # selectinload evita el N+1: sin esto, _to_admin_order_public dispara una consulta
+    # extra por fila (hasta 200 por pagina) al acceder a order.awaitable_attrs.client_account.
+    query = select(Order).options(selectinload(Order.client_account))
     count_query = select(func.count()).select_from(Order)
 
     if not include_deleted:

@@ -52,10 +52,10 @@ async def admin_retry_outbox(outbox_id: int, db: DbDep):
 async def admin_list_orders(
     db: DbDep,
     status_filter: Optional[str] = Query(default=None, alias="status", description="TO_PAY/PAID/CANCELLED"),
-    dispatch_status: Optional[str] = Query(default=None),
-    client_email: Optional[str] = Query(default=None),
-    client_uuid: Optional[str] = Query(default=None),
-    include_deleted: bool = Query(default=False),
+    dispatch_status: Optional[str] = Query(default=None, alias="dispatchStatus"),
+    client_email: Optional[str] = Query(default=None, alias="clientEmail"),
+    client_uuid: Optional[str] = Query(default=None, alias="clientUuid"),
+    include_deleted: bool = Query(default=False, alias="includeDeleted"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
@@ -73,11 +73,11 @@ async def admin_list_orders(
 
 
 @router.get("/orders/{order_uuid}", response_model=AdminOrderPublic, summary="Detalle de una orden (cualquier cuenta)")
-async def admin_get_order(order_uuid: str, db: DbDep, include_deleted: bool = Query(default=False)):
+async def admin_get_order(order_uuid: str, db: DbDep, include_deleted: bool = Query(default=False, alias="includeDeleted")):
     return await admin_service.get_order_admin(db, order_uuid, include_deleted=include_deleted)
 
 
-@router.post("/orders/{order_uuid}/accept", response_model=OrderAcceptResponse, summary="Aceptar una orden (local; sincronizacion con Sicar X pendiente de implementar)")
+@router.post("/orders/{order_uuid}/accept", response_model=OrderAcceptResponse, summary="Aceptar una orden localmente y encolar el avance de dispatchStatus en Sicar X")
 async def admin_accept_order(order_uuid: str, db: DbDep, data: OrderAcceptRequest = Body(default=OrderAcceptRequest())):
     order = await admin_service.accept_order(db, order_uuid, data.accepted_by)
     return OrderAcceptResponse(order_uuid=order.uuid, accepted_at=order.accepted_at, accepted_by=order.accepted_by)

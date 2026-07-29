@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Body, Header, Request, status
 from sqlalchemy import select
@@ -81,10 +82,16 @@ async def create_order(
     price_list_uuid = order_payload.priceListUuid or session_data.get("priceListUuid") or settings.SICAR_PRICE_LIST_ID
     content_id = order_payload.contentId or session_data.get("contentId") or str(uuid4())
 
+    # Suma en Decimal (no float) para lineas duplicadas del mismo producto: sumar floats
+    # directamente (p. ej. 0.1 + 0.2 en un producto a granel) puede arrastrar ruido de
+    # representacion binaria (0.30000000000000004) hacia build_order_payload, el mismo tipo
+    # de deriva que ya causo el rechazo "precio alterado" documentado en CLAUDE.md - ahi el
+    # bug estaba del lado del precio; aqui es el mismo problema del lado de la cantidad.
     requested_quantities = {}
     for p in order_payload.products:
         if p.uuid:
-            requested_quantities[p.uuid] = requested_quantities.get(p.uuid, 0) + float(p.quantity)
+            current = Decimal(str(requested_quantities.get(p.uuid, 0)))
+            requested_quantities[p.uuid] = float(current + Decimal(str(p.quantity)))
     uuids = list(requested_quantities.keys())
 
     if not uuids:
