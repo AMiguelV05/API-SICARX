@@ -6,6 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.models.order import Order, SicarSyncOutbox
+# Order.client_account = relationship("ClientAccount", ...) es una referencia por string:
+# necesita que la clase ClientAccount este importada en este proceso antes de que
+# SQLAlchemy configure el mapper de Order, o falla con "failed to locate a name
+# ('ClientAccount')". El proceso api lo obtiene gratis via sus rutas de auth/addresses;
+# el worker no importa nada de app.models.client, asi que se agrega aqui explicitamente.
+from app.models.client import ClientAccount  # noqa: F401
 from app.services.cancel_service import process_order_cancellation
 from app.services import admin_notification_service
 
