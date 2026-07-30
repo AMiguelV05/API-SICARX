@@ -19,14 +19,10 @@ class Settings(BaseSettings):
     FRONTEND_BASE_URL: str  # dominio real del frontend
     API_BASE_URL: str  # dominio publico la API
 
-    # Webhook saliente hacia el frontend (correo de confirmacion de pedido via Resend en
-    # el frontend) - ver CLAUDE.md, seccion "Payments with Mercado Pago", y FRONTEND_INTEGRATION.md
+    # Webhook saliente hacia el frontend (correo de confirmacion de pedido via Resend en el frontend)
     FRONTEND_WEBHOOK_SECRET: str
 
-    # Login con Google (verificacion de ID token, ver app/services/google_auth_service.py) -
-    # no es secreto (va embebido en el JS del frontend para Google Identity Services), solo
-    # se usa aqui para validar el claim `aud` del token. No requiere GOOGLE_CLIENT_SECRET:
-    # este backend nunca intercambia tokens con Google directamente.
+    # Login con Google
     GOOGLE_CLIENT_ID: str
 
     # Webhook saliente hacia el dashboard admin (order-cancelled/sicar-sync-failed, ver
@@ -53,6 +49,14 @@ class Settings(BaseSettings):
     # configurarse en AMBOS servicios de Railway (api y worker) aunque solo api las use,
     # porque pydantic-settings falla al importar si falta cualquiera en cualquiera de los dos.
     ENVIA_API_TOKEN: str  # Bearer token de la API de envios de envia.com (distinta de su API de Geocodes, que el frontend llama directo sin llave)
+    # envia.com usa tokens y dominios separados por ambiente (sandbox: api-test.envia.com,
+    # produccion: api.envia.com) - un token de un ambiente siempre responde 401 "Authentication
+    # error" contra el dominio del otro, confirmado en vivo (ver CLAUDE.md, incidente del
+    # envio). envia.com da de alta cuentas nuevas en sandbox por defecto; una cuenta de
+    # produccion es un alta aparte en accounts.envia.com/signup con su propio token - "sandbox"
+    # es el default aqui porque coincide con la realidad de hoy (el token ya configurado es de
+    # sandbox), no cambiar a "production" hasta tener un token real de esa cuenta.
+    ENVIA_ENVIRONMENT: str = "sandbox"  # "sandbox" o "production"
     # `country`/`phone_code` del objeto origin/destination de envia.com - no llevan prefijo
     # ENVIA_ORIGIN_ porque shipping_service.py los reusa igual para origin y destination
     # (negocio exclusivo de Mexico en ambos lados). Con default porque el valor correcto
