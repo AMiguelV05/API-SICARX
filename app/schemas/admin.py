@@ -2,6 +2,7 @@ from typing import Any, List, Literal, Optional
 from datetime import datetime
 from pydantic import Field
 from app.schemas.base import CamelModel
+from app.schemas.client import ClientAddressPublic
 
 # GET /admin/health
 
@@ -37,6 +38,25 @@ class OutboxListResponse(CamelModel):
     total: int
     docs: List[OutboxRowPublic]
 
+# Guia de envio con envia.com (POST /admin/orders/{uuid}/shipping/quote|generate) - ver
+# ADMIN_INTEGRATION.md. Definida antes de AdminOrderPublic para que su campo
+# `shipping_label` pueda referenciarla directamente.
+
+class ShippingLabelInfo(CamelModel):
+    carrier: str
+    service: str
+    service_description: Optional[str] = None
+    tracking_number: Optional[str] = None
+    track_url: Optional[str] = None
+    label_url: Optional[str] = None
+    total_price: float
+    currency: str
+    weight: float
+    length: float
+    width: float
+    height: float
+    generated_at: datetime
+
 # GET /admin/orders, GET /admin/orders/{uuid}
 
 class AdminOrderPublic(CamelModel):
@@ -64,6 +84,10 @@ class AdminOrderPublic(CamelModel):
     accepted_by: Optional[str] = None
     delivery_company: Optional[str] = None
     delivery_assigned_at: Optional[datetime] = None
+    # Foto fija tomada al crear la orden (None para PICKUP) - ver Order.delivery_address_snapshot.
+    delivery_address: Optional[ClientAddressPublic] = None
+    # None hasta que POST .../shipping/generate tenga exito una vez - ver Order.shipping_label.
+    shipping_label: Optional[ShippingLabelInfo] = None
 
 class AdminOrderListResponse(CamelModel):
     total: int
@@ -90,3 +114,39 @@ class DeliveryAssignResponse(CamelModel):
     order_uuid: str
     delivery_company: str
     delivery_assigned_at: datetime
+
+# POST /admin/orders/{uuid}/shipping/quote
+
+class ShippingDimensionsRequest(CamelModel):
+    """Dimensiones/peso del paquete - compartido por /shipping/quote y /shipping/generate.
+    Todos > 0 via Field(gt=0): un valor faltante o <= 0 responde 422 (Pydantic), no el
+    400 hecho a mano que ADMIN_INTEGRATION.md menciona como sugerencia original."""
+    weight: float = Field(gt=0, description="Kilogramos")
+    length: float = Field(gt=0, description="Centimetros")
+    width: float = Field(gt=0, description="Centimetros")
+    height: float = Field(gt=0, description="Centimetros")
+
+class ShippingQuoteRequest(ShippingDimensionsRequest):
+    pass
+
+class ShippingQuoteOption(CamelModel):
+    carrier: Optional[str] = None
+    service: str
+    service_description: Optional[str] = None
+    delivery_estimate: Optional[str] = None
+    total_price: float
+    currency: str
+
+class ShippingQuoteResponse(CamelModel):
+    options: List[ShippingQuoteOption]
+
+# POST /admin/orders/{uuid}/shipping/generate
+
+class ShippingGenerateRequest(ShippingDimensionsRequest):
+    carrier: str = Field(min_length=1)
+    service: str = Field(min_length=1)
+
+class ShippingGenerateResponse(CamelModel):
+    order_uuid: str
+    dispatch_status: str
+    shipping_label: ShippingLabelInfo

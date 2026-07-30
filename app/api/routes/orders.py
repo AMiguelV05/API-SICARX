@@ -17,6 +17,7 @@ from app.services.order_idempotency_service import claim_idempotency_key, is_cla
 from app.services.address_service import get_owned_address
 from app.services import payment_service
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse
+from app.schemas.client import ClientAddressPublic
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,7 @@ async def create_order(
         result = await db.execute(select(Product).where(Product.sicar_uuid.in_(uuids)))
         local_products = {p.sicar_uuid: p for p in result.scalars().all()}
 
+        delivery_address_snapshot = None
         if order_payload.deliveryInfo.deliveryType == "DELIVERYMAN":
             address = await get_owned_address(db, client, order_payload.deliveryInfo.addressUuid)
 
@@ -175,6 +177,10 @@ async def create_order(
                 "country": "MEX",
                 "reference": address.references,
             }
+            # Foto fija del address book en la forma ClientAddressPublic (uuid/label/lat/lng
+            # incluidos) - distinta del dict arriba, que es la forma que exige Sicar X. Ver
+            # Order.delivery_address_snapshot y ADMIN_INTEGRATION.md ("Guia de envio").
+            delivery_address_snapshot = ClientAddressPublic.model_validate(address).model_dump(mode="json", by_alias=True)
         else:
             delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True)
 
@@ -206,6 +212,7 @@ async def create_order(
             order_payload_dict=order_payload_dict,
             sicar_response=sicar_response,
             local_products=local_products,
+            delivery_address_snapshot=delivery_address_snapshot,
         )
 
         # No fatal: la orden sigue soportando tarjeta/OXXO sin la opcion de wallet si

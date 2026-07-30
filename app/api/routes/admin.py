@@ -14,6 +14,10 @@ from app.schemas.admin import (
     OrderAcceptResponse,
     DeliveryAssignRequest,
     DeliveryAssignResponse,
+    ShippingQuoteRequest,
+    ShippingQuoteResponse,
+    ShippingGenerateRequest,
+    ShippingGenerateResponse,
 )
 from app.services import admin_service
 
@@ -90,4 +94,20 @@ async def admin_assign_delivery(order_uuid: str, db: DbDep, data: DeliveryAssign
         order_uuid=order.uuid,
         delivery_company=order.delivery_company,
         delivery_assigned_at=order.delivery_assigned_at,
+    )
+
+
+@router.post("/orders/{order_uuid}/shipping/quote", response_model=ShippingQuoteResponse, summary="Cotizar opciones de envio con envia.com (no persiste nada)")
+async def admin_quote_shipping(order_uuid: str, db: DbDep, data: ShippingQuoteRequest = Body()):
+    options = await admin_service.quote_shipping(db, order_uuid, data)
+    return ShippingQuoteResponse(options=options)
+
+
+@router.post("/orders/{order_uuid}/shipping/generate", response_model=ShippingGenerateResponse, summary="Generar una guia de envio real con envia.com y avanzar dispatchStatus a DISPATCHED")
+async def admin_generate_shipping_label(order_uuid: str, db: DbDep, data: ShippingGenerateRequest = Body()):
+    order = await admin_service.generate_shipping_label(db, order_uuid, data)
+    return ShippingGenerateResponse(
+        order_uuid=order.uuid,
+        dispatch_status=order.dispatch_status,
+        shipping_label=order.shipping_label,
     )

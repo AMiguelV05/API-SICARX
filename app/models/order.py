@@ -59,6 +59,23 @@ class Order(Base):
     delivery_info = Column(JSON, nullable=False)
     items = Column(JSON, nullable=False)
 
+    # Foto fija (ClientAddressPublic completo, en camelCase) de la direccion de entrega
+    # tomada al crear la orden - solo para DELIVERYMAN, None para PICKUP. Deliberadamente
+    # separada de delivery_info["contactInfo"]["address"] (arriba): esa es la forma que
+    # Sicar X exige (district/reference, sin uuid/label/lat/lng), esta es la forma
+    # ClientAddressPublic que el panel admin necesita para "Guia de envio" (ver
+    # ADMIN_INTEGRATION.md). Foto fija a proposito, no un join en vivo contra la libreta de
+    # direcciones: el cliente puede editar/borrar esa direccion despues de ordenar, y
+    # generar una guia contra una direccion ya cambiada seria un bug silencioso.
+    delivery_address_snapshot = Column(JSON, nullable=True)
+
+    # Guia de envio generada con envia.com (ver app/services/shipping_service.py, POST
+    # /admin/orders/{uuid}/shipping/generate). JSON simple, mismo criterio que
+    # delivery_info/items arriba - nada consulta dentro de este campo. None hasta que se
+    # genere una guia; no hay regeneracion (admin_service.generate_shipping_label rechaza
+    # con 409 si ya esta poblado).
+    shipping_label = Column(JSON, nullable=True)
+
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 
@@ -131,8 +148,8 @@ class SicarSyncOutbox(Base):
     confirme - restaura stock, marca CANCELLED y encola una fila aqui en la misma
     transaccion. app/worker/sicar_sync_worker.py drena esta tabla en un job aparte,
     con reintentos, para que un Sicar X caido nunca bloquee una cancelacion. `action`
-    es deliberadamente generico ("CANCEL" hoy) para poder reusar este mecanismo con
-    otras operaciones a futuro (p. ej. pay_order_in_sicar) sin necesitar otra tabla.
+    es deliberadamente generico ("CANCEL"/"ACCEPT"/"DISPATCH" hoy) para poder reusar
+    este mecanismo con otras operaciones a futuro sin necesitar otra tabla.
 
     `status` incluye IN_PROGRESS (ademas de PENDING/SUCCEEDED/FAILED) para que el
     worker pueda reclamar una fila y soltar el lock de inmediato en vez de mantenerlo
@@ -153,7 +170,7 @@ class SicarSyncOutbox(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
-    action = Column(String, nullable=False)  # "CANCEL" hoy
+    action = Column(String, nullable=False)  # "CANCEL"/"ACCEPT"/"DISPATCH" hoy
     cash_register_uuid = Column(String, nullable=False)
     status = Column(String, nullable=False, default="PENDING")  # PENDING/IN_PROGRESS/SUCCEEDED/FAILED
     attempts = Column(Integer, nullable=False, default=0)

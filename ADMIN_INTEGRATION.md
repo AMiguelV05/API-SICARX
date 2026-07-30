@@ -129,8 +129,10 @@ Respuesta `200`:
 }
 ```
 
-`action` es `"CANCEL"` (cancelación de un pedido) o `"ACCEPT"` (avanzar `dispatchStatus` de
-`PENDING_ACCEPTANCE` a `PENDING` en Sicar X, ver `POST .../accept` abajo). Una fila `FAILED`
+`action` es `"CANCEL"` (cancelación de un pedido), `"ACCEPT"` (avanzar `dispatchStatus` de
+`PENDING_ACCEPTANCE` a `PENDING` en Sicar X, ver `POST .../accept` abajo), o `"DISPATCH"`
+(avanzar `dispatchStatus` a `DISPATCHED` en Sicar X tras generar una guía de envío, ver
+`POST .../shipping/generate` más abajo). Una fila `FAILED`
 significa que se agotaron los 5 intentos con backoff exponencial (1/2/4/8/16 min) — el pedido
 sigue correcto del lado local (el estado local ya se aplicó de inmediato cuando se disparó la
 acción), pero Sicar X todavía no se enteró; hace falta reconciliar manualmente en el panel nativo
@@ -273,6 +275,132 @@ externa (no genera guía, no calcula tarifa, no notifica al repartidor). Es solo
 encargado de esta entrega", para que el dashboard lo muestre. `404` si el pedido no existe (o
 está soft-deleted). Se puede llamar varias veces sobre el mismo pedido (reasigna sin error) — a
 diferencia de `/accept`, no hay noción de "ya asignado, no se puede reasignar".
+
+### Guía de envío con envia.com
+
+Pantalla "Guía de envío" del panel admin: cotizar + generar una guía real con envia.com una vez
+que un pedido `DELIVERYMAN` llega a `dispatchStatus: COMPLETE`.
+
+**Cambio a `GET /v1/admin/orders/{orderUuid}`** — dos campos nuevos en la respuesta:
+- `deliveryAddress: Address | null` — la dirección de destino resuelta para pedidos
+  `DELIVERYMAN` (mismo shape que `ClientAddressPublic`: `uuid, label, street, extNumber,
+  intNumber, neighborhood, city, county, state, country, zipCode, references, latitude,
+  longitude, isDefault`), `null` para `PICKUP`.
+  **Es una foto fija**, no un join en vivo contra la libreta de direcciones del cliente:
+  `routes/orders.py` la captura (`Order.delivery_address_snapshot`) en el momento de crear el
+  pedido, justo después de resolver la dirección vía `address_service.get_owned_address` — el
+  cliente puede editar/borrar esa dirección después de ordenar, y generar una guía contra una
+  dirección ya cambiada sería un bug silencioso. Distinta de
+  `deliveryInfo.contactInfo.address` (la forma que exige Sicar X, sin `uuid`/`label`/coordenadas)
+  — ambas se snapshotean por separado en el mismo momento. `/shipping/quote` y
+  `/shipping/generate` usan `deliveryAddress` como destino internamente.
+- `shippingLabel: ShippingLabelInfo | null` — `null` hasta que `/shipping/generate` tenga éxito
+  una vez; ver shape abajo.
+
+#### `POST /v1/admin/orders/{orderUuid}/shipping/quote` — cotizar opciones de envío
+
+```http
+POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/quote
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "weight": 2.5, "length": 30, "width": 20, "height": 15 }
+```
+
+El backend resuelve `destination` desde `deliveryAddress` del pedido y `origin` desde una
+constante propia (dirección de la tienda/almacén, configurada en este servicio, no en el
+frontend), arma `packages[]` (`weightUnit: "KG"`, `lengthUnit: "CM"`) y llama a
+`POST /ship/rate/` de envia.com (`Authorization: Bearer <token de envia, en el env de este
+servicio>`). No persiste nada — se puede llamar repetidamente mientras el admin ajusta peso/medidas.
+
+Respuesta `200`:
+```json
+{
+  "options": [
+    {
+      "carrier": "dhl",
+      "service": "1",
+      "serviceDescription": "DHL Standard",
+      "deliveryEstimate": "3-5 días",
+      "totalPrice": 185.50,
+      "currency": "MXN"
+    }
+  ]
+}
+```
+
+- `options: []` es una respuesta válida (`200`), no un error — significa que ningún carrier
+  cubre ese código postal con ese paquete.
+- `404` si el pedido no existe. `409` si `deliveryType !== "DELIVERYMAN"` o
+  `dispatchStatus !== "COMPLETE"` — el backend no confía en que el frontend ya lo validó. `422`
+  si `deliveryAddress` falta o está incompleta (sin `street`/`city`/`state`/`zipCode`), o si
+  `weight`/`length`/`width`/`height` faltan o no son positivos (validación de Pydantic vía
+  `Field(gt=0)`, no un `400` a mano). `502` si envia.com falla, responde con error o rechaza la
+  petición (token inválido, código postal no reconocido, etc.) — normalizado a
+  `{"detail": "..."}` (`app/core/upstream_errors.py`, mismo helper que ya usa Sicar X/Mercado
+  Pago), nunca el cuerpo crudo de envia.
+
+#### `POST /v1/admin/orders/{orderUuid}/shipping/generate` — generar la guía
+
+```http
+POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/generate
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "weight": 2.5, "length": 30, "width": 20, "height": 15, "carrier": "dhl", "service": "1" }
+```
+
+Re-resuelve origin/destination igual que `/quote`, llama a `POST /ship/generate/` de envia.com
+con el `service` elegido. Si tiene éxito, en una sola transacción: persiste
+`carrier, service, serviceDescription, trackingNumber, trackUrl, labelUrl (el campo `label` de
+envia), totalPrice, currency, weight, length, width, height, generatedAt` en el pedido, y avanza
+`dispatchStatus` de `COMPLETE` a `DISPATCHED`.
+
+Respuesta `200`:
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "dispatchStatus": "DISPATCHED",
+  "shippingLabel": {
+    "carrier": "dhl",
+    "service": "1",
+    "serviceDescription": "DHL Standard",
+    "trackingNumber": "1234567890",
+    "trackUrl": "https://...",
+    "labelUrl": "https://.../label.pdf",
+    "totalPrice": 185.50,
+    "currency": "MXN",
+    "weight": 2.5,
+    "length": 30,
+    "width": 20,
+    "height": 15,
+    "generatedAt": "2026-07-29T18:10:00Z"
+  }
+}
+```
+
+- `404` si el pedido no existe. `409` si `deliveryType !== "DELIVERYMAN"`,
+  `dispatchStatus !== "COMPLETE"`, o si el pedido ya tiene `shippingLabel` (no hay regeneración
+  por esta vía). `422` si `deliveryAddress` falta/está incompleta, o si las dimensiones no son
+  válidas (mismo `Field(gt=0)` que `/quote`). `502` si envia.com falla (auth, `service` inválido,
+  problema de cuenta con el carrier).
+
+Este endpoint **también avanza el estado en Sicar X de forma asíncrona vía `sicar_sync_outbox`**
+(`action: "DISPATCH"`), igual que `ACCEPT` — con una diferencia importante: a diferencia de
+`ACCEPT` (donde `dispatchStatus` local no cambia hasta que el worker confirma con Sicar X, porque
+ese campo ahí es un simple espejo del estado real de Sicar X), aquí `dispatchStatus` se pone en
+`"DISPATCHED"` **de inmediato**, en la misma transacción que persiste `shippingLabel` — el hecho
+real (guía generada, envia.com ya cobró) ya ocurrió en el momento en que este endpoint responde
+`200`, mismo principio "Postgres local autoritativo de inmediato" que ya usa la cancelación de
+pedidos y la confirmación de pago con Mercado Pago (ver `CLAUDE.md`). Avisarle a Sicar X es la
+parte que queda asíncrona/best-effort — revisa `GET /v1/admin/sync/outbox?status=FAILED` si
+sospechas que no se sincronizó.
+
+**Advertencia de confiabilidad** (mismo espíritu que la nota de "no hay reintentos automáticos"
+más abajo): esta llamada tiene un efecto real con costo — un timeout del lado del dashboard que
+compite con un éxito del lado del servidor mostraría un error al admin mientras envia.com ya
+generó (y cobró) una guía. Documentar esto como riesgo conocido, no agregar reintento automático
+sobre timeout para "resolverlo".
 
 ## Notas y advertencias
 

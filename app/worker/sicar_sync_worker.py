@@ -97,6 +97,14 @@ async def _process_claimed_row(row_id: int) -> None:
                 # sicar_document_uuid primero).
                 await advance_dispatch_status(order, ACCEPT_TARGET_DISPATCH_STATUS)
                 order.dispatch_status = ACCEPT_TARGET_DISPATCH_STATUS
+            elif row.action == "DISPATCH":
+                # Guia de envio generada con envia.com (ver admin_service.generate_shipping_label)
+                # - a diferencia de ACCEPT, dispatch_status ya se puso en "DISPATCHED"
+                # localmente de forma sincrona en el momento en que envia.com respondio
+                # exitosamente (el hecho real ya ocurrio, no es un simple espejo de Sicar
+                # X), asi que aqui solo se le avisa a Sicar X - no se vuelve a tocar
+                # order.dispatch_status, mismo patron que CANCEL arriba.
+                await advance_dispatch_status(order, "DISPATCHED")
             else:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
 

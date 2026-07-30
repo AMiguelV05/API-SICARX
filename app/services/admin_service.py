@@ -6,8 +6,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.models.order import Order, SicarSyncOutbox
 from app.models.product import SyncStatus
-from app.schemas.admin import AdminHealthResponse, SyncStatusResponse, AdminOrderPublic
+from app.schemas.admin import (
+    AdminHealthResponse,
+    SyncStatusResponse,
+    AdminOrderPublic,
+    ShippingQuoteRequest,
+    ShippingQuoteOption,
+    ShippingGenerateRequest,
+)
+from app.schemas.client import ClientAddressPublic
 from app.services.sicar_auth import sicar_auth
+from app.services import shipping_service
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +93,11 @@ async def _to_admin_order_public(order: Order) -> AdminOrderPublic:
     public = AdminOrderPublic.model_validate(order)
     public.client_email = client_email
     public.client_name = client_account.name if client_account else None
+    # order.delivery_address_snapshot no coincide de nombre con AdminOrderPublic.delivery_address
+    # (ver Order.delivery_address_snapshot), asi que model_validate(order) no lo llena solo -
+    # se mapea aqui a mano, igual que client_email/client_name arriba.
+    if order.delivery_address_snapshot:
+        public.delivery_address = ClientAddressPublic.model_validate(order.delivery_address_snapshot)
     return public
 
 
@@ -184,4 +198,70 @@ async def assign_delivery(db: AsyncSession, order_uuid: str, delivery_company: s
     await db.commit()
     await db.refresh(order)
     logger.info(f"Orden {order.uuid} asignada a mensajeria '{delivery_company}' via /admin.")
+    return order
+
+
+async def _get_order_ready_for_shipping(db: AsyncSession, order_uuid: str) -> Order:
+    """Lookup + validaciones compartidas por quote_shipping/generate_shipping_label -
+    ver ADMIN_INTEGRATION.md, seccion "Guia de envio con envia.com". No confiar en que el
+    frontend ya valido deliveryType/dispatchStatus antes de llamar aqui."""
+    order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    if (order.delivery_info or {}).get("deliveryType") != "DELIVERYMAN":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden no es de entrega a domicilio.")
+    if order.dispatch_status != "COMPLETE":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Esta orden todavía no está lista para generar envío (dispatchStatus debe ser COMPLETE).",
+        )
+    missing = shipping_service.missing_address_fields(order.delivery_address_snapshot)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"La dirección de entrega de esta orden está incompleta para generar un envío (faltan: {', '.join(missing)}).",
+        )
+    return order
+
+
+async def quote_shipping(db: AsyncSession, order_uuid: str, data: ShippingQuoteRequest) -> list[ShippingQuoteOption]:
+    """No persiste nada - se puede llamar repetidamente mientras el admin ajusta
+    peso/medidas antes de generar la guia real (ver quote_shipping vs
+    generate_shipping_label en ADMIN_INTEGRATION.md)."""
+    order = await _get_order_ready_for_shipping(db, order_uuid)
+    options = await shipping_service.get_shipping_quote(order, data.weight, data.length, data.width, data.height)
+    return [ShippingQuoteOption(**opt) for opt in options]
+
+
+async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: ShippingGenerateRequest) -> Order:
+    """Genera una guia real (con costo) via envia.com y, si tiene exito, persiste el
+    resultado y avanza dispatch_status a DISPATCHED de inmediato - a diferencia de ACCEPT,
+    dispatch_status aqui no es un simple espejo del lado de Sicar X: el hecho real (guia
+    generada, envia.com ya cobro) ya ocurrio en el momento en que esta funcion recibe una
+    respuesta 200, mismo principio "Postgres local autoritativo de inmediato" que ya usa
+    la cancelacion de ordenes (order_history_service.prepare_local_cancellation) y el pago
+    con Mercado Pago (finalize_order_payment) - ver CLAUDE.md. Encola ademas una fila de
+    sicar_sync_outbox (action="DISPATCH") para que el worker le avise a Sicar X de forma
+    asincrona, con reintentos, igual que CANCEL/ACCEPT."""
+    order = await _get_order_ready_for_shipping(db, order_uuid)
+    if order.shipping_label:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya tiene una guía de envío generada.")
+
+    label = await shipping_service.generate_shipping_label(
+        order, data.weight, data.length, data.width, data.height, data.carrier, data.service,
+    )
+
+    order.shipping_label = label
+    order.dispatch_status = "DISPATCHED"
+    db.add(SicarSyncOutbox(
+        order_id=order.id,
+        action="DISPATCH",
+        cash_register_uuid="",  # no aplica a esta accion, pero la columna es NOT NULL (mismo patron que ACCEPT)
+        status="PENDING",
+        next_attempt_at=datetime.now(timezone.utc),
+    ))
+
+    await db.commit()
+    await db.refresh(order)
+    logger.info(f"Guía de envío generada para la orden {order.uuid} (carrier={data.carrier}, service={data.service}) via /admin; encolada sincronización DISPATCH hacia Sicar X.")
     return order

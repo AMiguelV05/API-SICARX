@@ -43,7 +43,7 @@ def _parse_sicar_date(value) -> datetime | None:
         logger.warning(f"No se pudo interpretar la fecha de Sicar X: {value!r}")
         return None
 
-async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, sicar_response: dict, local_products: dict | None = None) -> Order:
+async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, sicar_response: dict, local_products: dict | None = None, delivery_address_snapshot: dict | None = None) -> Order:
     """Persiste localmente la orden recien creada (y reservada) en Sicar X, ANTES de
     intentar cualquier cobro con Mercado Pago - status siempre "TO_PAY" en este punto
     (pay_order_in_sicar todavia no corre; ver order_history_service.finalize_order_payment,
@@ -59,6 +59,10 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
     aqui - una copia de `eco_order["products"]`, NUNCA el mismo objeto que ya se envio a
     Sicar X en create_order_in_sicar (ese ya salio por la red antes de llegar aqui, asi
     que agregarle un campo extra en este punto no afecta lo que Sicar X recibio).
+
+    `delivery_address_snapshot` (None para PICKUP) es la foto fija ClientAddressPublic
+    tomada en routes/orders.py justo despues de resolver la direccion via
+    address_service.get_owned_address - ver Order.delivery_address_snapshot.
 
     NO hace commit — solo `flush()` (para que `order.id`/`order.uuid` queden disponibles
     para el llamador, p.ej. payment_service.create_preference). El llamador
@@ -90,6 +94,7 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
         total_quantity=Decimal(str(order_payload_dict.get("totalQuantity"))),
         delivery_info=eco_order.get("deliveryInfo"),
         items=items,
+        delivery_address_snapshot=delivery_address_snapshot,
     )
     db.add(order)
     await db.flush()
