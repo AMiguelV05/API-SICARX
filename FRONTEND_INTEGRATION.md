@@ -853,7 +853,18 @@ Content-Type: application/json
 
 `deliveryType` acepta `"PICKUP"` (recoger en tienda) o `"DELIVERYMAN"` (entrega a domicilio) —
 cualquier otro valor responde `422`. `contactInfo.email` es opcional, pero si se envía debe ser
-un correo válido (también `422` si no lo es).
+un correo válido (también `422` si no lo es) — **excepto** que ahora un string vacío (`""`, lo
+típico de un campo opcional sin tocar en un formulario) se trata como si no se hubiera mandado,
+en vez de rechazarse.
+
+`contactInfo.phone` acepta hasta 10 dígitos — Sicar X no quiere más. El backend ahora limpia el
+valor antes de validar (quita espacios, guiones, paréntesis, `+52`, etc., y si aun así sobran
+dígitos por un prefijo de país/larga distancia se queda con los últimos 10), así que un input con
+máscara (`"315-123-4567"`, `"+52 315 123 4567"`) ya no revienta con `422` — pero sigue siendo buena
+idea mandar solo los 10 dígitos si el formulario ya los tiene separados. **Incidente (2026-07-30)**:
+antes de este cambio, cualquier teléfono con formato o un email vacío `""` producía un `422` genérico
+en `POST /v1/orders` sin explicación visible del lado del frontend — si ves checkouts fallando así
+con una versión más vieja de este backend, esta es la causa más probable.
 
 **`Idempotency-Key` (header, opcional, recomendado).** Un reintento de red o un doble-click en
 "pagar" puede reenviar el mismo `POST /v1/orders` — sin este header, cada intento crea una orden

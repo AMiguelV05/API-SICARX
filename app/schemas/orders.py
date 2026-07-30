@@ -1,4 +1,5 @@
-from pydantic import EmailStr, Field, model_validator
+import re
+from pydantic import EmailStr, Field, field_validator, model_validator
 from typing import Any, List, Literal, Optional
 from datetime import datetime
 from app.core.config import settings
@@ -12,6 +13,29 @@ class ContactInfo(CamelModel):
     name: str
     phone: str = Field(max_length=10, description="Sicar X rechaza telefonos de mas de 10 caracteres")
     email: Optional[EmailStr] = None
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def strip_phone_formatting(cls, v: Any) -> Any:
+        # El frontend (input con mascara, +52, espacios, guiones) puede mandar el
+        # telefono con formato - Sicar X (y el limite de 10 caracteres arriba) solo
+        # quiere los digitos. Un numero mexicano local son 10 digitos, asi que si
+        # sobran (por un +52 o un 1 de larga distancia antepuesto) nos quedamos con
+        # los ultimos 10 en vez de rechazar de plano.
+        if isinstance(v, str):
+            digits = re.sub(r"\D", "", v)
+            return digits[-10:] if len(digits) > 10 else digits
+        return v
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def blank_email_to_none(cls, v: Any) -> Any:
+        # Un campo de email opcional sin tocar en el formulario del frontend suele
+        # mandarse como "" en vez de omitirse o null - EmailStr rechaza "" como
+        # invalido, aunque el campo sea opcional.
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
 class DeliveryInfo(CamelModel):
     contactInfo: ContactInfo
