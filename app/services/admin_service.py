@@ -17,10 +17,23 @@ from app.schemas.admin import (
 from app.schemas.client import ClientAddressPublic
 from app.services.sicar_auth import sicar_auth
 from app.services import shipping_service
+from app.services import order_status_notification_service
 
 logger = logging.getLogger(__name__)
 
 OUTBOX_STATUSES = ("PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED")
+
+# Transiciones legales para POST /admin/orders/{uuid}/advance-status - dispatch_status
+# actual -> conjunto de targets permitidos (adelante y un paso de reversion, ver
+# ADMIN_INTEGRATION.md). PENDING_ACCEPTANCE deliberadamente ausente: salir de ahi es
+# trabajo exclusivo de /accept (Sicar X nunca acepta PENDING_ACCEPTANCE como target de
+# PUT /external/v1/dispatch, asi que no hay nada que revertir hacia ese estado).
+_LEGAL_DISPATCH_TRANSITIONS: dict[str, set[str]] = {
+    "PENDING": {"PREPARING"},
+    "PREPARING": {"PENDING", "COMPLETE"},
+    "COMPLETE": {"PREPARING", "DISPATCHED"},
+    "DISPATCHED": {"COMPLETE"},
+}
 
 
 async def get_health(db: AsyncSession) -> AdminHealthResponse:
@@ -157,14 +170,17 @@ async def get_order_admin(db: AsyncSession, order_uuid: str, *, include_deleted:
 
 
 async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | None) -> Order:
-    """Marca la orden como aceptada localmente y encola una fila de sicar_sync_outbox con
-    action="ACCEPT" para que el worker intente avanzar el dispatchStatus real en Sicar X.
+    """Marca la orden como aceptada y avanza dispatch_status a PENDING localmente de
+    inmediato, y encola una fila de sicar_sync_outbox con action="ACCEPT" para que el
+    worker le avise a Sicar X de forma asincrona - mismo principio "Postgres local
+    autoritativo de inmediato" que ya usa generate_shipping_label para DISPATCHED (ver
+    CLAUDE.md, "Local-first order cancellation" / admin_service.generate_shipping_label):
+    el dashboard admin es quien decide el estado, Sicar X solo se entera despues.
 
     El branch "ACCEPT" en sicar_sync_worker.py llama a cancel_service.advance_dispatch_status
     (mutacion real capturada en vivo contra app.sicarx.com, ver su docstring) para avanzar
-    dispatchStatus a PENDING en Sicar X. Esta funcion solo se encarga de la mitad local:
-    dejar accepted_at/accepted_by en la fila y encolar el intento - la mitad de Sicar X
-    corre de forma asincrona, igual que CANCEL."""
+    dispatchStatus a PENDING en Sicar X, pero ya no vuelve a tocar order.dispatch_status -
+    esta funcion ya lo dejo en el valor correcto antes de encolar."""
     order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
@@ -173,6 +189,7 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
 
     order.accepted_at = datetime.now(timezone.utc)
     order.accepted_by = accepted_by
+    order.dispatch_status = "PENDING"
 
     db.add(SicarSyncOutbox(
         order_id=order.id,
@@ -184,7 +201,90 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
 
     await db.commit()
     await db.refresh(order)
-    logger.info(f"Orden {order.uuid} aceptada por '{accepted_by}' via /admin; encolada sincronizacion ACCEPT hacia Sicar X.")
+    logger.info(f"Orden {order.uuid} aceptada por '{accepted_by}' via /admin (dispatchStatus=PENDING de inmediato); encolada sincronizacion ACCEPT hacia Sicar X.")
+
+    try:
+        await order_status_notification_service.notify_order_accepted(order)
+    except Exception as e:
+        logger.error(f"Fallo inesperado notificando 'orden aceptada' para la orden {order.uuid}: {type(e).__name__}: {e!r}")
+
+    return order
+
+
+async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, target_status: str) -> Order:
+    """Avanza (o revierte un paso) dispatch_status localmente de inmediato y encola el
+    aviso asincrono a Sicar X - misma logica local-first que accept_order/
+    generate_shipping_label. Cubre PENDING<->PREPARING<->COMPLETE<->DISPATCHED (ver
+    _LEGAL_DISPATCH_TRANSITIONS); PENDING_ACCEPTANCE->PENDING sigue siendo trabajo
+    exclusivo de accept_order.
+
+    COMPLETE->DISPATCHED solo aplica a ordenes DELIVERYMAN (para PICKUP, COMPLETE ya es
+    el estado terminal - "Listo para recoger" es solo la etiqueta que el dashboard le da
+    a COMPLETE, no un estado propio). DISPATCHED->COMPLETE (revertir) se bloquea si la
+    orden ya tiene shipping_label real de envia.com generado - ese hecho (guia con costo
+    ya pagado) no es reversible desde aqui, a diferencia de un DISPATCHED alcanzado
+    manualmente por esta misma funcion."""
+    order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    if order.status == "CANCELLED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
+
+    current = order.dispatch_status
+    if target_status not in _LEGAL_DISPATCH_TRANSITIONS.get(current, set()):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Transición de estado no permitida (de '{current}' a '{target_status}').",
+        )
+
+    if target_status == "DISPATCHED" and (order.delivery_info or {}).get("deliveryType") != "DELIVERYMAN":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Los pedidos de recolección en tienda no tienen paso de envío.")
+    if current == "DISPATCHED" and target_status == "COMPLETE" and order.shipping_label:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede revertir: esta orden ya tiene una guía de envío real generada con envia.com.",
+        )
+
+    order.dispatch_status = target_status
+
+    existing_row = await db.scalar(
+        select(SicarSyncOutbox).where(
+            SicarSyncOutbox.order_id == order.id,
+            SicarSyncOutbox.action == "SYNC_DISPATCH_STATUS",
+            SicarSyncOutbox.status.in_(["PENDING", "IN_PROGRESS"]),
+        )
+    )
+    if existing_row:
+        # Un avance mas reciente reemplaza al pendiente - a Sicar X solo le importa el
+        # target final, no cada estado intermedio por el que paso el dashboard.
+        existing_row.target_dispatch_status = target_status
+        existing_row.status = "PENDING"
+        existing_row.attempts = 0
+        existing_row.last_error = None
+        existing_row.next_attempt_at = datetime.now(timezone.utc)
+    else:
+        db.add(SicarSyncOutbox(
+            order_id=order.id,
+            action="SYNC_DISPATCH_STATUS",
+            target_dispatch_status=target_status,
+            cash_register_uuid="",  # no aplica a esta accion, pero la columna es NOT NULL
+            status="PENDING",
+            next_attempt_at=datetime.now(timezone.utc),
+        ))
+
+    await db.commit()
+    await db.refresh(order)
+    logger.info(f"Orden {order.uuid}: dispatchStatus '{current}' -> '{target_status}' via /admin; encolada sincronizacion SYNC_DISPATCH_STATUS hacia Sicar X.")
+
+    delivery_type = (order.delivery_info or {}).get("deliveryType")
+    try:
+        if target_status == "COMPLETE" and delivery_type == "PICKUP":
+            await order_status_notification_service.notify_order_ready_for_pickup(order)
+        elif target_status == "DISPATCHED":
+            await order_status_notification_service.notify_order_dispatched(order)
+    except Exception as e:
+        logger.error(f"Fallo inesperado notificando el cambio de estado de la orden {order.uuid}: {type(e).__name__}: {e!r}")
+
     return order
 
 
@@ -264,4 +364,10 @@ async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: Shipp
     await db.commit()
     await db.refresh(order)
     logger.info(f"Guía de envío generada para la orden {order.uuid} (carrier={data.carrier}, service={data.service}) via /admin; encolada sincronización DISPATCH hacia Sicar X.")
+
+    try:
+        await order_status_notification_service.notify_order_dispatched(order)
+    except Exception as e:
+        logger.error(f"Fallo inesperado notificando 'orden enviada' para la orden {order.uuid}: {type(e).__name__}: {e!r}")
+
     return order

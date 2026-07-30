@@ -16,9 +16,11 @@ from app.services.cancel_service import process_order_cancellation, advance_disp
 from app.services import admin_notification_service
 
 # dispatchStatus al que "aceptar" (ACCEPT) avanza un pedido - PENDING_ACCEPTANCE -> PENDING,
-# confirmado en vivo (ver cancel_service.advance_dispatch_status). El mismo endpoint de
-# Sicar X acepta cualquier valor de la secuencia PENDING/PREPARING/COMPLETE/DISPATCHED, pero
-# la accion ACCEPT del outbox solo cubre este primer avance por ahora.
+# confirmado en vivo (ver cancel_service.advance_dispatch_status). Es el unico target que
+# PENDING_ACCEPTANCE puede alcanzar (Sicar X nunca lo acepta como destino, ver
+# admin_service._LEGAL_DISPATCH_TRANSITIONS); cualquier otro avance/reversion del resto de
+# la secuencia PENDING/PREPARING/COMPLETE/DISPATCHED pasa por la accion SYNC_DISPATCH_STATUS
+# mas abajo, no por esta.
 ACCEPT_TARGET_DISPATCH_STATUS = "PENDING"
 
 logger = logging.getLogger(__name__)
@@ -92,19 +94,25 @@ async def _process_claimed_row(row_id: int) -> None:
             elif row.action == "ACCEPT":
                 # Mutacion real capturada en vivo (agent-browser contra el tablero de
                 # despacho de app.sicarx.com, 2026-07-29) - ver
-                # cancel_service.advance_dispatch_status. A diferencia de CANCEL, esta
-                # mutacion usa order.sicar_order_id directamente (no requiere resolver
-                # sicar_document_uuid primero).
+                # cancel_service.advance_dispatch_status. dispatch_status ya se puso en
+                # "PENDING" localmente de forma sincrona en admin_service.accept_order (el
+                # dashboard admin es la fuente de verdad, no un espejo de Sicar X), asi
+                # que aqui solo se le avisa a Sicar X - no se vuelve a tocar
+                # order.dispatch_status, mismo patron que DISPATCH abajo.
                 await advance_dispatch_status(order, ACCEPT_TARGET_DISPATCH_STATUS)
-                order.dispatch_status = ACCEPT_TARGET_DISPATCH_STATUS
             elif row.action == "DISPATCH":
                 # Guia de envio generada con envia.com (ver admin_service.generate_shipping_label)
-                # - a diferencia de ACCEPT, dispatch_status ya se puso en "DISPATCHED"
-                # localmente de forma sincrona en el momento en que envia.com respondio
-                # exitosamente (el hecho real ya ocurrio, no es un simple espejo de Sicar
-                # X), asi que aqui solo se le avisa a Sicar X - no se vuelve a tocar
-                # order.dispatch_status, mismo patron que CANCEL arriba.
+                # - dispatch_status ya se puso en "DISPATCHED" localmente de forma sincrona
+                # en el momento en que envia.com respondio exitosamente (el hecho real ya
+                # ocurrio), asi que aqui solo se le avisa a Sicar X - no se vuelve a tocar
+                # order.dispatch_status, mismo patron que ACCEPT arriba.
                 await advance_dispatch_status(order, "DISPATCHED")
+            elif row.action == "SYNC_DISPATCH_STATUS":
+                # Avance/reversion generico via admin_service.advance_order_dispatch_status
+                # - dispatch_status ya se aplico localmente de forma sincrona ahi, mismo
+                # patron que ACCEPT/DISPATCH: aqui solo se le avisa a Sicar X con el target
+                # que quedo cargado en la fila.
+                await advance_dispatch_status(order, row.target_dispatch_status)
             else:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
 

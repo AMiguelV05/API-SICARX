@@ -102,8 +102,23 @@ class OrderAcceptResponse(CamelModel):
     order_uuid: str
     accepted_at: datetime
     accepted_by: Optional[str] = None
+    dispatch_status: str
     sync_status: Literal["QUEUED"] = "QUEUED"
-    note: str = "La aceptacion local ya se aplico; el avance de dispatchStatus en Sicar X se procesa de forma asincrona via sicar_sync_outbox (normalmente en menos de un minuto)."
+    note: str = "La aceptación ya se aplicó localmente (dispatchStatus = PENDING); se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
+
+# POST /admin/orders/{uuid}/advance-status
+
+class AdvanceDispatchStatusRequest(CamelModel):
+    dispatch_status: Literal["PREPARING", "COMPLETE", "DISPATCHED"] = Field(
+        description="Estado objetivo. Debe ser el siguiente paso legal (o el anterior, para revertir "
+        "un error) desde el dispatchStatus actual de la orden - ver ADMIN_INTEGRATION.md."
+    )
+
+class AdvanceDispatchStatusResponse(CamelModel):
+    order_uuid: str
+    dispatch_status: str
+    sync_status: Literal["QUEUED"] = "QUEUED"
+    note: str = "El nuevo estado ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
 
 # POST /admin/orders/{uuid}/assign-delivery
 

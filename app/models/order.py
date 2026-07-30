@@ -148,8 +148,8 @@ class SicarSyncOutbox(Base):
     confirme - restaura stock, marca CANCELLED y encola una fila aqui en la misma
     transaccion. app/worker/sicar_sync_worker.py drena esta tabla en un job aparte,
     con reintentos, para que un Sicar X caido nunca bloquee una cancelacion. `action`
-    es deliberadamente generico ("CANCEL"/"ACCEPT"/"DISPATCH" hoy) para poder reusar
-    este mecanismo con otras operaciones a futuro sin necesitar otra tabla.
+    es deliberadamente generico ("CANCEL"/"ACCEPT"/"DISPATCH"/"SYNC_DISPATCH_STATUS" hoy) para poder
+    reusar este mecanismo con otras operaciones a futuro sin necesitar otra tabla.
 
     `status` incluye IN_PROGRESS (ademas de PENDING/SUCCEEDED/FAILED) para que el
     worker pueda reclamar una fila y soltar el lock de inmediato en vez de mantenerlo
@@ -170,9 +170,13 @@ class SicarSyncOutbox(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
-    action = Column(String, nullable=False)  # "CANCEL"/"ACCEPT"/"DISPATCH" hoy
+    action = Column(String, nullable=False)  # "CANCEL"/"ACCEPT"/"DISPATCH"/"SYNC_DISPATCH_STATUS" hoy
     cash_register_uuid = Column(String, nullable=False)
     status = Column(String, nullable=False, default="PENDING")  # PENDING/IN_PROGRESS/SUCCEEDED/FAILED
+    # Solo poblado para action="SYNC_DISPATCH_STATUS" (ver admin_service.advance_order_dispatch_status):
+    # a diferencia de ACCEPT/DISPATCH, que cada uno tiene un unico target hardcodeado, esta accion es
+    # generica y necesita cargar cual dispatchStatus avisarle a Sicar X.
+    target_dispatch_status = Column(String, nullable=True)
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(String, nullable=True)
     next_attempt_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

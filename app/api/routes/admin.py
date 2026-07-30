@@ -12,6 +12,8 @@ from app.schemas.admin import (
     AdminOrderPublic,
     OrderAcceptRequest,
     OrderAcceptResponse,
+    AdvanceDispatchStatusRequest,
+    AdvanceDispatchStatusResponse,
     DeliveryAssignRequest,
     DeliveryAssignResponse,
     ShippingQuoteRequest,
@@ -84,7 +86,13 @@ async def admin_get_order(order_uuid: str, db: DbDep, include_deleted: bool = Qu
 @router.post("/orders/{order_uuid}/accept", response_model=OrderAcceptResponse, summary="Aceptar una orden localmente y encolar el avance de dispatchStatus en Sicar X")
 async def admin_accept_order(order_uuid: str, db: DbDep, data: OrderAcceptRequest = Body(default=OrderAcceptRequest())):
     order = await admin_service.accept_order(db, order_uuid, data.accepted_by)
-    return OrderAcceptResponse(order_uuid=order.uuid, accepted_at=order.accepted_at, accepted_by=order.accepted_by)
+    return OrderAcceptResponse(order_uuid=order.uuid, accepted_at=order.accepted_at, accepted_by=order.accepted_by, dispatch_status=order.dispatch_status)
+
+
+@router.post("/orders/{order_uuid}/advance-status", response_model=AdvanceDispatchStatusResponse, summary="Avanzar (o revertir un paso) el dispatchStatus de una orden")
+async def admin_advance_order_status(order_uuid: str, db: DbDep, data: AdvanceDispatchStatusRequest = Body()):
+    order = await admin_service.advance_order_dispatch_status(db, order_uuid, data.dispatch_status)
+    return AdvanceDispatchStatusResponse(order_uuid=order.uuid, dispatch_status=order.dispatch_status)
 
 
 @router.post("/orders/{order_uuid}/assign-delivery", response_model=DeliveryAssignResponse, summary="Asignar mensajeria/paqueteria a una orden (metadato local, sin integracion externa)")

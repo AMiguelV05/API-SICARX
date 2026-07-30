@@ -6,7 +6,6 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.order import Order, SicarSyncOutbox
-from app.services.cancel_service import fetch_document_dispatch_status
 from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_service import pay_order_in_sicar, _to_decimal
@@ -18,15 +17,6 @@ logger = logging.getLogger(__name__)
 MP_APPROVED_STATUSES = {"approved"}
 MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
-
-# Estados de nuestro campo local `status` que ya son definitivos - no tiene caso
-# refrescar el dispatchStatus de una orden cancelada.
-TERMINAL_STATUSES = {"CANCELLED"}
-
-# dispatchStatus de Sicar X (document-graph/v1/graph-v2, confirmado en vivo contra el
-# panel admin de Sicar X - ver CLAUDE.md) que ya significan que la orden llego a su
-# estado final de cumplimiento; no hace falta seguir refrescando despues de esto.
-TERMINAL_DISPATCH_STATUSES = {"COMPLETE", "DISPATCHED"}
 
 def _parse_sicar_date(value) -> datetime | None:
     """`date`/`sicarTimestamp` de Sicar X llegan como epoch numerico; el formato
@@ -157,32 +147,6 @@ async def get_order_by_uuid(db: AsyncSession, order_uuid: str) -> Order | None:
     resucitada/mutada por una notificacion de pago tardia (p. ej. una ficha OXXO
     pagada despues de "eliminar" la reserva) - ver Riesgo R2 del plan."""
     return await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
-
-async def refresh_order_status_if_needed(db: AsyncSession, order: Order) -> Order:
-    """Refresca dispatch_status/dispatch_history desde Sicar X (generatedV2, ver
-    cancel_service.fetch_document_dispatch_status) si la orden no esta en un estado
-    definitivo. No falla la respuesta si Sicar X no responde - el detalle sigue
-    sirviendose con el ultimo estado local conocido."""
-    if order.status in TERMINAL_STATUSES or order.dispatch_status in TERMINAL_DISPATCH_STATUSES:
-        return order
-
-    remote = await fetch_document_dispatch_status(order.sicar_order_id)
-    if not remote:
-        return order
-
-    changed = False
-    if remote.get("dispatchStatus") and remote["dispatchStatus"] != order.dispatch_status:
-        order.dispatch_status = remote["dispatchStatus"]
-        changed = True
-    if remote.get("dispatchHistory") != order.dispatch_history:
-        order.dispatch_history = remote.get("dispatchHistory")
-        changed = True
-
-    if changed:
-        await db.commit()
-        await db.refresh(order)
-
-    return order
 
 async def prepare_local_cancellation(
     db: AsyncSession, order: Order, *, cash_register_uuid: str | None = None, require_status: str | None = None,

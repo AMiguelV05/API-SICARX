@@ -129,14 +129,18 @@ Respuesta `200`:
 }
 ```
 
-`action` es `"CANCEL"` (cancelación de un pedido), `"ACCEPT"` (avanzar `dispatchStatus` de
-`PENDING_ACCEPTANCE` a `PENDING` en Sicar X, ver `POST .../accept` abajo), o `"DISPATCH"`
-(avanzar `dispatchStatus` a `DISPATCHED` en Sicar X tras generar una guía de envío, ver
-`POST .../shipping/generate` más abajo). Una fila `FAILED`
+`action` es `"CANCEL"` (cancelación de un pedido), `"ACCEPT"` (avisar a Sicar X que
+`dispatchStatus` ya avanzó de `PENDING_ACCEPTANCE` a `PENDING`, ver `POST .../accept` abajo),
+`"DISPATCH"` (avisar a Sicar X que `dispatchStatus` ya avanzó a `DISPATCHED` tras generar una guía
+de envío, ver `POST .../shipping/generate` más abajo), o `"SYNC_DISPATCH_STATUS"` (avisar a Sicar X
+de cualquier otro avance/reversión de `dispatchStatus` disparado por `POST .../advance-status`, ver
+más abajo — el `dispatchStatus` objetivo viaja en la fila misma, no está hardcodeado como en las
+otras tres acciones). En los cuatro casos, el estado local (`dispatchStatus`, autoritativo desde el
+dashboard admin) ya se aplicó de inmediato antes de encolar la fila — esta cola es puramente para
+avisarle a Sicar X, nunca para decidir el estado. Una fila `FAILED`
 significa que se agotaron los 5 intentos con backoff exponencial (1/2/4/8/16 min) — el pedido
-sigue correcto del lado local (el estado local ya se aplicó de inmediato cuando se disparó la
-acción), pero Sicar X todavía no se enteró; hace falta reconciliar manualmente en el panel nativo
-de Sicar X, o reintentar con el siguiente endpoint una vez resuelta la causa.
+sigue correcto del lado local, pero Sicar X todavía no se enteró; hace falta reconciliar manualmente
+en el panel nativo de Sicar X, o reintentar con el siguiente endpoint una vez resuelta la causa.
 
 ### `POST /v1/admin/sync/outbox/{id}/retry` — reintentar una fila FAILED
 
@@ -235,20 +239,78 @@ detrás de `X-Admin-Key` — es un identificador para auditoría, no una FK a na
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "acceptedAt": "2026-07-29T16:36:45Z",
   "acceptedBy": "Miguel",
+  "dispatchStatus": "PENDING",
   "syncStatus": "QUEUED",
-  "note": "La aceptacion local ya se aplico; el avance de dispatchStatus en Sicar X se procesa de forma asincrona via sicar_sync_outbox (normalmente en menos de un minuto)."
+  "note": "La aceptación ya se aplicó localmente (dispatchStatus = PENDING); se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
 }
 ```
 
-**Esto es asíncrono, no instantáneo del lado de Sicar X** — `acceptedAt`/`acceptedBy` se aplican
-de inmediato en Postgres (autoritativo desde el punto de vista de este backend), pero avanzar el
-`dispatchStatus` real en Sicar X (`PENDING_ACCEPTANCE` → `PENDING`) ocurre en el siguiente ciclo
-del worker (cada minuto), vía la misma cola `sicar_sync_outbox` que ya usa la cancelación. Si
-necesitas confirmar que ya se sincronizó, vuelve a pedir `GET /v1/admin/orders/{orderUuid}` un poco
-después y revisa `dispatchStatus` (debería pasar de `PENDING_ACCEPTANCE` a `PENDING`), o consulta
-`GET /v1/admin/sync/outbox?status=FAILED` si sospechas que algo no se sincronizó. `404` si el
-pedido no existe (o está soft-deleted). `409` si el pedido ya fue aceptado antes (`acceptedAt` ya
-tenía un valor) — no se puede "re-aceptar".
+**`dispatchStatus` ya es `PENDING` en esta misma respuesta** — `acceptedAt`/`acceptedBy` y
+`dispatchStatus` se aplican de inmediato en Postgres (el dashboard admin es la única fuente de
+verdad de este campo; Sicar X ya nunca lo sobreescribe — ver `CLAUDE.md`). Lo único asíncrono es
+avisarle a Sicar X: eso ocurre en el siguiente ciclo del worker (cada minuto), vía la misma cola
+`sicar_sync_outbox` que ya usa la cancelación. Si sospechas que ese aviso no llegó, consulta
+`GET /v1/admin/sync/outbox?status=FAILED`. `404` si el pedido no existe (o está soft-deleted). `409`
+si el pedido ya fue aceptado antes (`acceptedAt` ya tenía un valor) — no se puede "re-aceptar".
+
+### `POST /v1/admin/orders/{orderUuid}/advance-status` — avanzar (o revertir) el estado de cumplimiento
+
+```http
+POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/advance-status
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "dispatchStatus": "PREPARING" }
+```
+
+Cubre las transiciones que `/accept` y `/shipping/generate` no cubren — el dashboard es la única
+fuente de verdad de `dispatchStatus`, así que este es el endpoint genérico para moverlo. Transiciones
+legales (`dispatchStatus` actual → objetivos permitidos en esta llamada):
+
+| Actual | Objetivos permitidos |
+|---|---|
+| `PENDING` | `PREPARING` |
+| `PREPARING` | `PENDING` (revertir), `COMPLETE` |
+| `COMPLETE` | `PREPARING` (revertir), `DISPATCHED`* |
+| `DISPATCHED` | `COMPLETE` (revertir)** |
+
+\* Solo para pedidos `DELIVERYMAN` — un `PICKUP` no tiene paso de envío, `COMPLETE` ya es su estado
+terminal (el dashboard lo puede etiquetar "Listo para recoger", pero no hay una transición de
+backend distinta para eso).
+
+\*\* Bloqueado (`409`) si el pedido ya tiene `shippingLabel` real generado con envia.com — una guía
+ya generada (y cobrada) no es reversible desde aquí; solo un `DISPATCHED` alcanzado manualmente por
+este mismo endpoint puede revertirse.
+
+`PENDING_ACCEPTANCE` no aparece en la tabla — salir de ahí sigue siendo trabajo exclusivo de
+`/accept` (Sicar X nunca acepta `PENDING_ACCEPTANCE` como destino, así que no hay nada que revertir
+hacia ese estado).
+
+Respuesta `200`:
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "dispatchStatus": "PREPARING",
+  "syncStatus": "QUEUED",
+  "note": "El nuevo estado ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
+}
+```
+
+Igual que `/accept`, `dispatchStatus` ya queda aplicado en Postgres en esta misma respuesta — solo
+avisarle a Sicar X es asíncrono (`action: "SYNC_DISPATCH_STATUS"` en `sicar_sync_outbox`). Si el
+pedido ya tiene una fila `SYNC_DISPATCH_STATUS` pendiente (p. ej. el dashboard avanzó dos pasos
+seguidos antes de que el worker procesara el primero), esta llamada la actualiza al nuevo objetivo
+en vez de encolar una segunda — a Sicar X solo le importa el estado final, no cada paso intermedio.
+
+`404` si el pedido no existe (o está soft-deleted). `409` si `status == "CANCELLED"`, si la
+transición no está en la tabla de arriba, si se pide `DISPATCHED` sobre un `PICKUP`, o si se intenta
+revertir un `DISPATCHED` respaldado por una guía real de envia.com.
+
+Dispara una notificación al storefront (webhook `order-status-changed`, ver
+`FRONTEND_INTEGRATION.md`) solo en dos casos: llegar a `COMPLETE` en un pedido `PICKUP`
+("listo para recoger"), y llegar a `DISPATCHED` ("enviado"). No hay notificación al llegar a
+`PREPARING`, ni al llegar a `COMPLETE` en un pedido `DELIVERYMAN` (etapa interna, el cliente no
+tiene nada que hacer todavía), ni en ninguna reversión.
 
 ### `POST /v1/admin/orders/{orderUuid}/assign-delivery` — asignar mensajería/paquetería
 
@@ -386,15 +448,16 @@ Respuesta `200`:
   problema de cuenta con el carrier).
 
 Este endpoint **también avanza el estado en Sicar X de forma asíncrona vía `sicar_sync_outbox`**
-(`action: "DISPATCH"`), igual que `ACCEPT` — con una diferencia importante: a diferencia de
-`ACCEPT` (donde `dispatchStatus` local no cambia hasta que el worker confirma con Sicar X, porque
-ese campo ahí es un simple espejo del estado real de Sicar X), aquí `dispatchStatus` se pone en
-`"DISPATCHED"` **de inmediato**, en la misma transacción que persiste `shippingLabel` — el hecho
-real (guía generada, envia.com ya cobró) ya ocurrió en el momento en que este endpoint responde
-`200`, mismo principio "Postgres local autoritativo de inmediato" que ya usa la cancelación de
-pedidos y la confirmación de pago con Mercado Pago (ver `CLAUDE.md`). Avisarle a Sicar X es la
-parte que queda asíncrona/best-effort — revisa `GET /v1/admin/sync/outbox?status=FAILED` si
-sospechas que no se sincronizó.
+(`action: "DISPATCH"`), igual que `ACCEPT`/`advance-status` — `dispatchStatus` se pone en
+`"DISPATCHED"` **de inmediato** en Postgres, en la misma transacción que persiste `shippingLabel`
+— el hecho real (guía generada, envia.com ya cobró) ya ocurrió en el momento en que este endpoint
+responde `200`, mismo principio "Postgres local autoritativo de inmediato" que ya usa la
+cancelación de pedidos y la confirmación de pago con Mercado Pago (ver `CLAUDE.md`). Avisarle a
+Sicar X es la parte que queda asíncrona/best-effort — revisa `GET /v1/admin/sync/outbox?status=FAILED`
+si sospechas que no se sincronizó. También dispara la misma notificación `order-dispatched` al
+storefront que `/advance-status` dispara para un `DISPATCHED` alcanzado manualmente (ver
+`FRONTEND_INTEGRATION.md`) — el cliente recibe el mismo mensaje sin importar cuál de los dos
+caminos se usó.
 
 **Advertencia de confiabilidad** (mismo espíritu que la nota de "no hay reintentos automáticos"
 más abajo): esta llamada tiene un efecto real con costo — un timeout del lado del dashboard que
@@ -404,15 +467,20 @@ sobre timeout para "resolverlo".
 
 ## Notas y advertencias
 
+- **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo
+  sobreescribe. Todas las mutaciones (`/accept`, `/advance-status`, `/shipping/generate`) aplican
+  el nuevo valor en Postgres de inmediato, en la misma respuesta; avisarle a Sicar X siempre queda
+  como un paso asíncrono/best-effort vía `sicar_sync_outbox`, nunca al revés. El storefront
+  (`GET /v1/auth/me/orders/{orderUuid}`) tampoco consulta a Sicar X en vivo — sirve exactamente lo
+  que este panel haya dejado en Postgres.
 - **No hay reintentos automáticos si tu backend falla al llamar estas rutas** — a diferencia del
-  worker interno (que sí reintenta `ACCEPT`/`CANCEL` contra Sicar X), un error de red o un `5xx`
-  al llamar `/v1/admin/*` desde el dashboard no se reintenta solo; implementa tu propio reintento
-  si lo necesitas.
-- **`dispatchStatus` puede seguir en `PENDING_ACCEPTANCE` un rato después de aceptar** — es
-  esperado mientras el worker no haya corrido su siguiente ciclo (hasta ~1 minuto). Si sigue ahí
-  después de varios minutos, revisa `GET /v1/admin/sync/outbox?status=FAILED` — probablemente el
-  pedido ya está cancelado en Sicar X (un `409 "Document is canceled"` es la causa más común) o
-  hay un problema de token/red con Sicar X.
+  worker interno (que sí reintenta `ACCEPT`/`CANCEL`/`DISPATCH`/`SYNC_DISPATCH_STATUS` contra
+  Sicar X), un error de red o un `5xx` al llamar `/v1/admin/*` desde el dashboard no se reintenta
+  solo; implementa tu propio reintento si lo necesitas.
+- **Si `sicar_sync_outbox` acumula filas `FAILED`** para un pedido, revisa
+  `GET /v1/admin/sync/outbox?status=FAILED` — probablemente el pedido ya está cancelado en Sicar X
+  (un `409 "Document is canceled"` es la causa más común) o hay un problema de token/red con Sicar
+  X. El estado local ya es correcto en cualquier caso; esto solo afecta si Sicar X se enteró.
 - **`GET /v1/admin/orders` no tiene `sortBy`** — siempre ordena por `createdAt` descendente, sin
   opción de cambiarlo hoy.
 - **`includeDeleted` existe para reconciliación, no para uso normal del dashboard** — un pedido

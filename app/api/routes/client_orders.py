@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Path, Query
 from app.core.database import DbDep
 from app.core.security import validate_api_key, CurrentClientDep
 from app.schemas.orders import OrderPublic, OrderListResponse
-from app.services.order_history_service import list_client_orders, get_client_order, refresh_order_status_if_needed, TERMINAL_STATUSES
+from app.services.order_history_service import list_client_orders, get_client_order
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth/me/orders", tags=["Client Orders"], dependencies=[Depends(validate_api_key)])
@@ -27,10 +27,7 @@ async def list_my_orders(
 async def get_my_order(client: CurrentClientDep, db: DbDep, order_uuid: str = Path()):
     """
     Detalle de un pedido (debe pertenecer al cliente autenticado, si no responde `404`).
-    Si el estado local no es definitivo, intenta refrescarlo contra Sicar X antes de
-    responder — igual que el refresco perezoso de `GET /products/{uuid}`.
+    Solo Postgres local — el dashboard admin es la unica fuente de verdad de
+    `dispatch_status`, no hay llamada en vivo a Sicar X aqui (ver CLAUDE.md).
     """
-    order = await get_client_order(db, client.id, order_uuid)
-    if order.status not in TERMINAL_STATUSES:
-        order = await refresh_order_status_if_needed(db, order)
-    return order
+    return await get_client_order(db, client.id, order_uuid)

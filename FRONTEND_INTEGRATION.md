@@ -506,13 +506,14 @@ x-api-key: <api-key>
 Authorization: <token de /v1/auth/login o /v1/auth/register>
 ```
 
-Mismo shape que un elemento de `docs` arriba. `404` si el pedido no existe o no pertenece a la
-cuenta autenticada. Si `dispatchStatus` no está en un estado definitivo (`COMPLETE`/`DISPATCHED`),
-esta llamada intenta refrescarlo contra Sicar X antes de responder — puede tardar un poco más que
-la lista. `status` (`PAID`/`CANCELLED`) es el estado de pago/cancelación propio de esta API;
+Mismo shape que un elemento de `docs` arriba, y **solo Postgres local** — igual que la lista, sin
+ninguna llamada en vivo a Sicar X. `404` si el pedido no existe o no pertenece a la cuenta
+autenticada. `status` (`PAID`/`CANCELLED`) es el estado de pago/cancelación propio de esta API;
 `dispatchStatus` (`PENDING_ACCEPTANCE`/`PENDING`/`PREPARING`/`COMPLETE`/`DISPATCHED`) es el estado
-de cumplimiento/entrega real de Sicar X — son dos cosas distintas, no las confundas al mostrar el
-seguimiento del pedido.
+de cumplimiento/entrega, decidido enteramente por el dashboard admin (ver `ADMIN_INTEGRATION.md`)
+— son dos cosas distintas, no las confundas al mostrar el seguimiento del pedido. Para enterarte de
+un cambio de `dispatchStatus` en tiempo casi real (en vez de solo al volver a pedir este endpoint),
+ver el webhook `order-status-changed` más abajo.
 
 ### `POST /v1/products` — catálogo local (paginado, sin llamadas a Sicar X)
 
@@ -1076,6 +1077,51 @@ esta notificación.
 **Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde
 `200` rápido, no hay reintento automático si tu endpoint falla o tarda.
 
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-status-changed`
+
+Mismo mecanismo que `order-confirmed`/`order-cancelled` de arriba — este backend llama a esta ruta
+directamente (nunca el navegador) cuando el **dashboard admin** (no Sicar X — ver
+`ADMIN_INTEGRATION.md`) avanza el `dispatchStatus` de un pedido a alguno de estos 3 momentos
+concretos:
+
+- `event: "order-accepted"` — al aceptar el pedido (`PENDING_ACCEPTANCE` → `PENDING`).
+- `event: "order-ready-pickup"` — al llegar a `COMPLETE`, **solo para pedidos `PICKUP`**.
+- `event: "order-dispatched"` — al llegar a `DISPATCHED` (pedidos `DELIVERYMAN`), sin importar si
+  fue vía una guía real de envia.com o un avance manual del dashboard.
+
+**No hay evento al llegar a `PREPARING`**, y **no hay evento al llegar a `COMPLETE` para un pedido
+`DELIVERYMAN`** (esa es una etapa interna de preparación — el cliente no tiene nada que hacer
+todavía, solo se le avisa hasta que de verdad se envía). Tampoco se dispara nada al revertir un
+paso (una corrección del dashboard, ver `ADMIN_INTEGRATION.md`).
+
+**Verificación de firma**: exactamente el mismo esquema que `order-confirmed` — mismos headers,
+mismo secreto compartido (`FRONTEND_WEBHOOK_SECRET`), misma fórmula de manifest. No la repetimos
+aquí — consulta la sección de `order-confirmed` arriba.
+
+**Body**: mismo shape que `order-confirmed` (un elemento de `GET /v1/auth/me/orders/{orderUuid}`
+más `clientEmail`/`clientName`), más dos campos nuevos:
+
+```json
+{
+  "...": "... (mismos campos que order-confirmed)",
+  "clientEmail": "juan@example.com",
+  "clientName": "Juan Pérez",
+  "event": "order-ready-pickup",
+  "statusMessage": "Tu pedido está listo para recoger"
+}
+```
+
+`event` es el discriminador (`"order-accepted"` | `"order-ready-pickup"` | `"order-dispatched"`) por
+si prefieres tu propio texto por idioma/canal; `statusMessage` es el texto en español ya armado,
+listo para usar directamente si no necesitas personalizarlo.
+
+**Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde `200`
+rápido, no hay reintento automático si tu endpoint falla o tarda.
+
+**Nota**: este webhook no incluye seguimiento de paquete en tránsito (ubicación en vivo, ETA,
+etc.) — eso depende de una integración futura con el webhook de envia.com, todavía no construida.
+Este webhook solo cubre los 3 momentos puntuales de arriba.
+
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/verification-requested`
 
 Mismo mecanismo que el webhook `order-confirmed` de arriba — este backend llama a esta
@@ -1403,7 +1449,12 @@ async function payOrder(orderId: string, clientToken: string, formData: Record<s
   No asumas que un pedido está pagado solo porque `POST /v1/orders` respondió `200`.
 - **Seguimiento post-compra sí existe**: `GET /v1/auth/me/orders` (lista) y
   `GET /v1/auth/me/orders/{orderUuid}` (detalle, con `dispatchStatus`/`dispatchHistory`) — ver
-  referencia arriba.
+  referencia arriba. `dispatchStatus` es controlado enteramente por el dashboard admin, ya no se
+  consulta a Sicar X en vivo desde ninguna ruta de este backend — ver el webhook
+  `order-status-changed` arriba para enterarte de cambios sin tener que hacer polling.
+- **No hay seguimiento de paquete en tránsito todavía** (ubicación en vivo, ETA) — es una
+  integración futura con el webhook de envia.com, no construida en este cambio. El webhook
+  `order-status-changed` de arriba solo cubre aceptado/listo-para-recoger/enviado.
 - **`/v1/cart*` no valida disponibilidad en tiempo real** — a diferencia de `/v1/orders`, guardar
   o leer el carrito no consulta a Sicar X, solo el catálogo local (que se sincroniza cada 5 min).
   El `409` de "sin disponibilidad suficiente" solo puede pasar hasta el checkout real
