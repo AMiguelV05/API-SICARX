@@ -45,6 +45,7 @@ class OutboxListResponse(CamelModel):
 class ShippingLabelInfo(CamelModel):
     carrier: str
     service: str
+    shipment_id: Optional[int] = Field(default=None, description="ID del envio en envia.com - buscar por este valor en su dashboard")
     service_description: Optional[str] = None
     tracking_number: Optional[str] = None
     track_url: Optional[str] = None

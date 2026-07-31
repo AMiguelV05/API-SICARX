@@ -396,6 +396,27 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
     persistir el resultado y avanzar dispatch_status - esta funcion solo habla con
     envia.com.
 
+    INCIDENTE (2026-07-30): confirmado en vivo que esta funcion NUNCA genero una guia real
+    - envia.com rechazaba la peticion (HTTP 200, `meta:"error"`, "Required property
+    missing: settings") y esta funcion, al no revisar `meta`, lo trataba como exito: devolvia
+    un `dict` con `trackingNumber`/`labelUrl` en `None` y `totalPrice: 0`, que admin_service
+    igual persistia como `Order.shipping_label`, avanzaba `dispatch_status` a `DISPATCHED` y
+    disparaba la notificacion "pedido enviado" al cliente - sin que ningun envio existiera
+    realmente en envia.com (de ahi que no apareciera nada en su dashboard de pruebas). Dos
+    problemas, arreglados juntos:
+    1. El payload de `/ship/generate/` (a diferencia de `/ship/rate/`) exige `carrier`/
+       `service`/`type` anidados bajo un objeto `shipment`, y un objeto `settings`
+       (`printFormat`/`printSize`) - ninguno de los dos se mandaba. Confirmado contra
+       docs.envia.com/reference/create-shipping-label y en vivo: con el payload corregido
+       envia.com devuelve `meta:"generate"` y un `shipmentId` real (visible en su
+       dashboard). `printFormat: "PDF"`/`printSize: "STOCK_4X6"` son la combinacion
+       "default" documentada para el catalogo de carriers de esta cuenta (ver
+       docs.envia.com/reference/carrier-print-options) - no expuesto como configuracion,
+       no hay necesidad de variarlo hoy.
+    2. Un `meta:"error"` en HTTP 200 (mismo patron "falla suave" que ya maneja
+       `get_shipping_quote`/`_quote_one` mas arriba) ahora se detecta explicitamente y se
+       levanta como un 502 real - nunca mas se puede confundir con un exito.
+
     Misma advertencia de shape-no-verificado que get_shipping_quote arriba, mas una
     especifica de confiabilidad: esta llamada tiene un efecto real con costo (genera y
     cobra una guia del lado de envia.com) - un timeout de este lado que compita con un
@@ -406,8 +427,8 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
         "origin": _origin_address(origin_overrides),
         "destination": _destination_address(order),
         "packages": _build_packages(weight, length, width, height),
-        "carrier": carrier,
-        "service": service,
+        "shipment": {"carrier": carrier, "service": service, "type": 1},
+        "settings": {"printFormat": "PDF", "printSize": "STOCK_4X6"},
     }
 
     async with httpx.AsyncClient(timeout=SHIPPING_TIMEOUT) as client:
@@ -421,6 +442,14 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
         )
 
     body = response.json()
+    if isinstance(body, dict) and body.get("meta") == "error":
+        message = (body.get("error") or {}).get("message")
+        logger.error(f"envia.com rechazo la generacion de guia para la orden {order.uuid}: {message}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo generar la guía de envío con envia.com (envia respondió: {(message or '')[:300]}).",
+        )
+
     data = body.get("data") if isinstance(body, dict) else body
     if isinstance(data, list):
         data = data[0] if data else {}
@@ -430,6 +459,7 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
     return {
         "carrier": carrier,
         "service": service,
+        "shipmentId": data.get("shipmentId") or data.get("shipment_id"),
         "serviceDescription": data.get("serviceDescription") or data.get("service_description"),
         "trackingNumber": data.get("trackingNumber") or data.get("tracking_number"),
         "trackUrl": data.get("trackUrl") or data.get("tracking_url") or data.get("trackingUrl"),

@@ -439,9 +439,9 @@ descrito arriba, si se manda aquí (usa el que se haya usado para la cotización
 necesariamente el mismo — este endpoint no recuerda nada de una llamada previa a `/quote`).
 Llama a `POST /ship/generate/` de envia.com con el `service` elegido. Si tiene éxito, en una
 sola transacción: persiste
-`carrier, service, serviceDescription, trackingNumber, trackUrl, labelUrl (el campo `label` de
-envia), totalPrice, currency, weight, length, width, height, generatedAt` en el pedido, y avanza
-`dispatchStatus` de `COMPLETE` a `DISPATCHED`.
+`carrier, service, shipmentId, serviceDescription, trackingNumber, trackUrl, labelUrl (el
+campo `label` de envia), totalPrice, currency, weight, length, width, height, generatedAt`
+en el pedido, y avanza `dispatchStatus` de `COMPLETE` a `DISPATCHED`.
 
 Respuesta `200`:
 ```json
@@ -451,6 +451,7 @@ Respuesta `200`:
   "shippingLabel": {
     "carrier": "dhl",
     "service": "1",
+    "shipmentId": 179044,
     "serviceDescription": "DHL Standard",
     "trackingNumber": "1234567890",
     "trackUrl": "https://...",
@@ -466,11 +467,14 @@ Respuesta `200`:
 }
 ```
 
+`shipmentId` es el identificador que usa el dashboard de envia.com — es lo que hay que
+buscar ahí para confirmar que el envío existe del lado de envia.com.
+
 - `404` si el pedido no existe. `409` si `deliveryType !== "DELIVERYMAN"`,
   `dispatchStatus !== "COMPLETE"`, o si el pedido ya tiene `shippingLabel` (no hay regeneración
   por esta vía). `422` si `deliveryAddress` falta/está incompleta, o si las dimensiones no son
   válidas (mismo `Field(gt=0)` que `/quote`). `502` si envia.com falla (auth, `service` inválido,
-  problema de cuenta con el carrier).
+  problema de cuenta con el carrier) — incluye el mensaje real de envia.com entre paréntesis.
 
 Este endpoint **también avanza el estado en Sicar X de forma asíncrona vía `sicar_sync_outbox`**
 (`action: "DISPATCH"`), igual que `ACCEPT`/`advance-status` — `dispatchStatus` se pone en

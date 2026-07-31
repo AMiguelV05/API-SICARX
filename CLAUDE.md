@@ -306,6 +306,31 @@ levanta un `502` con ese mensaje real de envia.com, en vez de un `200 {"options"
 silencioso — así una regresión similar en el futuro es diagnosticable sin repetir esta
 misma investigación en vivo.
 
+**INCIDENTE (2026-07-30): `/shipping/generate` nunca generó un envío real en envia.com,
+pero el endpoint respondía `200` como si lo hubiera hecho.** Detectado porque el dashboard
+de pruebas de envia.com no mostraba ningún envío tras usar el endpoint. Confirmado en vivo:
+`POST /ship/generate/` respondía `HTTP 200` con `meta:"error"`/`"Required property
+missing: settings"` — un rechazo real, pero `generate_shipping_label` solo revisaba
+`response.status_code` (nunca `meta`, a diferencia de `get_shipping_quote`, que sí lo hace
+desde el incidente anterior), así que lo trataba como éxito: devolvía un `shippingLabel`
+con `trackingNumber`/`labelUrl` en `null` y `totalPrice: 0`, que se persistía igual,
+avanzaba `dispatchStatus` a `DISPATCHED` y disparaba la notificación "pedido enviado" al
+cliente — sin que ningún envío existiera del lado de envia.com. Dos causas, arregladas
+juntas en `shipping_service.generate_shipping_label`:
+1. El payload de `/ship/generate/` (a diferencia de `/ship/rate/`) exige `carrier`/
+   `service`/`type` anidados bajo un objeto `shipment`, más un objeto `settings`
+   (`printFormat`/`printSize`) obligatorio que no se mandaba en absoluto — confirmado
+   contra `docs.envia.com/reference/create-shipping-label` y en vivo (con el payload
+   corregido, envia.com responde `meta:"generate"` y un `shipmentId` real, visible en su
+   dashboard). Se usa `printFormat: "PDF"`/`printSize: "STOCK_4X6"` — la combinación
+   "default" ya documentada para esta cuenta (ver `carrier-print-options` arriba).
+2. `meta:"error"` en `HTTP 200` ahora se detecta explícitamente (mismo patrón ya usado en
+   `get_shipping_quote`) y se levanta como `502` real — ya no puede confundirse con éxito.
+
+`ShippingLabelInfo`/`Order.shipping_label` ganó un campo `shipmentId` (el id que usa el
+dashboard de envia.com) para que sea inmediato confirmar ahí que un envío realmente existe,
+en vez de tener que inferirlo del `trackingNumber`.
+
 ### Auth on this API's own endpoints
 
 Every route depends on `validate_api_key` (`app/core/security.py`), which checks a static `x-api-key` header against `settings.X_API_KEY`. This is separate from both SICAR X token schemes above — it authenticates the frontend to this middleware, not this middleware to SICAR X.
