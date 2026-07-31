@@ -327,9 +327,11 @@ async def _get_order_ready_for_shipping(db: AsyncSession, order_uuid: str) -> Or
 async def quote_shipping(db: AsyncSession, order_uuid: str, data: ShippingQuoteRequest) -> list[ShippingQuoteOption]:
     """No persiste nada - se puede llamar repetidamente mientras el admin ajusta
     peso/medidas antes de generar la guia real (ver quote_shipping vs
-    generate_shipping_label en ADMIN_INTEGRATION.md)."""
+    generate_shipping_label en ADMIN_INTEGRATION.md). `data.origin` (opcional) permite
+    overridear cualquier subconjunto de campos del origen - ver ShippingOriginOverride."""
     order = await _get_order_ready_for_shipping(db, order_uuid)
-    options = await shipping_service.get_shipping_quote(order, data.weight, data.length, data.width, data.height)
+    origin_overrides = data.origin.model_dump(exclude_none=True) if data.origin else None
+    options = await shipping_service.get_shipping_quote(order, data.weight, data.length, data.width, data.height, origin_overrides)
     return [ShippingQuoteOption(**opt) for opt in options]
 
 
@@ -347,8 +349,9 @@ async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: Shipp
     if order.shipping_label:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya tiene una guía de envío generada.")
 
+    origin_overrides = data.origin.model_dump(exclude_none=True) if data.origin else None
     label = await shipping_service.generate_shipping_label(
-        order, data.weight, data.length, data.width, data.height, data.carrier, data.service,
+        order, data.weight, data.length, data.width, data.height, data.carrier, data.service, origin_overrides,
     )
 
     order.shipping_label = label

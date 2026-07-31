@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from fastapi import HTTPException, status
 
 from app.core.config import settings
 from app.core.upstream_errors import raise_upstream_error
@@ -41,6 +44,84 @@ logger = logging.getLogger(__name__)
 _carrier_catalog_cache: dict[str, tuple[datetime, list[str]]] = {}
 _carrier_catalog_lock = asyncio.Lock()
 
+# INCIDENTE (2026-07-30): confirmado en vivo contra el sandbox real que el campo `state`
+# del objeto address (origin/destination) de envia.com tiene `minLength: 2, maxLength: 3`
+# (confirmado tanto por la doc oficial - docs.envia.com/reference/shipping-rates - como en
+# vivo: "Ciudad de México"/"CDMX" (4 chars) responden 200 con
+# meta:"error"/"String is too long ...properties:state", mientras que "CMX"/"DF"/"NL" (2-3
+# chars) responden 200 meta:"rate" normalmente). Antes de esto, `_destination_address`
+# mandaba `ClientAddress.state` tal cual estaba guardado (potencialmente el nombre
+# completo, ya que este backend no tiene ni tenia un catalogo de conversion nombre->codigo -
+# ver CLAUDE.md "Address book"), lo que producia el MISMO error de validacion para TODOS
+# los carriers por igual (el request nunca llega a evaluarse por carrier, envia lo rechaza
+# antes) - y `get_shipping_quote` lo trataba como "cada carrier individualmente no
+# disponible", produciendo un `200 {"options": []}` indistinguible de una falta de
+# cobertura real. Esta era la causa real detras del reporte "los carriers dicen que no hay
+# disponibilidad aunque si la hay". `_normalize_mx_state` convierte los nombres completos
+# (y variantes comunes, con o sin acentos/puntuacion) de los 32 estados a su codigo
+# ISO 3166-2:MX de 3 letras; un valor que ya mide <=3 caracteres se deja intacto (ya
+# demostrado en vivo que envia no valida que sea un codigo "real", solo la longitud), y un
+# valor >3 caracteres no reconocido se trunca a los primeros 3 con un WARNING en vez de
+# dejar que la peticion falle por completo otra vez.
+_MX_STATE_ALIASES = {
+    "AGUASCALIENTES": "AGU",
+    "BAJACALIFORNIA": "BCN",
+    "BAJACALIFORNIANORTE": "BCN",
+    "BAJACALIFORNIASUR": "BCS",
+    "CAMPECHE": "CAM",
+    "CHIAPAS": "CHP",
+    "CHIHUAHUA": "CHH",
+    "CIUDADDEMEXICO": "CMX",
+    "CDMX": "CMX",
+    "DISTRITOFEDERAL": "CMX",
+    "MEXICOCITY": "CMX",
+    "COAHUILA": "COA",
+    "COAHUILADEZARAGOZA": "COA",
+    "COLIMA": "COL",
+    "DURANGO": "DUR",
+    "GUANAJUATO": "GUA",
+    "GUERRERO": "GRO",
+    "HIDALGO": "HID",
+    "JALISCO": "JAL",
+    "MEXICO": "MEX",
+    "ESTADODEMEXICO": "MEX",
+    "EDOMEX": "MEX",
+    "EDODEMEXICO": "MEX",
+    "MICHOACAN": "MIC",
+    "MICHOACANDEOCAMPO": "MIC",
+    "MORELOS": "MOR",
+    "NAYARIT": "NAY",
+    "NUEVOLEON": "NLE",
+    "OAXACA": "OAX",
+    "PUEBLA": "PUE",
+    "QUERETARO": "QUE",
+    "QUINTANAROO": "ROO",
+    "SANLUISPOTOSI": "SLP",
+    "SINALOA": "SIN",
+    "SONORA": "SON",
+    "TABASCO": "TAB",
+    "TAMAULIPAS": "TAM",
+    "TLAXCALA": "TLA",
+    "VERACRUZ": "VER",
+    "VERACRUZDEIGNACIODELALLAVE": "VER",
+    "YUCATAN": "YUC",
+    "ZACATECAS": "ZAC",
+}
+
+
+def _normalize_mx_state(value: str | None) -> str | None:
+    if not value:
+        return value
+    cleaned = "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c)).strip().upper()
+    if len(cleaned) <= 3:
+        return cleaned
+    alnum = re.sub(r"[^A-Z]", "", cleaned)
+    code = _MX_STATE_ALIASES.get(alnum)
+    if code:
+        return code
+    logger.warning(f"envia.com: no se reconoce el estado '{value}' - se trunca a 3 caracteres ('{cleaned[:3]}') en vez de fallar la cotizacion completa")
+    return cleaned[:3]
+
 
 def _envia_headers() -> dict:
     return {
@@ -50,30 +131,40 @@ def _envia_headers() -> dict:
     }
 
 
-def _origin_address() -> dict:
-    """Direccion de la tienda/almacen - constante propia de este servicio (variables
-    ENVIA_ORIGIN_*, ver app/core/config.py), nunca enviada por el frontend.
+def _origin_address(overrides: dict | None = None) -> dict:
+    """Direccion de la tienda/almacen - por defecto las constantes propias de este servicio
+    (variables ENVIA_ORIGIN_*, ver app/core/config.py). `overrides` (opcional, ver
+    ShippingOriginOverride en app/schemas/admin.py) permite que el admin reemplace
+    cualquier subconjunto de campos por pedido via /shipping/quote|generate - cualquier
+    campo ausente o vacio en `overrides` cae de vuelta al valor de `.env`, campo por campo
+    (nunca "todo o nada"). `country`/`phone_code` deliberadamente no son parte de
+    `overrides` - se quedan fijos.
 
-    ADVERTENCIA conocida: envia.com exige `state` como un codigo corto (2-3 caracteres,
-    p. ej. "NL" para Nuevo Leon), no el nombre completo del estado - ENVIA_ORIGIN_STATE
-    debe cargarse con ese codigo, no con el nombre. Este backend no tiene (ni tenia antes
-    de esto, ver CLAUDE.md - "no hay catalogo de estados/municipios") una tabla de
-    conversion nombre->codigo, asi que no se normaliza aqui; si se carga mal, envia.com
-    respondera 502 via raise_upstream_error, no un error silencioso."""
+    `state` (sea de `overrides` o de `.env`) pasa por `_normalize_mx_state` - ver el
+    comentario junto a esa funcion mas arriba (INCIDENTE 2026-07-30) para el porque: un
+    admin que escriba el nombre completo del estado en el override necesita la misma
+    normalizacion que ya se le aplica al valor de `.env`, o vuelve a producir el mismo
+    "String is too long" que afecto a todos los carriers por igual antes de ese fix."""
+    overrides = overrides or {}
+
+    def pick(key: str, default: str) -> str:
+        value = overrides.get(key)
+        return value if value else default
+
     return {
-        "name": settings.ENVIA_ORIGIN_NAME,
-        "company": settings.ENVIA_ORIGIN_COMPANY,
-        "email": settings.ENVIA_ORIGIN_EMAIL,
+        "name": pick("name", settings.ENVIA_ORIGIN_NAME),
+        "company": pick("company", settings.ENVIA_ORIGIN_COMPANY),
+        "email": pick("email", settings.ENVIA_ORIGIN_EMAIL),
         "phone_code": settings.ENVIA_PHONE_CODE,
-        "phone": settings.ENVIA_ORIGIN_PHONE,
-        "street": settings.ENVIA_ORIGIN_STREET,
-        "number": settings.ENVIA_ORIGIN_NUMBER,
-        "district": settings.ENVIA_ORIGIN_DISTRICT,
-        "city": settings.ENVIA_ORIGIN_CITY,
-        "state": settings.ENVIA_ORIGIN_STATE,
+        "phone": pick("phone", settings.ENVIA_ORIGIN_PHONE),
+        "street": pick("street", settings.ENVIA_ORIGIN_STREET),
+        "number": pick("number", settings.ENVIA_ORIGIN_NUMBER),
+        "district": pick("district", settings.ENVIA_ORIGIN_DISTRICT),
+        "city": pick("city", settings.ENVIA_ORIGIN_CITY),
+        "state": _normalize_mx_state(pick("state", settings.ENVIA_ORIGIN_STATE)),
         "country": settings.ENVIA_COUNTRY,
-        "postalCode": settings.ENVIA_ORIGIN_ZIP_CODE,
-        "reference": settings.ENVIA_ORIGIN_REFERENCE,
+        "postalCode": pick("zip_code", settings.ENVIA_ORIGIN_ZIP_CODE),
+        "reference": pick("reference", settings.ENVIA_ORIGIN_REFERENCE),
     }
 
 
@@ -85,9 +176,13 @@ def _destination_address(order: Order) -> dict:
     checkout), no del address book - mismo campo que ya usa
     cancel_service.advance_dispatch_status para lo mismo. `company` va siempre None: es un
     envio a un cliente final (ClientAddressPublic no tiene razon social), a diferencia de
-    _origin_address, donde si aplica (la tienda). Misma advertencia sobre `state` que
-    _origin_address arriba - aqui aplica a ClientAddress.state, que tampoco se guarda como
-    codigo hoy."""
+    _origin_address, donde si aplica (la tienda). `state` viene de `ClientAddress.state`,
+    que se guarda tal cual lo resuelve el frontend (no necesariamente un codigo corto) -
+    pasa por `_normalize_mx_state` antes de mandarse a envia.com. Ver el comentario junto a
+    esa funcion mas arriba (INCIDENTE 2026-07-30) - un `state` sin normalizar (nombre
+    completo, o cualquier valor de mas de 3 caracteres) hacia que envia.com rechazara la
+    peticion con el MISMO error de validacion para todos los carriers por igual, lo que
+    `get_shipping_quote` interpretaba (antes de este fix) como "ningun carrier disponible"."""
     snapshot = order.delivery_address_snapshot or {}
     contact_info = (order.delivery_info or {}).get("contactInfo") or {}
     return {
@@ -100,7 +195,7 @@ def _destination_address(order: Order) -> dict:
         "number": snapshot.get("extNumber"),
         "district": snapshot.get("neighborhood"),
         "city": snapshot.get("city"),
-        "state": snapshot.get("state"),
+        "state": _normalize_mx_state(snapshot.get("state")),
         "country": settings.ENVIA_COUNTRY,
         "postalCode": snapshot.get("zipCode"),
         "reference": snapshot.get("references"),
@@ -171,10 +266,12 @@ async def _fetch_available_carriers() -> list[str]:
         return names
 
 
-async def get_shipping_quote(order: Order, weight: float, length: float, width: float, height: float) -> list[dict]:
+async def get_shipping_quote(order: Order, weight: float, length: float, width: float, height: float, origin_overrides: dict | None = None) -> list[dict]:
     """Cotiza opciones de envio con envia.com para `order` (DELIVERYMAN, dispatch_status
     COMPLETE - validado por el llamador, admin_service.quote_shipping). No persiste nada,
-    se puede llamar repetidamente mientras el admin ajusta peso/medidas.
+    se puede llamar repetidamente mientras el admin ajusta peso/medidas. `origin_overrides`
+    (opcional) se pasa tal cual a `_origin_address` - ver esa funcion para el merge
+    campo-por-campo contra `.env`.
 
     INCIDENTE (2026-07-30): confirmado en vivo contra el sandbox real que POST /ship/rate/
     exige un `carrier` especifico en el body - no existe un valor comodin ("all",
@@ -186,17 +283,30 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     de envia.com). Un carrier no habilitado para esta cuenta/ruta responde HTTP 200 con un
     sobre `{"meta": "error", ...}` (distinto de una falla real de transporte/autenticacion,
     que llega como status HTTP != 200/201) - se omite silenciosamente y se sigue con el
-    resto; solo se levanta 502 si NINGUN carrier produjo una opcion valida. Las llamadas se
-    disparan en paralelo (tope MAX_CONCURRENT_RATE_REQUESTS) porque el catalogo real tiene
-    ~24 carriers - secuencial habria sido demasiado lento para una llamada sincrona desde
-    el dashboard admin."""
-    origin = _origin_address()
+    resto. Las llamadas se disparan en paralelo (tope MAX_CONCURRENT_RATE_REQUESTS) porque
+    el catalogo real tiene ~24 carriers - secuencial habria sido demasiado lento para una
+    llamada sincrona desde el dashboard admin.
+
+    INCIDENTE (2026-07-30): un `meta:"error"` por carrier puede significar dos cosas muy
+    distintas - "este carrier en particular no cubre esta ruta/paquete" (disponibilidad
+    real, variable carrier a carrier) o "la peticion esta mal formada de una forma que
+    afecta a TODOS los carriers por igual" (p. ej. el bug de `state` resuelto en
+    _normalize_mx_state arriba - un `state` sin normalizar hacia que los ~15-20 carriers
+    reales de la cuenta respondieran, todos, el mismo error de validacion literal, y esta
+    funcion lo devolvia como `options: []` - indistinguible de "no hay cobertura real" para
+    quien llama). Para no repetir esa investigacion la proxima vez que algo similar pase:
+    si ningun carrier produjo una opcion Y los `meta:error` recolectados comparten
+    exactamente el mismo mensaje, se asume que es un problema estructural de la peticion (no
+    de cobertura) y se levanta un 502 con ese mensaje real de envia.com en vez de un
+    `200 {"options": []}` silencioso - ver el bloque despues del `gather` mas abajo."""
+    origin = _origin_address(origin_overrides)
     destination = _destination_address(order)
     packages = _build_packages(weight, length, width, height)
     carriers = await _fetch_available_carriers()
 
     options: list[dict] = []
     last_error_response = None
+    meta_error_messages: list[str] = []
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_RATE_REQUESTS)
 
     async def _quote_one(client: httpx.AsyncClient, carrier: str):
@@ -213,10 +323,12 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
 
         body = response.json()
         if isinstance(body, dict) and body.get("meta") == "error":
-            logger.info(
-                f"envia.com: carrier '{carrier}' no disponible para la orden {order.uuid}: "
-                f"{(body.get('error') or {}).get('message')}"
+            message = (body.get("error") or {}).get("message")
+            logger.warning(
+                f"envia.com: carrier '{carrier}' no disponible para la orden {order.uuid}: {message}"
             )
+            if isinstance(message, str) and message:
+                meta_error_messages.append(message)
             return []
 
         raw_options = body.get("data") if isinstance(body, dict) else body
@@ -244,20 +356,45 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     for parsed in results:
         options.extend(parsed)
 
+    logger.info(
+        f"envia.com: cotizacion para la orden {order.uuid} - {len(carriers)} carriers "
+        f"consultados, {len(options)} opciones obtenidas, {len(meta_error_messages)} "
+        f"rechazados por carrier (meta:error), {'1 falla de transporte/auth' if last_error_response is not None else '0 fallas de transporte/auth'}"
+    )
+
     if not options and last_error_response is not None:
         raise_upstream_error(
             last_error_response,
             f"envia.com rechazo la cotizacion de envio para la orden {order.uuid}",
             "No se pudo cotizar el envío con envia.com.",
         )
+
+    if not options and len(meta_error_messages) >= 2 and len(set(meta_error_messages)) == 1:
+        # Todos los carriers consultados fallaron con el MISMO mensaje - casi seguro un
+        # problema estructural de la peticion (direccion/paquete mal formado), no una
+        # falta de cobertura real. Ver el INCIDENTE (2026-07-30) en el docstring de esta
+        # funcion.
+        shared_message = meta_error_messages[0]
+        logger.error(
+            f"envia.com: TODOS los carriers ({len(meta_error_messages)}) rechazaron la "
+            f"cotizacion de la orden {order.uuid} con el mismo mensaje - probable problema "
+            f"estructural de la peticion, no de cobertura: {shared_message}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo cotizar el envío con envia.com (envia respondió: {shared_message[:300]}).",
+        )
+
+    options.sort(key=lambda opt: opt["totalPrice"])
     return options
 
 
-async def generate_shipping_label(order: Order, weight: float, length: float, width: float, height: float, carrier: str, service: str) -> dict:
+async def generate_shipping_label(order: Order, weight: float, length: float, width: float, height: float, carrier: str, service: str, origin_overrides: dict | None = None) -> dict:
     """Genera una guia real (con costo) para `order` via envia.com. Re-resuelve
-    origin/destination igual que get_shipping_quote. El llamador (admin_service) es
-    responsable de persistir el resultado y avanzar dispatch_status - esta funcion solo
-    habla con envia.com.
+    origin/destination igual que get_shipping_quote (incluyendo `origin_overrides` - ver
+    esa funcion y `_origin_address`). El llamador (admin_service) es responsable de
+    persistir el resultado y avanzar dispatch_status - esta funcion solo habla con
+    envia.com.
 
     Misma advertencia de shape-no-verificado que get_shipping_quote arriba, mas una
     especifica de confiabilidad: esta llamada tiene un efecto real con costo (genera y
@@ -266,7 +403,7 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
     que este backend se entere. Documentado como riesgo conocido en ADMIN_INTEGRATION.md,
     deliberadamente sin reintento automático sobre timeout."""
     payload = {
-        "origin": _origin_address(),
+        "origin": _origin_address(origin_overrides),
         "destination": _destination_address(order),
         "packages": _build_packages(weight, length, width, height),
         "carrier": carrier,

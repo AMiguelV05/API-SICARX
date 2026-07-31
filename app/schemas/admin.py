@@ -132,6 +132,25 @@ class DeliveryAssignResponse(CamelModel):
 
 # POST /admin/orders/{uuid}/shipping/quote
 
+class ShippingOriginOverride(CamelModel):
+    """Override opcional, campo por campo, del origen que envia.com usa para cotizar/generar
+    una guia - normalmente la direccion fija de la tienda (`ENVIA_ORIGIN_*`, ver
+    CLAUDE.md/Configuration). Cualquier campo omitido (o mandado vacio) cae de vuelta al
+    valor de `.env` correspondiente - ver `shipping_service._origin_address`. `country`/
+    `phone_code` deliberadamente no son parte de esto: el negocio solo envia dentro de
+    Mexico, no hay motivo para que el admin los cambie por pedido."""
+    name: Optional[str] = None
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    street: Optional[str] = None
+    number: Optional[str] = None
+    district: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    zip_code: Optional[str] = None
+    reference: Optional[str] = None
+
 class ShippingDimensionsRequest(CamelModel):
     """Dimensiones/peso del paquete - compartido por /shipping/quote y /shipping/generate.
     Todos > 0 via Field(gt=0): un valor faltante o <= 0 responde 422 (Pydantic), no el
@@ -140,6 +159,7 @@ class ShippingDimensionsRequest(CamelModel):
     length: float = Field(gt=0, description="Centimetros")
     width: float = Field(gt=0, description="Centimetros")
     height: float = Field(gt=0, description="Centimetros")
+    origin: Optional[ShippingOriginOverride] = Field(default=None, description="Override opcional del origen - ver ShippingOriginOverride")
 
 class ShippingQuoteRequest(ShippingDimensionsRequest):
     pass

@@ -278,8 +278,33 @@ Every route in `app/api/routes/admin.py` depends on `validate_admin_key` (`app/c
 | `GET /admin/orders/{order_uuid}` | Admin detail view of any order (optionally including soft-deleted via a query flag), returned as `AdminOrderPublic` with `clientEmail`/`clientName` inlined directly (same resolution `order_notification_service.py` already does). |
 | `POST /admin/orders/{order_uuid}/accept` | Sets `Order.accepted_at`/`accepted_by` locally and enqueues a `SicarSyncOutbox` row with `action="ACCEPT"`, processed asynchronously by the worker via `cancel_service.advance_dispatch_status` (see below) — same local-first/async-sync pattern as cancellation. |
 | `POST /admin/orders/{order_uuid}/assign-delivery` | Sets `Order.delivery_company` (free text) + `delivery_assigned_at`. Local metadata only, deliberately — no external courier API call, unrelated to the real envia.com integration below. |
-| `POST /admin/orders/{order_uuid}/shipping/quote` | Cotiza opciones de envío con envia.com (`POST /ship/rate/`, `app/services/shipping_service.py`) para un pedido `DELIVERYMAN` con `dispatchStatus: COMPLETE` — `409` si no lo es. Origin es una constante propia (`ENVIA_ORIGIN_*`, ver "Configuration" above), destination viene de `Order.delivery_address_snapshot`. No persiste nada. |
-| `POST /admin/orders/{order_uuid}/shipping/generate` | Genera una guía real (con costo) vía envia.com (`POST /ship/generate/`), persiste `Order.shipping_label` y avanza `Order.dispatch_status` a `"DISPATCHED"` **de inmediato** (a diferencia de `ACCEPT`, este campo no es un simple espejo de Sicar X aquí — el hecho real ya ocurrió cuando envia.com respondió 200, mismo principio que la cancelación local-first y `finalize_order_payment`), y encola un `SicarSyncOutbox` con `action="DISPATCH"` para avisarle a Sicar X de forma asíncrona. `409` si ya tiene una guía (sin regeneración) o si el pedido no está listo para envío. Ver ADMIN_INTEGRATION.md para el shape completo y la advertencia de confiabilidad (efecto real con costo, sin reintento automático sobre timeout). |
+| `POST /admin/orders/{order_uuid}/shipping/quote` | Cotiza opciones de envío con envia.com (`POST /ship/rate/`, `app/services/shipping_service.py`) para un pedido `DELIVERYMAN` con `dispatchStatus: COMPLETE` — `409` si no lo es. Origin por defecto es una constante propia (`ENVIA_ORIGIN_*`, ver "Configuration" above), overrideable campo por campo vía un `origin` opcional en el body (`ShippingOriginOverride`, `app/schemas/admin.py`) — cualquier campo omitido/vacío cae de vuelta a `.env`, ver ADMIN_INTEGRATION.md. Destination viene de `Order.delivery_address_snapshot`. No persiste nada. |
+| `POST /admin/orders/{order_uuid}/shipping/generate` | Genera una guía real (con costo) vía envia.com (`POST /ship/generate/`), acepta el mismo `origin` opcional que `/shipping/quote` (independiente entre llamadas — no reusa el de una cotización previa), persiste `Order.shipping_label` y avanza `Order.dispatch_status` a `"DISPATCHED"` **de inmediato** (a diferencia de `ACCEPT`, este campo no es un simple espejo de Sicar X aquí — el hecho real ya ocurrió cuando envia.com respondió 200, mismo principio que la cancelación local-first y `finalize_order_payment`), y encola un `SicarSyncOutbox` con `action="DISPATCH"` para avisarle a Sicar X de forma asíncrona. `409` si ya tiene una guía (sin regeneración) o si el pedido no está listo para envío. Ver ADMIN_INTEGRATION.md para el shape completo y la advertencia de confiabilidad (efecto real con costo, sin reintento automático sobre timeout). |
+
+**INCIDENTE (2026-07-30): `/shipping/quote` devolvía `options: []` para pedidos con
+carriers realmente disponibles.** Investigado en vivo contra el sandbox real de envia.com
+(no solo su documentación, que resultó ambigua/inconsistente entre endpoints sobre qué
+campo usar como identificador de carrier). El catálogo de carriers y el identificador que
+`_fetch_available_carriers` ya usaba (`name`, p. ej. `"fedex"`, `"dhl"`) resultaron
+correctos — **no** era un problema de formato de carrier. La causa real: `state` en el
+objeto `destination`/`origin` que envia.com espera tiene `minLength: 2, maxLength: 3`
+(confirmado tanto contra `docs.envia.com/reference/shipping-rates` como en vivo), y
+`_destination_address` mandaba `ClientAddress.state` tal cual (p. ej. `"Ciudad de México"`,
+14 caracteres) — envia.com rechazaba la petición con
+`meta:"error"`/`"String is too long ...properties:state"` para **todos** los carriers por
+igual (es una validación de esquema anterior a evaluar cobertura por carrier), y
+`get_shipping_quote` lo interpretaba como "cada carrier individualmente no disponible",
+produciendo el `200 {"options": []}` reportado. Arreglado con
+`shipping_service._normalize_mx_state` — convierte nombres completos (y variantes/alias
+comunes, con o sin acentos) de los 32 estados a su código ISO 3166-2:MX de 3 letras antes
+de mandarlos a envia.com; un valor que ya mide ≤3 caracteres se deja intacto (confirmado en
+vivo que envia.com no valida que sea un código "real", solo la longitud). Además,
+`get_shipping_quote` ahora detecta el patrón general de este incidente (no solo el caso de
+`state`): si **todos** los carriers consultados fallan con el mismo mensaje literal de
+`meta:error`, se asume un problema estructural de la petición (no de cobertura) y se
+levanta un `502` con ese mensaje real de envia.com, en vez de un `200 {"options": []}`
+silencioso — así una regresión similar en el futuro es diagnosticable sin repetir esta
+misma investigación en vivo.
 
 ### Auth on this API's own endpoints
 

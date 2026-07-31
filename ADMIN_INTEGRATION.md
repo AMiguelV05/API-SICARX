@@ -375,6 +375,28 @@ frontend), arma `packages[]` (`weightUnit: "KG"`, `lengthUnit: "CM"`) y llama a
 `POST /ship/rate/` de envia.com (`Authorization: Bearer <token de envia, en el env de este
 servicio>`). No persiste nada — se puede llamar repetidamente mientras el admin ajusta peso/medidas.
 
+**Override opcional del origen** — el dashboard puede mandar un objeto `origin` con
+cualquier subconjunto de sus campos; cualquier campo omitido (o mandado vacío/`null`) cae
+de vuelta al valor fijo configurado en este servicio, campo por campo — no es "todo o
+nada". Útil para cotizar/enviar desde una sucursal o dirección distinta a la configurada
+por defecto, sin tocar las variables de entorno:
+
+```json
+{
+  "weight": 2.5, "length": 30, "width": 20, "height": 15,
+  "origin": { "city": "Guadalajara", "state": "Jalisco" }
+}
+```
+
+Campos disponibles en `origin` (todos opcionales): `name, company, phone, email, street,
+number, district, city, state, zipCode, reference` — mismos nombres que
+`deliveryAddress`/`ClientAddressPublic` donde aplica. `state` pasa por la misma
+normalización que ya se le aplica al valor de `.env` (nombre completo → código corto de 3
+letras que envia.com exige) — no hace falta que el admin sepa el código, un nombre como
+`"Jalisco"` o `"Ciudad de México"` funciona igual. `country`/`phone_code` no son
+overrideables (el negocio solo envía dentro de México). El mismo objeto `origin` es
+aceptado por `/shipping/generate` más abajo, con el mismo comportamiento.
+
 Respuesta `200`:
 ```json
 {
@@ -412,8 +434,11 @@ Content-Type: application/json
 { "weight": 2.5, "length": 30, "width": 20, "height": 15, "carrier": "dhl", "service": "1" }
 ```
 
-Re-resuelve origin/destination igual que `/quote`, llama a `POST /ship/generate/` de envia.com
-con el `service` elegido. Si tiene éxito, en una sola transacción: persiste
+Re-resuelve origin/destination igual que `/quote` — incluyendo el mismo `origin` opcional
+descrito arriba, si se manda aquí (usa el que se haya usado para la cotización elegida, no
+necesariamente el mismo — este endpoint no recuerda nada de una llamada previa a `/quote`).
+Llama a `POST /ship/generate/` de envia.com con el `service` elegido. Si tiene éxito, en una
+sola transacción: persiste
 `carrier, service, serviceDescription, trackingNumber, trackUrl, labelUrl (el campo `label` de
 envia), totalPrice, currency, weight, length, width, height, generatedAt` en el pedido, y avanza
 `dispatchStatus` de `COMPLETE` a `DISPATCHED`.
