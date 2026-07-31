@@ -9,7 +9,8 @@ from app.core.security import validate_api_key, CurrentClientHeaderDep
 from app.core.rate_limit import limiter
 from app.models.product import Product
 from app.models.order import Order
-from app.services.order_service import validate_cart_items, build_order_payload, create_order_in_sicar
+from app.services.order_service import validate_cart_items, build_order_payload, _to_decimal
+from app.services.product_stock_service import apply_stock_deltas
 from app.services.session_service import get_or_refresh_customer_session
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment, prepare_local_cancellation
 from app.services.order_cancellation_notification_service import notify_order_cancelled
@@ -119,7 +120,7 @@ async def create_order(
                     return OrderResponse(
                         id=cached_order.sicar_order_id,
                         serieFolio=cached_order.serie_folio,
-                        date=cached_order.sicar_date.timestamp() if cached_order.sicar_date else 0,
+                        date=None,
                         status=cached_order.status,
                         orderUuid=cached_order.uuid,
                         preferenceId=cached_order.mp_preference_id,
@@ -136,7 +137,6 @@ async def create_order(
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya hay una solicitud en proceso con esta clave de idempotencia. Espera unos segundos e intenta de nuevo.")
         claim_pending = True
 
-    sicar_response = None
     try:
         # Pre-validación de stock/disponibilidad y datos de precio/impuestos usando el token fresco
         cart_data = await validate_cart_items(uuids, requested_quantities, valid_client_token, branch_id, price_list_uuid)
@@ -194,23 +194,19 @@ async def create_order(
             content_id=content_id,
             wholesale_prices=order_payload.wholesalePrices,
         )
-        order_payload_dict["payload"] = valid_client_token
-
-        # Creación delegada al servicio
-        sicar_response = await create_order_in_sicar(
-            db=db,
-            order_payload=order_payload_dict,
-            client_token=valid_client_token,
-            branch_id=branch_id,
-            products_data=order_payload_dict["ecOrderDto"]["products"]
-        )
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
+
+        # Descuento local de inventario (protege al catalogo/carrito en linea de vender
+        # de mas) - en un solo lote, no un UPDATE por linea. Sicar X NO se entera de esta
+        # orden todavia: eso solo pasa si un admin la acepta (admin_service.accept_order),
+        # ver CLAUDE.md, "SICAR es solo ERP de inventario".
+        deltas = [(item.get("uuid"), -_to_decimal(item.get("quantity", 0))) for item in order_payload_dict["ecOrderDto"]["products"]]
+        await apply_stock_deltas(db, deltas)
 
         local_order = await create_local_order(
             db=db,
             client_account_id=client.id,
             order_payload_dict=order_payload_dict,
-            sicar_response=sicar_response,
             local_products=local_products,
             delivery_address_snapshot=delivery_address_snapshot,
         )
@@ -225,19 +221,19 @@ async def create_order(
             claim.order_uuid = local_order.uuid
             claim_pending = False
 
-        # Único commit: el descuento de stock (create_order_in_sicar), la fila local
-        # Order (create_local_order) y el reclamo de idempotencia (si aplica) se
-        # persisten juntos o se revierten juntos.
+        # Único commit: el descuento de stock local, la fila local Order
+        # (create_local_order) y el reclamo de idempotencia (si aplica) se persisten
+        # juntos o se revierten juntos.
         await db.commit()
         await db.refresh(local_order)
 
         logger.info(f"Orden {local_order.uuid} reservada (TO_PAY) en la sucursal {branch_id} para cliente {client.email}.")
 
         return OrderResponse(
-            id=sicar_response.get("id"),
-            serieFolio=sicar_response.get("serieFolio"),
-            date=sicar_response.get("date"),
-            status=sicar_response.get("status") or "TO_PAY",
+            id=local_order.sicar_order_id,
+            serieFolio=None,
+            date=None,
+            status="TO_PAY",
             orderUuid=local_order.uuid,
             preferenceId=local_order.mp_preference_id,
             amount=total_amount,
@@ -252,18 +248,7 @@ async def create_order(
         await db.rollback()
         if claim_pending:
             await discard_claim(db, claim)
-        if sicar_response is not None:
-            # La orden ya existe en Sicar X (reservo stock ahi) pero el guardado local
-            # fallo despues - no hay forma de reconciliar automaticamente (Sicar X no
-            # expone un endpoint para listar ordenes por cliente), asi que se deja este
-            # log para que soporte pueda actuar manualmente con el folio.
-            logger.critical(
-                f"Orden ya creada en Sicar X (id={sicar_response.get('id')}, "
-                f"folio={sicar_response.get('serieFolio')}) pero fallo el guardado local "
-                f"para cliente {client.id}: {e}"
-            )
-        else:
-            logger.error(f"Error inesperado al crear la orden: {e}")
+        logger.error(f"Error inesperado al crear la orden: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al procesar la orden. Intenta más tarde.")
 
 

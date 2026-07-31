@@ -32,8 +32,7 @@ async def create_preference(order: Order) -> dict | None:
     soporta bien, y el desglose por producto es puramente cosmetico en la pagina de MP.
 
     No fatal: si falla, la orden sigue soportando tarjeta/OXXO sin la opcion de wallet -
-    mismo patron que otros pasos de enriquecimiento no criticos en este codebase (p. ej.
-    _parse_sicar_date en order_history_service.py)."""
+    mismo patron que otros pasos de enriquecimiento no criticos en este codebase."""
     payload = {
         "items": [
             {

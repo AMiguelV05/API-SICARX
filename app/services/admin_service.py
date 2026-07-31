@@ -172,20 +172,22 @@ async def get_order_admin(db: AsyncSession, order_uuid: str, *, include_deleted:
 async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | None) -> Order:
     """Marca la orden como aceptada y avanza dispatch_status a PENDING localmente de
     inmediato, y encola una fila de sicar_sync_outbox con action="ACCEPT" para que el
-    worker le avise a Sicar X de forma asincrona - mismo principio "Postgres local
-    autoritativo de inmediato" que ya usa generate_shipping_label para DISPATCHED (ver
-    CLAUDE.md, "Local-first order cancellation" / admin_service.generate_shipping_label):
+    worker aplique el UNICO aviso que este backend le hace a Sicar X en todo el ciclo de
+    vida de una orden: el descuento de inventario (ver CLAUDE.md, "SICAR es solo ERP de
+    inventario"; sicar_stock_service.apply_order_stock_delta). Mismo principio "Postgres
+    local autoritativo de inmediato" que ya usa generate_shipping_label para DISPATCHED:
     el dashboard admin es quien decide el estado, Sicar X solo se entera despues.
 
-    El branch "ACCEPT" en sicar_sync_worker.py llama a cancel_service.advance_dispatch_status
-    (mutacion real capturada en vivo contra app.sicarx.com, ver su docstring) para avanzar
-    dispatchStatus a PENDING en Sicar X, pero ya no vuelve a tocar order.dispatch_status -
-    esta funcion ya lo dejo en el valor correcto antes de encolar."""
+    Requiere `order.status == "PAID"` - aceptar (y por lo tanto descontar inventario real
+    en Sicar X) una orden que todavia no se ha cobrado de verdad no tiene sentido, y antes
+    no habia ningun chequeo de status aqui."""
     order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
     if order.accepted_at is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue aceptada.")
+    if order.status != "PAID":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Solo se pueden aceptar ordenes ya pagadas.")
 
     order.accepted_at = datetime.now(timezone.utc)
     order.accepted_by = accepted_by
@@ -201,7 +203,7 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
 
     await db.commit()
     await db.refresh(order)
-    logger.info(f"Orden {order.uuid} aceptada por '{accepted_by}' via /admin (dispatchStatus=PENDING de inmediato); encolada sincronizacion ACCEPT hacia Sicar X.")
+    logger.info(f"Orden {order.uuid} aceptada por '{accepted_by}' via /admin (dispatchStatus=PENDING de inmediato); encolado el descuento de inventario en Sicar X.")
 
     try:
         await order_status_notification_service.notify_order_accepted(order)
@@ -212,9 +214,11 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
 
 
 async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, target_status: str) -> Order:
-    """Avanza (o revierte un paso) dispatch_status localmente de inmediato y encola el
-    aviso asincrono a Sicar X - misma logica local-first que accept_order/
-    generate_shipping_label. Cubre PENDING<->PREPARING<->COMPLETE<->DISPATCHED (ver
+    """Avanza (o revierte un paso) dispatch_status localmente de inmediato - puramente
+    local, ya no le avisa nada a Sicar X (ver CLAUDE.md, "SICAR es solo ERP de
+    inventario": el unico aviso a Sicar X en todo el ciclo de vida de una orden es el
+    descuento/reversión de inventario en accept_order/prepare_local_cancellation, nunca
+    el dispatch_status en si). Cubre PENDING<->PREPARING<->COMPLETE<->DISPATCHED (ver
     _LEGAL_DISPATCH_TRANSITIONS); PENDING_ACCEPTANCE->PENDING sigue siendo trabajo
     exclusivo de accept_order.
 
@@ -247,34 +251,9 @@ async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, targe
 
     order.dispatch_status = target_status
 
-    existing_row = await db.scalar(
-        select(SicarSyncOutbox).where(
-            SicarSyncOutbox.order_id == order.id,
-            SicarSyncOutbox.action == "SYNC_DISPATCH_STATUS",
-            SicarSyncOutbox.status.in_(["PENDING", "IN_PROGRESS"]),
-        )
-    )
-    if existing_row:
-        # Un avance mas reciente reemplaza al pendiente - a Sicar X solo le importa el
-        # target final, no cada estado intermedio por el que paso el dashboard.
-        existing_row.target_dispatch_status = target_status
-        existing_row.status = "PENDING"
-        existing_row.attempts = 0
-        existing_row.last_error = None
-        existing_row.next_attempt_at = datetime.now(timezone.utc)
-    else:
-        db.add(SicarSyncOutbox(
-            order_id=order.id,
-            action="SYNC_DISPATCH_STATUS",
-            target_dispatch_status=target_status,
-            cash_register_uuid="",  # no aplica a esta accion, pero la columna es NOT NULL
-            status="PENDING",
-            next_attempt_at=datetime.now(timezone.utc),
-        ))
-
     await db.commit()
     await db.refresh(order)
-    logger.info(f"Orden {order.uuid}: dispatchStatus '{current}' -> '{target_status}' via /admin; encolada sincronizacion SYNC_DISPATCH_STATUS hacia Sicar X.")
+    logger.info(f"Orden {order.uuid}: dispatchStatus '{current}' -> '{target_status}' via /admin.")
 
     delivery_type = (order.delivery_info or {}).get("deliveryType")
     try:
@@ -337,14 +316,10 @@ async def quote_shipping(db: AsyncSession, order_uuid: str, data: ShippingQuoteR
 
 async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: ShippingGenerateRequest) -> Order:
     """Genera una guia real (con costo) via envia.com y, si tiene exito, persiste el
-    resultado y avanza dispatch_status a DISPATCHED de inmediato - a diferencia de ACCEPT,
-    dispatch_status aqui no es un simple espejo del lado de Sicar X: el hecho real (guia
-    generada, envia.com ya cobro) ya ocurrio en el momento en que esta funcion recibe una
-    respuesta 200, mismo principio "Postgres local autoritativo de inmediato" que ya usa
-    la cancelacion de ordenes (order_history_service.prepare_local_cancellation) y el pago
-    con Mercado Pago (finalize_order_payment) - ver CLAUDE.md. Encola ademas una fila de
-    sicar_sync_outbox (action="DISPATCH") para que el worker le avise a Sicar X de forma
-    asincrona, con reintentos, igual que CANCEL/ACCEPT."""
+    resultado y avanza dispatch_status a DISPATCHED de inmediato - puramente local,
+    Sicar X no se entera de esto (ver CLAUDE.md, "SICAR es solo ERP de inventario": el
+    unico aviso a Sicar X en todo el ciclo de vida de una orden es el descuento/reversión
+    de inventario en accept_order/prepare_local_cancellation, nunca el dispatch_status)."""
     order = await _get_order_ready_for_shipping(db, order_uuid)
     if order.shipping_label:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya tiene una guía de envío generada.")
@@ -356,17 +331,10 @@ async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: Shipp
 
     order.shipping_label = label
     order.dispatch_status = "DISPATCHED"
-    db.add(SicarSyncOutbox(
-        order_id=order.id,
-        action="DISPATCH",
-        cash_register_uuid="",  # no aplica a esta accion, pero la columna es NOT NULL (mismo patron que ACCEPT)
-        status="PENDING",
-        next_attempt_at=datetime.now(timezone.utc),
-    ))
 
     await db.commit()
     await db.refresh(order)
-    logger.info(f"Guía de envío generada para la orden {order.uuid} (carrier={data.carrier}, service={data.service}) via /admin; encolada sincronización DISPATCH hacia Sicar X.")
+    logger.info(f"Guía de envío generada para la orden {order.uuid} (carrier={data.carrier}, service={data.service}) via /admin.")
 
     try:
         await order_status_notification_service.notify_order_dispatched(order)

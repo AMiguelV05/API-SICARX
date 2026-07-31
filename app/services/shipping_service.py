@@ -173,8 +173,7 @@ def _destination_address(order: Order) -> dict:
     tomada al crear la orden (ver routes/orders.py, ADMIN_INTEGRATION.md) - de ahi salen
     los campos de direccion. `name`/`phone`/`email` en cambio vienen de
     `order.delivery_info["contactInfo"]` (los datos de contacto reales capturados en el
-    checkout), no del address book - mismo campo que ya usa
-    cancel_service.advance_dispatch_status para lo mismo. `company` va siempre None: es un
+    checkout), no del address book. `company` va siempre None: es un
     envio a un cliente final (ClientAddressPublic no tiene razon social), a diferencia de
     _origin_address, donde si aplica (la tienda). `state` viene de `ClientAddress.state`,
     que se guarda tal cual lo resuelve el frontend (no necesariamente un codigo corto) -

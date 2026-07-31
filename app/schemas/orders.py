@@ -71,10 +71,10 @@ class OrderCancel(CamelModel):
     products: List[ProductItem] = Field(default_factory=list, description="Aceptado por compatibilidad, pero ignorado - el stock se restaura desde la orden guardada localmente, no desde este campo.")
 
 class OrderResponse(CamelModel):
-    id: str = Field(description="ID de la orden en Sicar")
-    serieFolio: str = Field(description="Folio del documento creado en Sicar")
-    date: float = Field(description="Fecha y hora de la orden en Sicar")
-    status: str = Field(description="Estado de la orden en Sicar justo despues de crearla (antes de cobrar, tipicamente TO_PAY)")
+    id: str = Field(description="ID publico de la orden - generado localmente, ya no proviene de Sicar X (ver CLAUDE.md, \"SICAR es solo ERP de inventario\"). Usar con POST /orders/{id}/pay y /cancel.")
+    serieFolio: Optional[str] = Field(default=None, description="Ya no aplica - Sicar X no crea ningun documento al hacer checkout. Siempre null.")
+    date: Optional[float] = Field(default=None, description="Ya no aplica - Sicar X no crea ningun documento al hacer checkout. Siempre null.")
+    status: str = Field(description="Estado local de la orden justo despues de crearla (siempre TO_PAY)")
     orderUuid: str = Field(description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid} y con POST /orders/{id}/pay")
     preferenceId: Optional[str] = Field(default=None, description="ID de preferencia de Mercado Pago para initialization.preferenceId del Payment Brick (null si Mercado Pago no respondio)")
     amount: float = Field(description="Total autoritativo de la orden - usar en initialization.amount del Payment Brick")

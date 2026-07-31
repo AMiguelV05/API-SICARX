@@ -4,17 +4,11 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.services.sicar_auth import sicar_auth
-from app.services.product_stock_service import apply_stock_deltas
-from app.core.sicar_headers import storefront_headers, admin_app_headers
+from app.core.sicar_headers import storefront_headers
 from app.core.sicar_validation import is_safe_sicar_id
 from app.core.upstream_errors import raise_upstream_error
 
 STORE_URL = "https://api.sicarx.com/store/"
-ORDER_URL = "https://ferreteriacharly.sicarx.shop/api/cart/order"
-DISPATCH_PAY_URL = "https://api.sicarx.com/external/v1/dispatch/pay"
-GRAPH_URL = "https://api.sicarx.com/document-graph/v1/graph-v2"
 SICAR_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 
 logger = logging.getLogger(__name__)
@@ -122,17 +116,14 @@ def build_order_payload(
     wholesale_prices: bool = False,
 ) -> dict:
     """
-    Construye el documento de orden que espera Sicar X a partir de datos ya obtenidos
-    (no hace llamadas de red). Replica el formato observado en un pedido real aceptado
-    por Sicar X: `priceBaseTax` y `priceTax` usan el mismo valor (`netPrice1`, precio
-    final con impuesto incluido) — Sicar X no espera aquí el desglose de impuesto pese
-    al nombre de los campos. `amountTax`, en cambio, es el TOTAL de la línea
-    (`netPrice1 * quantity`), no el precio unitario — confirmado comparando el payload
-    real del storefront (`agent-browser` contra ferreteriacharly.sicarx.shop) para un
-    producto con `quantity > 1`; con `quantity == 1` los tres valores coinciden por
-    casualidad, lo que originalmente ocultó el bug (Sicar rechazaba con
-    `"precio alterado|<uuid>"` en `POST /api/cart/order` para cualquier línea con
-    cantidad > 1).
+    Construye la estructura de la orden a partir de datos ya obtenidos (no hace llamadas
+    de red). Ya NO se envia a Sicar X — desde que SICAR pasó a ser solo ERP de inventario
+    (ver CLAUDE.md, "Request flow: placing an order"), esto sirve unicamente para calcular
+    precios/totales/lineas y darle forma al snapshot local (`order_history_service.create_local_order`).
+    Conserva el formato del documento que Sicar X SÍ esperaba cuando esto se le enviaba
+    directamente, ya que replicar ese cálculo (impuestos, `amountTax` como total de línea
+    y no precio unitario, etc.) sigue siendo la fuente de verdad de cómo se cobra
+    correctamente — ver la nota histórica sobre el bug de "precio alterado" en CLAUDE.md.
     """
     products_by_uuid = {p.get("uuid"): p for p in (cart_data.get("products") or []) if isinstance(p, dict)}
     units_by_uuid = {
@@ -198,69 +189,3 @@ def build_order_payload(
         },
     }
 
-async def create_order_in_sicar(db: AsyncSession, order_payload: dict, client_token: str, branch_id: str, products_data: list):
-    """Confirma la orden en Sicar y deja el descuento de stock local preparado.
-
-    NO hace commit — el llamador (routes/orders.py::create_order) es responsable de un
-    único commit que incluya este descuento junto con la creación de la fila local
-    `Order` (order_history_service.create_local_order), para que ambas cosas se
-    persistan o se reviertan juntas."""
-    order_headers = storefront_headers(client_token, content_type="application/json", branch_id=branch_id)
-
-    async with httpx.AsyncClient(timeout=SICAR_TIMEOUT) as client:
-        response = await client.post(ORDER_URL, json=order_payload, headers=order_headers)
-        logger.info(f"Respuesta de Sicar al crear orden: {response.status_code}")
-        if response.status_code not in (200, 201):
-            raise_upstream_error(response, "Error confirmando la orden en Sicar", "No se pudo confirmar la orden en Sicar X. Intenta nuevamente más tarde.")
-
-        sicar_response = response.json()
-
-    # Descuento local de inventario, en una sola sentencia por lote en vez de un UPDATE
-    # awaited por linea.
-    deltas = [(item.get("uuid"), -_to_decimal(item.get("quantity", 0))) for item in products_data]
-    try:
-        await apply_stock_deltas(db, deltas)
-    except Exception:
-        # La orden ya existe en Sicar X (reservo stock ahi) pero el descuento local fallo -
-        # se registra aqui, con el id/folio de Sicar todavia disponibles, porque una falla
-        # en este punto nunca completa la asignacion `sicar_response = await
-        # create_order_in_sicar(...)` en el llamador, así que su propio log de "orden
-        # huerfana" (routes/orders.py) nunca se dispara para este caso.
-        logger.critical(
-            f"Orden ya creada en Sicar X (id={sicar_response.get('id')}, "
-            f"folio={sicar_response.get('serieFolio')}) pero fallo el descuento de stock local: "
-            "requiere reconciliacion manual."
-        )
-        raise
-
-    return sicar_response
-
-async def pay_order_in_sicar(order_id: str, total_amount: float, cash_register_uuid: str, branch_id: str):
-    """Aplica el pago a una orden existente desde sicarX directamente mediante la API REST."""
-
-    async def attempt_payment(admin_token: str):
-        headers = admin_app_headers(admin_token)
-
-        payload = {
-            "cashRegisterUuid": cash_register_uuid,
-            "id": order_id,
-            "payments": [
-                {
-                    "paymentId": "CASH",
-                    "amount": total_amount
-                }
-            ],
-            "total": total_amount
-        }
-
-        async with httpx.AsyncClient(timeout=SICAR_TIMEOUT) as client:
-            return await client.post(DISPATCH_PAY_URL, json=payload, headers=headers)
-
-    response = await sicar_auth.request_with_retry(attempt_payment)
-
-    if response.status_code != 200:
-        raise_upstream_error(response, f"Error al aplicar el pago a la orden {order_id}", "La orden se creó, pero falló el pago. Contacta a soporte.")
-
-    logger.debug(f"Respuesta de pago en Sicar: {response.status_code}")
-
-    return response.json()

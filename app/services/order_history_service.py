@@ -1,4 +1,5 @@
 import logging
+import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
@@ -8,7 +9,7 @@ from app.core.config import settings
 from app.models.order import Order, SicarSyncOutbox
 from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_cancellation_notification_service import notify_order_cancelled
-from app.services.order_service import pay_order_in_sicar, _to_decimal
+from app.services.order_service import _to_decimal
 from app.services.product_stock_service import apply_stock_deltas
 
 logger = logging.getLogger(__name__)
@@ -18,37 +19,24 @@ MP_APPROVED_STATUSES = {"approved"}
 MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
 
-def _parse_sicar_date(value) -> datetime | None:
-    """`date`/`sicarTimestamp` de Sicar X llegan como epoch numerico; el formato
-    (segundos vs milisegundos) no esta confirmado, asi que se infiere por magnitud.
-    No es un campo critico - si falla el parseo, se guarda como None en vez de
-    bloquear la creacion de la orden."""
-    if value is None:
-        return None
-    try:
-        numeric = float(value)
-        seconds = numeric / 1000 if numeric > 1e12 else numeric
-        return datetime.fromtimestamp(seconds, tz=timezone.utc)
-    except (TypeError, ValueError, OSError):
-        logger.warning(f"No se pudo interpretar la fecha de Sicar X: {value!r}")
-        return None
+async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, local_products: dict | None = None, delivery_address_snapshot: dict | None = None) -> Order:
+    """Persiste localmente la orden recien creada - status siempre "TO_PAY" en este punto
+    (ver order_history_service.finalize_order_payment, que es quien la transiciona a
+    PAID/CANCELLED segun el resultado del pago). Es la unica fuente de historial de
+    ordenes - Sicar X no expone un endpoint para listar ordenes por cliente, y ademas ya
+    no llega a saber de esta orden en absoluto hasta que sea aceptada (ver CLAUDE.md,
+    "SICAR es solo ERP de inventario").
 
-async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, sicar_response: dict, local_products: dict | None = None, delivery_address_snapshot: dict | None = None) -> Order:
-    """Persiste localmente la orden recien creada (y reservada) en Sicar X, ANTES de
-    intentar cualquier cobro con Mercado Pago - status siempre "TO_PAY" en este punto
-    (pay_order_in_sicar todavia no corre; ver order_history_service.finalize_order_payment,
-    que es quien la transiciona a PAID/CANCELLED segun el resultado del pago). Es la
-    unica fuente de historial de ordenes - Sicar X no expone un endpoint para listar
-    ordenes por cliente (ver CLAUDE.md).
-
-    `sicar_response` es la respuesta de `create_order_in_sicar` (creacion del documento),
-    no la de `pay_order_in_sicar` (que ya no corre en este punto del flujo).
+    `sicar_order_id` (columna NOT NULL/unica, tambien el identificador publico que el
+    frontend usa en las URLs de /pay y /cancel) ya NO viene de una respuesta real de
+    Sicar X - checkout no le avisa nada a Sicar X todavia - asi que se genera aqui mismo
+    con `uuid.uuid4()`. `serie_folio`/`sicar_date` se quedan en None para siempre: no hay
+    ningun documento de Sicar X del que puedan salir.
 
     `local_products` (sicar_uuid -> Product, el mismo dict ya cargado en routes/orders.py
     para build_order_payload) se usa solo para agregar `imageUrl` a cada item guardado
-    aqui - una copia de `eco_order["products"]`, NUNCA el mismo objeto que ya se envio a
-    Sicar X en create_order_in_sicar (ese ya salio por la red antes de llegar aqui, asi
-    que agregarle un campo extra en este punto no afecta lo que Sicar X recibio).
+    aqui - una copia de `eco_order["products"]`, no el mismo objeto que devuelve
+    build_order_payload.
 
     `delivery_address_snapshot` (None para PICKUP) es la foto fija ClientAddressPublic
     tomada en routes/orders.py justo despues de resolver la direccion via
@@ -57,8 +45,7 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
     NO hace commit — solo `flush()` (para que `order.id`/`order.uuid` queden disponibles
     para el llamador, p.ej. payment_service.create_preference). El llamador
     (routes/orders.py::create_order) hace el único commit, junto con el descuento de
-    stock ya preparado por create_order_in_sicar, para que ambos se persistan o se
-    reviertan juntos."""
+    stock local ya preparado, para que ambos se persistan o se reviertan juntos."""
     eco_order = order_payload_dict["ecOrderDto"]
     local_products = local_products or {}
 
@@ -71,13 +58,10 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
 
     order = Order(
         client_account_id=client_account_id,
-        sicar_order_id=str(sicar_response.get("id")),
-        serie_folio=sicar_response.get("serieFolio"),
-        sicar_date=_parse_sicar_date(sicar_response.get("date")),
+        sicar_order_id=str(uuid.uuid4()),
         status="TO_PAY",
-        # Toda orden REMOTE/PICKUP nueva entra al tablero de despacho de Sicar X en este
-        # estado (confirmado en vivo) - se evita una llamada extra a Sicar en el camino
-        # caliente de checkout solo para confirmar lo que ya sabemos.
+        # Toda orden REMOTE/PICKUP nueva entra al tablero de despacho en este estado -
+        # el equivalente local, ya que Sicar X no llega a saber de la orden todavia.
         dispatch_status="PENDING_ACCEPTANCE",
         branch_id=order_payload_dict.get("branchId"),
         total=Decimal(str(eco_order.get("total"))),
@@ -152,11 +136,14 @@ async def prepare_local_cancellation(
     db: AsyncSession, order: Order, *, cash_register_uuid: str | None = None, require_status: str | None = None,
 ) -> Order:
     """Deja una orden lista para cancelarse LOCALMENTE, sin tocar Sicar X todavia:
-    relockea la fila, restaura stock, marca CANCELLED y encola una fila en
-    sicar_sync_outbox para que app/worker/sicar_sync_worker.py le avise a Sicar X de
-    forma asincrona, con reintentos. Es el unico punto que llaman las 3 rutas de
-    cancelacion (POST /cancel, DELETE, y la rama rejected/cancelled de
-    finalize_order_payment mas abajo) - no duplicar esta logica en ninguna de ellas.
+    relockea la fila, restaura stock, marca CANCELLED y, SOLO si la orden ya habia sido
+    aceptada (`accepted_at is not None`), encola una fila en sicar_sync_outbox para que
+    app/worker/sicar_sync_worker.py le avise a Sicar X de forma asincrona, con
+    reintentos. Si nunca fue aceptada, Sicar X nunca supo de esta orden en absoluto (ver
+    admin_service.accept_order y CLAUDE.md, "SICAR es solo ERP de inventario") - no hay
+    nada que revertir ahi, así que no se encola ninguna fila. Es el unico punto que
+    llaman las 3 rutas de cancelacion (POST /cancel, DELETE, y la rama rejected/cancelled
+    de finalize_order_payment mas abajo) - no duplicar esta logica en ninguna de ellas.
 
     Relockea con SELECT...FOR UPDATE y re-chequea el status DENTRO del lock (no antes):
     al quitar la llamada sincrona a Sicar X de la ruta de cancelacion, se perdio el
@@ -200,13 +187,14 @@ async def prepare_local_cancellation(
     await apply_stock_deltas(db, deltas)
 
     order.status = "CANCELLED"
-    db.add(SicarSyncOutbox(
-        order_id=order.id,
-        action="CANCEL",
-        cash_register_uuid=cash_register_uuid or settings.CASH_REGISTER_UUID,
-        status="PENDING",
-        next_attempt_at=datetime.now(timezone.utc),
-    ))
+    if order.accepted_at is not None:
+        db.add(SicarSyncOutbox(
+            order_id=order.id,
+            action="CANCEL",
+            cash_register_uuid=cash_register_uuid or settings.CASH_REGISTER_UUID,
+            status="PENDING",
+            next_attempt_at=datetime.now(timezone.utc),
+        ))
 
     return order
 
@@ -237,19 +225,16 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     primero que hace esta funcion es re-leer la fila con `SELECT ... FOR UPDATE`: eso
     serializa a ambos llamadores contra el bloqueo de fila de Postgres, para que el
     segundo en llegar vea el estado ya actualizado por el primero (status == PAID) en
-    vez de aplicar `pay_order_in_sicar`/`notify_order_confirmed` por duplicado.
+    vez de aplicar `notify_order_confirmed` por duplicado.
 
-    Nota sobre atomicidad: esto ya solo aplica al camino PAID. `pay_order_in_sicar`
-    (llamada HTTP real a Sicar X) ocurre ANTES del unico `db.commit()` de esta funcion,
-    que es lo mas cerca que se puede quedar de "un solo commit para todos los cambios
-    locales" sin una infraestructura de outbox/saga para ese camino especifico. Si esa
-    llamada HTTP externa ya tuvo exito pero el commit de abajo falla, el estado local
-    queda desincronizado de lo que realmente paso en Sicar/Mercado Pago - ese caso no se
-    puede cerrar del todo aqui, solo se vuelve diagnosticable (ver el log CRITICAL mas
-    abajo) en vez de silencioso. El camino CANCELLED ya no tiene este problema: desde
-    que existe sicar_sync_outbox (ver prepare_local_cancellation arriba), la cancelacion
-    en Sicar X es asincrona y con reintentos - si el commit de abajo falla, Sicar X
-    nunca llego a tocarse, asi que no hay nada que reconciliar."""
+    Nota sobre atomicidad: el camino PAID ya no hace ninguna llamada HTTP a Sicar X aqui
+    (antes llamaba a `pay_order_in_sicar` antes del commit - eliminado junto con el resto
+    de la creacion de documentos en Sicar X, ver CLAUDE.md, "SICAR es solo ERP de
+    inventario"). El unico aviso a Sicar X en todo el ciclo de vida de una orden ocurre
+    al aceptarla (`admin_service.accept_order`) o cancelarla despues de aceptada, ambos
+    ya asincronos/con reintentos via `sicar_sync_outbox` - asi que, igual que el camino
+    CANCELLED, si el commit de esta funcion falla no hay nada que reconciliar del lado de
+    Sicar X."""
     locked_result = await db.execute(
         select(Order)
         .where(Order.id == order.id)
@@ -273,12 +258,6 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     if mp_status in MP_APPROVED_STATUSES:
         if order.status != "PAID":
             became_paid = True
-            await pay_order_in_sicar(
-                order_id=order.sicar_order_id,
-                total_amount=float(order.total),
-                cash_register_uuid=settings.CASH_REGISTER_UUID,
-                branch_id=order.branch_id,
-            )
         order.status = "PAID"
     elif mp_status in MP_PENDING_STATUSES:
         # Solo aplica si la orden sigue en TO_PAY: un pedido puede tener mas de un intento

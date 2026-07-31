@@ -16,14 +16,18 @@ class Order(Base):
         Integer, ForeignKey("client_accounts.id"), nullable=False, index=True
     )
 
-    # Identificadores de Sicar X
-    sicar_order_id = Column(String, unique=True, index=True, nullable=False)  # "id" de la respuesta de pago/dispatch
-    # uuid RFC4122 real del documento (distinto de sicar_order_id, que es el "id" estilo
-    # Mongo) - lo exige /documents/v1/sale/cancel. Nulo hasta la primera cancelacion:
-    # se resuelve una vez via cancel_service._resolve_document_uuid y se cachea aqui para
-    # que los reintentos del worker (app/worker/sicar_sync_worker.py) no repitan esa
-    # consulta en cada intento.
+    # Identificador publico de la orden, generado localmente con uuid4()
+    # (order_history_service.create_local_order) - ya NO viene de Sicar X. Nombre
+    # historico ("sicar_order_id") de cuando checkout si creaba un documento ahi; se
+    # conserva para no romper el contrato de URL con el frontend (POST /orders/{id}/pay,
+    # /cancel) - ver CLAUDE.md, "SICAR es solo ERP de inventario".
+    sicar_order_id = Column(String, unique=True, index=True, nullable=False)
+    # Deprecado/sin uso: existia para cachear el uuid RFC4122 real de un documento de
+    # Sicar X que ya no se crea nunca (antes lo exigia /documents/v1/sale/cancel, ver
+    # cancel_service.py antes de este cambio). Ninguna orden nueva lo pobla.
     sicar_document_uuid = Column(String, nullable=True)
+    # Deprecado/sin uso por la misma razon: no hay ningun documento de Sicar X del que
+    # puedan salir.
     serie_folio = Column(String, nullable=True)
     sicar_date = Column(DateTime(timezone=True), nullable=True)
 
@@ -148,8 +152,13 @@ class SicarSyncOutbox(Base):
     confirme - restaura stock, marca CANCELLED y encola una fila aqui en la misma
     transaccion. app/worker/sicar_sync_worker.py drena esta tabla en un job aparte,
     con reintentos, para que un Sicar X caido nunca bloquee una cancelacion. `action`
-    es deliberadamente generico ("CANCEL"/"ACCEPT"/"DISPATCH"/"SYNC_DISPATCH_STATUS" hoy) para poder
-    reusar este mecanismo con otras operaciones a futuro sin necesitar otra tabla.
+    es deliberadamente generico ("CANCEL"/"ACCEPT" hoy - ambos aplican/revierten el
+    descuento de inventario via sicar_stock_service, ver admin_service.accept_order y
+    order_history_service.prepare_local_cancellation) para poder reusar este mecanismo
+    con otras operaciones a futuro sin necesitar otra tabla. Antes tambien existian
+    "DISPATCH"/"SYNC_DISPATCH_STATUS" para mirrorear dispatch_status hacia Sicar X -
+    eliminadas junto con la creacion de documentos en Sicar X (ver CLAUDE.md, "SICAR es
+    solo ERP de inventario"): dispatch_status es puramente local ahora.
 
     `status` incluye IN_PROGRESS (ademas de PENDING/SUCCEEDED/FAILED) para que el
     worker pueda reclamar una fila y soltar el lock de inmediato en vez de mantenerlo
@@ -170,12 +179,11 @@ class SicarSyncOutbox(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
-    action = Column(String, nullable=False)  # "CANCEL"/"ACCEPT"/"DISPATCH"/"SYNC_DISPATCH_STATUS" hoy
+    action = Column(String, nullable=False)  # "CANCEL"/"ACCEPT" hoy
     cash_register_uuid = Column(String, nullable=False)
     status = Column(String, nullable=False, default="PENDING")  # PENDING/IN_PROGRESS/SUCCEEDED/FAILED
-    # Solo poblado para action="SYNC_DISPATCH_STATUS" (ver admin_service.advance_order_dispatch_status):
-    # a diferencia de ACCEPT/DISPATCH, que cada uno tiene un unico target hardcodeado, esta accion es
-    # generica y necesita cargar cual dispatchStatus avisarle a Sicar X.
+    # Deprecado/sin uso: existia para la accion "SYNC_DISPATCH_STATUS", eliminada junto
+    # con el resto del mirroring de dispatch_status hacia Sicar X.
     target_dispatch_status = Column(String, nullable=True)
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(String, nullable=True)

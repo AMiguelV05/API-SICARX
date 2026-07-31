@@ -12,16 +12,8 @@ from app.models.order import Order, SicarSyncOutbox
 # ('ClientAccount')". El proceso api lo obtiene gratis via sus rutas de auth/addresses;
 # el worker no importa nada de app.models.client, asi que se agrega aqui explicitamente.
 from app.models.client import ClientAccount  # noqa: F401
-from app.services.cancel_service import process_order_cancellation, advance_dispatch_status
+from app.services.sicar_stock_service import apply_order_stock_delta
 from app.services import admin_notification_service
-
-# dispatchStatus al que "aceptar" (ACCEPT) avanza un pedido - PENDING_ACCEPTANCE -> PENDING,
-# confirmado en vivo (ver cancel_service.advance_dispatch_status). Es el unico target que
-# PENDING_ACCEPTANCE puede alcanzar (Sicar X nunca lo acepta como destino, ver
-# admin_service._LEGAL_DISPATCH_TRANSITIONS); cualquier otro avance/reversion del resto de
-# la secuencia PENDING/PREPARING/COMPLETE/DISPATCHED pasa por la accion SYNC_DISPATCH_STATUS
-# mas abajo, no por esta.
-ACCEPT_TARGET_DISPATCH_STATUS = "PENDING"
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +59,10 @@ async def _claim_next_row(session: AsyncSession) -> SicarSyncOutbox | None:
 async def _process_claimed_row(row_id: int) -> None:
     """Carga la fila reclamada y su orden en una sesion nueva, llama a Sicar X (sin
     ningun lock de Postgres sostenido durante esa llamada) y registra el resultado en
-    un unico commit al final - tanto el nuevo status/attempts de la fila de outbox
-    como cualquier `order.sicar_document_uuid` recien resuelto por
-    cancel_service.process_order_cancellation se persisten juntos, sin necesitar un
-    rollback intermedio (una excepcion de la llamada HTTP no deja nada pendiente sucio
-    en la sesion - solo mutaciones de atributos en memoria, validas de commitear)."""
+    un unico commit al final - el nuevo status/attempts de la fila de outbox se persiste
+    sin necesitar un rollback intermedio (una excepcion de la llamada HTTP no deja nada
+    pendiente sucio en la sesion - solo mutaciones de atributos en memoria, validas de
+    commitear)."""
     async with AsyncSessionLocal() as session:
         row = await session.get(SicarSyncOutbox, row_id)
         if row is None or row.status != "IN_PROGRESS":
@@ -89,30 +80,18 @@ async def _process_claimed_row(row_id: int) -> None:
             return
 
         try:
-            if row.action == "CANCEL":
-                await process_order_cancellation(order, row.cash_register_uuid)
-            elif row.action == "ACCEPT":
-                # Mutacion real capturada en vivo (agent-browser contra el tablero de
-                # despacho de app.sicarx.com, 2026-07-29) - ver
-                # cancel_service.advance_dispatch_status. dispatch_status ya se puso en
-                # "PENDING" localmente de forma sincrona en admin_service.accept_order (el
-                # dashboard admin es la fuente de verdad, no un espejo de Sicar X), asi
-                # que aqui solo se le avisa a Sicar X - no se vuelve a tocar
-                # order.dispatch_status, mismo patron que DISPATCH abajo.
-                await advance_dispatch_status(order, ACCEPT_TARGET_DISPATCH_STATUS)
-            elif row.action == "DISPATCH":
-                # Guia de envio generada con envia.com (ver admin_service.generate_shipping_label)
-                # - dispatch_status ya se puso en "DISPATCHED" localmente de forma sincrona
-                # en el momento en que envia.com respondio exitosamente (el hecho real ya
-                # ocurrio), asi que aqui solo se le avisa a Sicar X - no se vuelve a tocar
-                # order.dispatch_status, mismo patron que ACCEPT arriba.
-                await advance_dispatch_status(order, "DISPATCHED")
-            elif row.action == "SYNC_DISPATCH_STATUS":
-                # Avance/reversion generico via admin_service.advance_order_dispatch_status
-                # - dispatch_status ya se aplico localmente de forma sincrona ahi, mismo
-                # patron que ACCEPT/DISPATCH: aqui solo se le avisa a Sicar X con el target
-                # que quedo cargado en la fila.
-                await advance_dispatch_status(order, row.target_dispatch_status)
+            if row.action == "ACCEPT":
+                # Unico punto en que este backend le avisa algo a Sicar X sobre una
+                # orden: el descuento de inventario (ver admin_service.accept_order,
+                # CLAUDE.md "SICAR es solo ERP de inventario"). Ya no crea/paga/cancela
+                # ningun documento ahi, ni avisa cambios de dispatch_status.
+                await apply_order_stock_delta(order.items, order.branch_id, sign=-1)
+            elif row.action == "CANCEL":
+                # Reversion del descuento anterior - solo se encola si la orden ya habia
+                # sido aceptada (ver order_history_service.prepare_local_cancellation);
+                # si nunca se acepto, Sicar X nunca supo de esta orden y no hay fila que
+                # procesar en absoluto.
+                await apply_order_stock_delta(order.items, order.branch_id, sign=1)
             else:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
 
