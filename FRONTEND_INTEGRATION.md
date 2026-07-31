@@ -1268,6 +1268,15 @@ la cancelación localmente", ya no "cuándo lo confirmó Sicar X" — para el fr
 cambia nada práctico, la cancelación ya es definitiva desde el punto de vista del cliente
 en cuanto llega esta respuesta `200`.
 
+Errores esperables:
+- `401` — falta o es inválido `X-Client-Token`
+- `404` — el pedido no existe o no pertenece a la cuenta autenticada
+- `409` — el pedido ya fue cancelado antes
+- `409` — el pedido ya fue **enviado** (`dispatchStatus: "DISPATCHED"`) — a partir de ese
+  punto ya no se puede cancelar por este medio. `"COMPLETE"` no cuenta como enviado para
+  este caso — también es el estado terminal de pedidos `PICKUP` listos para recoger en
+  tienda, que nunca salieron a ningún lado, así que esos sí siguen siendo cancelables.
+
 ### `DELETE /v1/orders/{order_id}` — eliminar pedido reservado sin pagar
 
 Distinto de `/cancel`: `/cancel` conserva el pedido en el historial con `status: "CANCELLED"`;

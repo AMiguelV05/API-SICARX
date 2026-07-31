@@ -118,6 +118,21 @@ Mercado Pago refund/cancellation (`payment_service.refund_payment`/`cancel_payme
 
 `OrderCancelResponse.sicarTimestamp` (still typed as `float`, still epoch milliseconds) changed meaning: it used to be SICAR X's own confirmation timestamp from the now-removed synchronous cancel call; it's now `datetime.now(timezone.utc).timestamp() * 1000` — the moment the cancellation was accepted **locally**. The cancellation is genuinely complete and authoritative from the customer's point of view the instant this responds; only the SICAR X-side mirroring is deferred, which the customer never needs to know about.
 
+**`POST /orders/{id}/cancel` is gated on shipping status (added 2026-07-31)**: a customer
+can no longer self-cancel an order once `Order.dispatch_status == "DISPATCHED"` — a plain
+`409` (`"Esta orden ya fue enviada y no puede cancelarse."`) raised in `routes/orders.py`
+right after the ownership lookup, deliberately **before** the Mercado Pago refund/cancel
+step, so a shipped order is rejected before any money moves. `"COMPLETE"` is deliberately
+**not** included in this gate — it's also the terminal `dispatch_status` for `PICKUP`
+orders (ready for in-store pickup, never actually shipped anywhere), which must stay
+cancellable. This check lives only in the `/cancel` route, not inside
+`prepare_local_cancellation` itself (would also affect `DELETE /orders/{id}` and
+`finalize_order_payment`'s rejected/cancelled branch, both of which are structurally
+unable to reach a dispatched order today — `DELETE` only operates on `status == "TO_PAY"`
+orders, and dispatch progression happens later in the lifecycle) and relies purely on
+whatever `dispatch_status` is already cached locally — nothing in this codebase re-fetches
+it from SICAR X live before deciding.
+
 Customer-facing cancellation notifications (`app/services/order_cancellation_notification_service.py`'s `notify_order_cancelled`) fire from all three trigger points after their commit, mirroring `notify_order_confirmed`'s existing pattern exactly (same `OrderPublic` + `clientEmail`/`clientName` payload, same HMAC signing, same non-fatal/no-retry contract) — POSTed to `{FRONTEND_BASE_URL}/api/webhooks/order-cancelled`, see `FRONTEND_INTEGRATION.md`. The same call also fires `admin_notification_service.notify_admin_order_cancelled` — an outbound webhook toward a **future admin dashboard that doesn't exist yet** (see "Local-first order cancellation" above re: `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET`) — built now, ahead of the dashboard itself, so the notification plumbing is ready the moment a receiver exists.
 
 ### Local catalog vs. live SICAR X data

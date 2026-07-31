@@ -339,6 +339,11 @@ async def cancel_order(
     cancelacion se acepto localmente, no una confirmacion de Sicar X (ver
     FRONTEND_INTEGRATION.md).
 
+    Devuelve 409 si la orden ya esta CANCELLED, o si `dispatch_status` ya es
+    "DISPATCHED" (ya fue enviada y no puede cancelarse por este medio) - "COMPLETE"
+    no cuenta para este segundo caso, ya que tambien es el estado terminal de pedidos
+    PICKUP que nunca se enviaron.
+
     Si la orden ya tiene un pago de Mercado Pago asociado, se limpia ese lado
     (reembolso si ya estaba aprobado, o cancelacion si seguia pendiente/en proceso) -
     eso si sigue siendo sincrono, Mercado Pago es un sistema aparte con su propio
@@ -361,6 +366,11 @@ async def cancel_order(
 
     if local_order.status == "CANCELLED":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
+
+    # COMPLETE se excluye a proposito: tambien es el estado terminal de pedidos PICKUP
+    # (listos para recoger en tienda), que nunca se "enviaron" a ningun lado.
+    if local_order.dispatch_status == "DISPATCHED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue enviada y no puede cancelarse.")
 
     # True si esta solicitud ya resolvio (reembolso/cancelacion) el pago de Mercado Pago
     # - un hecho externo, no reversible - antes de intentar la cancelacion local. Si
