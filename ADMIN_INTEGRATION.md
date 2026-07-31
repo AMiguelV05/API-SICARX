@@ -415,6 +415,13 @@ Respuesta `200`:
 
 - `options: []` es una respuesta válida (`200`), no un error — significa que ningún carrier
   cubre ese código postal con ese paquete.
+- Solo se devuelven opciones **puerta a puerta** (`dropOff: 0` del lado de envia.com).
+  Algunos carriers/servicios exigen que el origen o el destino sea una sucursal física
+  (p. ej. paquetexpress `ground_do`/`ground_od`) — envia.com pide un `branch_code`
+  específico para esos, que este backend no recolecta ni soporta hoy (`/shipping/generate`
+  fallaría con un `502` real de envia.com — `"Origin/Destination branch code is required"`
+  — si se intentara). Se filtran aquí para que el admin nunca vea una opción que después no
+  puede generarse.
 - `404` si el pedido no existe. `409` si `deliveryType !== "DELIVERYMAN"` o
   `dispatchStatus !== "COMPLETE"` — el backend no confía en que el frontend ya lo validó. `422`
   si `deliveryAddress` falta o está incompleta (sin `street`/`city`/`state`/`zipCode`), o si

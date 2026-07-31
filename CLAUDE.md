@@ -331,6 +331,22 @@ juntas en `shipping_service.generate_shipping_label`:
 dashboard de envia.com) para que sea inmediato confirmar ahí que un envío realmente existe,
 en vez de tener que inferirlo del `trackingNumber`.
 
+**INCIDENTE (2026-07-30, continuación): incluso con el fix anterior, algunas opciones de
+`/shipping/quote` seguían fallando en `/shipping/generate`** con `"Origin/Destination
+branch code is required for branch to home/home to branch service"`. Causa: `dropOff` en
+la respuesta de `/ship/rate/` no siempre es `0` (puerta a puerta) — algunos
+carriers/servicios (confirmado en vivo: paquetexpress `ground_do`/`ground_od`, dropOff 1/2)
+exigen que el origen o el destino sea una sucursal física del carrier, identificada por un
+`branch_code` que envia.com no incluye en el payload de `/ship/generate/` salvo que se
+mande explícitamente — y este backend no lo recolecta ni lo soporta hoy. Soportarlo bien
+requeriría exponer, por opción, la lista de sucursales cercanas (confirmado en vivo que
+`branches` en la respuesta de `/ship/rate/` es relativa a lo que se mande como
+`destination` — para sucursales del lado del origen hay que consultar con origen/destino
+invertidos) y una UI nueva en el dashboard admin para elegirla — decidido explícitamente
+diferir eso. En vez de eso, `get_shipping_quote` ahora descarta cualquier opción con
+`dropOff` distinto de `0` — el admin solo ve opciones puerta a puerta, que ya se sabe que
+generan guías correctamente con el payload actual.
+
 ### Auth on this API's own endpoints
 
 Every route depends on `validate_api_key` (`app/core/security.py`), which checks a static `x-api-key` header against `settings.X_API_KEY`. This is separate from both SICAR X token schemes above — it authenticates the frontend to this middleware, not this middleware to SICAR X.

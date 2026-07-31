@@ -271,7 +271,9 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     COMPLETE - validado por el llamador, admin_service.quote_shipping). No persiste nada,
     se puede llamar repetidamente mientras el admin ajusta peso/medidas. `origin_overrides`
     (opcional) se pasa tal cual a `_origin_address` - ver esa funcion para el merge
-    campo-por-campo contra `.env`.
+    campo-por-campo contra `.env`. Solo devuelve opciones puerta a puerta (`dropOff: 0`) -
+    ver el comentario junto al filtro en el loop de `_quote_one` mas abajo (INCIDENTE
+    2026-07-30) para el porque de las opciones basadas en sucursal.
 
     INCIDENTE (2026-07-30): confirmado en vivo contra el sandbox real que POST /ship/rate/
     exige un `carrier` especifico en el body - no existe un valor comodin ("all",
@@ -340,6 +342,19 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
         parsed = []
         for raw in raw_options:
             if not isinstance(raw, dict):
+                continue
+            if raw.get("dropOff"):
+                # INCIDENTE (2026-07-30): `dropOff != 0` significa que el origen o el
+                # destino (segun el valor - "Puerta a sucursal"/"Sucursal a puerta") deben
+                # ser una sucursal fisica del carrier, no la puerta - envia.com exige un
+                # `branch_code` especifico en /ship/generate/ para estas ("Origin/
+                # Destination branch code is required..."), que este backend no recolecta
+                # ni manda hoy - confirmado en vivo que generate falla siempre para estas
+                # opciones. Se descartan aqui (en vez de ofrecerlas y fallar despues en
+                # /shipping/generate) hasta que exista soporte real de seleccion de
+                # sucursal (deliberadamente no implementado - requeriria una nueva UI en el
+                # dashboard admin para elegir la sucursal). Solo se ofrecen opciones
+                # `dropOff: 0` ("Puerta a puerta"), que ya generan guias correctamente.
                 continue
             parsed.append({
                 "carrier": raw.get("carrier") or raw.get("carrier_name") or carrier,
