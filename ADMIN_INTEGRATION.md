@@ -501,6 +501,135 @@ compite con un éxito del lado del servidor mostraría un error al admin mientra
 generó (y cobró) una guía. Documentar esto como riesgo conocido, no agregar reintento automático
 sobre timeout para "resolverlo".
 
+### Categorías (taxonomía)
+
+Endpoints para administrar el árbol propio de categorías (PIM, auto-referenciado vía
+`parentUuid`, ver `CLAUDE.md` sección "Taxonomía") y para asignarle productos — la
+única forma de poblar `product_categories`, que hasta ahora no tenía ningún endpoint
+que la llenara. Para **leer** el árbol completo (navegación/filtros del storefront)
+sigue usando `GET /v1/taxonomy` (público, solo necesita `x-api-key`) — estas rutas
+son exclusivamente de escritura/administración, gateadas por `X-Admin-Key` como todo
+lo demás en este documento.
+
+#### `POST /v1/admin/categories` — crear un nodo
+
+```http
+POST /v1/admin/categories
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "name": "Herramientas Eléctricas", "parentUuid": "6a4fd308da77fe7cd25d1dd9" }
+```
+
+`parentUuid` es opcional — se omite (o se manda `null`) para crear un nodo raíz. El
+`slug` **no se manda**, siempre se deriva automáticamente de `name` (minúsculas, sin
+acentos, guiones — con un sufijo `-2`, `-3`, ... si ya existe otra categoría con el
+mismo slug). `uuid` se genera localmente (`uuid4()`), igual que cualquier otro
+identificador creado por este backend (p. ej. `Order.uuid`).
+
+Respuesta `201`:
+```json
+{
+  "uuid": "3f9a1c2e-...",
+  "name": "Herramientas Eléctricas",
+  "slug": "herramientas-electricas",
+  "parentUuid": "6a4fd308da77fe7cd25d1dd9",
+  "updatedAt": "2026-08-01T12:00:00Z"
+}
+```
+
+`404` si `parentUuid` no existe.
+
+#### `PATCH /v1/admin/categories/{uuid}` — renombrar y/o mover un nodo
+
+```http
+PATCH /v1/admin/categories/3f9a1c2e-.../
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "name": "Herramienta Eléctrica", "parentUuid": null }
+```
+
+Actualización parcial: solo los campos incluidos en el body se tocan. `parentUuid`
+ausente del body deja el padre actual sin cambios; `parentUuid: null` explícito mueve
+el nodo a raíz. Renombrar recalcula el `slug` automáticamente (mismo criterio que en
+`POST`, no hay forma de fijar el slug a mano). Responde el mismo shape que `POST`.
+
+- `404` si el nodo o el `parentUuid` indicado no existen.
+- `409` si se intenta mover un nodo dentro de sí mismo o de su propio subárbol (un
+  padre no puede ser también su propio descendiente — se valida contra el árbol
+  completo, no solo contra el hijo directo).
+- `422` si `name` se manda vacío.
+
+#### `DELETE /v1/admin/categories/{uuid}` — eliminar un nodo
+
+```http
+DELETE /v1/admin/categories/3f9a1c2e-.../
+X-Admin-Key: <admin-key>
+```
+
+`204` sin cuerpo si tiene éxito. Es un borrado real (no soft-delete — a diferencia de
+`Order`, esta es una tabla chica administrada por humanos, no un registro financiero).
+
+- `404` si el nodo no existe.
+- `409` si todavía tiene subcategorías, o si todavía tiene productos asignados
+  (`GET .../products` de abajo para revisar cuáles) — hay que reasignar/eliminar los
+  hijos y quitar los productos primero. Deliberadamente no hay cascada ni reparenteo
+  automático.
+
+#### `PUT /v1/admin/categories/{uuid}/products` — reemplazar los productos asignados
+
+```http
+PUT /v1/admin/categories/3f9a1c2e-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
+```
+
+**Reemplazo completo, no incremental** — el conjunto de productos asignados a esta
+categoría queda exactamente igual al `productUuids` mandado (una lista vacía quita
+todos). No hay endpoints de agregar/quitar un producto a la vez. `productUuids` son
+`sicar_uuid` de `Product` (los mismos identificadores que ya usa todo lo demás en esta
+API, p. ej. `items[].uuid` de un pedido), no el `id` interno.
+
+Respuesta `200`:
+```json
+{
+  "categoryUuid": "3f9a1c2e-...",
+  "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"]
+}
+```
+
+- `404` si la categoría no existe, o si alguno de los `productUuids` no corresponde a
+  un producto real y no eliminado — el detalle nombra exactamente cuáles no se
+  encontraron, para que el dashboard pueda señalarlos sin adivinar.
+
+#### `GET /v1/admin/categories/{uuid}/products` — listar productos asignados directamente
+
+```http
+GET /v1/admin/categories/3f9a1c2e-.../products?limit=60&offset=0
+X-Admin-Key: <admin-key>
+```
+
+Pensado para poblar la UI de edición antes de un `PUT` (arriba) — muestra solo lo
+asignado **directamente** a este nodo, sin incluir productos etiquetados en
+subcategorías (a diferencia del filtro `taxonomyUuid` de `/catalog`/`/search`, que sí
+incluye descendientes — ese es para navegación del storefront, este es para editar un
+nodo puntual). Paginado igual que `/catalog` (`limit` 1-200, default 60; `offset`).
+
+Respuesta `200`:
+```json
+{
+  "total": 2,
+  "docs": [
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "descriptionDetails": null, "imageUrl": "https://.../taladro.jpg", "price": 899.00, "stock": 12 }
+  ]
+}
+```
+
+`404` si la categoría no existe.
+
 ## Notas y advertencias
 
 - **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo
