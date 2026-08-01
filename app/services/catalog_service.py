@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, case
 from app.models.product import Product
 from app.models.taxonomy import product_categories
+from app.models.vehicle import product_vehicles
 from app.services.taxonomy_service import get_descendant_uuids
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,11 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         descendant_uuids = await get_descendant_uuids(db, filters["taxonomy_uuid"])
         stmt = stmt.where(Product.id.in_(
             select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
+
+    if filters.get("vehicle_uuid"):
+        stmt = stmt.where(Product.id.in_(
+            select(product_vehicles.c.product_id).where(product_vehicles.c.vehicle_uuid == filters["vehicle_uuid"])
         ))
 
     if filters.get("in_stock"):
@@ -66,7 +72,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, in_stock: bool = False):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False):
     """Busqueda por substring (case-insensitive) en sku o name, acelerada por los
     indices GIN de pg_trgm. Los resultados donde sku o name empiezan con `q` se
     ordenan primero, antes que las coincidencias que solo contienen `q` en medio.
@@ -94,6 +100,11 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         descendant_uuids = await get_descendant_uuids(db, taxonomy_uuid)
         stmt = stmt.where(Product.id.in_(
             select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
+
+    if vehicle_uuid:
+        stmt = stmt.where(Product.id.in_(
+            select(product_vehicles.c.product_id).where(product_vehicles.c.vehicle_uuid == vehicle_uuid)
         ))
 
     if in_stock:

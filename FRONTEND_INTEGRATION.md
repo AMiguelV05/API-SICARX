@@ -537,6 +537,8 @@ Content-Type: application/json
   "offset": 0,
   "departmentUuid": null,
   "categoryUuid": null,
+  "taxonomyUuid": null,
+  "vehicleUuid": null,
   "tag": null,
   "inStock": false,
   "sortBy": null
@@ -566,6 +568,12 @@ otras etiquetas (coincidencia exacta contra los valores en `Product.tags`, p. ej
 `"pretul"` — no es substring). `inStock: true` restringe a productos con `stock > 0` (por
 defecto `false`). Pagina con `limit`/`offset`.
 
+`taxonomyUuid` filtra por un nodo del árbol propio de categorías (`GET /v1/taxonomy`, distinto de
+`categoryUuid`) e incluye productos etiquetados en cualquier descendiente del nodo. `vehicleUuid`
+filtra a productos compatibles con un vehículo específico — el `uuid` viene de resolver la
+cascada de `GET /v1/vehicles*` (ver esa sección más abajo). Ambos son opcionales y combinables
+entre sí y con el resto de los filtros.
+
 `price` siempre viene con 2 decimales exactos (es un `Numeric` en la base de datos, no un
 `float`) — no asumas más precisión que esa al mostrarlo o redondearlo del lado del frontend.
 
@@ -590,14 +598,17 @@ Content-Type: application/json
   "offset": 0,
   "departmentUuid": null,
   "categoryUuid": null,
+  "taxonomyUuid": null,
+  "vehicleUuid": null,
   "inStock": false
 }
 ```
 
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
-`name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid` son opcionales y funcionan
-igual que en `/v1/products` — úsalos para combinar el cuadro de búsqueda con los filtros de
-departamento/categoría ya existentes. `inStock: true` restringe el resultado a productos con
+`name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid`/`taxonomyUuid`/`vehicleUuid`
+son opcionales y funcionan igual que en `/v1/products` (ver esa sección para el detalle de cada
+uno) — úsalos para combinar el cuadro de búsqueda con los filtros de departamento/categoría/
+vehículo ya existentes. `inStock: true` restringe el resultado a productos con
 `stock > 0` (por defecto `false`, no filtra por stock).
 
 Los resultados donde `sku` o `name` **empiezan con** el texto buscado aparecen primero; el resto
@@ -696,6 +707,79 @@ Respuesta `200`:
 
 Una categoría puede aparecer bajo varios departamentos (relación muchos-a-muchos), no es una
 jerarquía estricta.
+
+### `GET /v1/vehicles*` — selector de vehículo ("¿qué le queda a mi carro?")
+
+Cinco endpoints públicos para armar un selector en cascada (tipo → marca → modelo → año →
+motor), como en los sitios de refacciones. El **tipo** (`"AUTOMOTIVE"`/`"MOTORCYCLE"`) no
+necesita ninguna llamada — son solo 2 valores fijos que el frontend ya conoce; empieza la
+cascada real en marcas. Cada paso se filtra con lo ya elegido en los pasos anteriores:
+
+```http
+GET /v1/vehicles/makes?vehicleType=AUTOMOTIVE
+x-api-key: <api-key>
+```
+```json
+{ "docs": ["Chevrolet", "Ford", "Honda", "..."] }
+```
+
+```http
+GET /v1/vehicles/models?vehicleType=AUTOMOTIVE&make=Chevrolet
+x-api-key: <api-key>
+```
+```json
+{ "docs": ["Aveo", "Spark", "..."] }
+```
+
+```http
+GET /v1/vehicles/years?vehicleType=AUTOMOTIVE&make=Chevrolet&model=Aveo
+x-api-key: <api-key>
+```
+```json
+{ "docs": [2016, 2015, 2014, 2013, 2012, 2011, 2010, 2009, 2008] }
+```
+Años en orden descendente (más reciente primero). Vienen de expandir el rango `yearStart`–
+`yearEnd` de cada fitment — un fitment sin `yearEnd` (todavía en producción) cuenta como
+vigente hasta el año calendario actual.
+
+```http
+GET /v1/vehicles/engines?vehicleType=AUTOMOTIVE&make=Chevrolet&model=Aveo&year=2012
+x-api-key: <api-key>
+```
+```json
+{ "docs": ["L4 1.6L"] }
+```
+Si `docs` viene vacío, no hay dato de motor para esa combinación — **salta este paso** y
+sigue directo a la resolución final sin mandar `engine`.
+
+```http
+GET /v1/vehicles?vehicleType=AUTOMOTIVE&make=Chevrolet&model=Aveo&year=2012&engine=L4%201.6L
+x-api-key: <api-key>
+```
+```json
+{
+  "total": 1,
+  "docs": [
+    {
+      "uuid": "3f9c1b2a-....",
+      "vehicleType": "AUTOMOTIVE",
+      "make": "Chevrolet",
+      "model": "Aveo",
+      "yearStart": 2008,
+      "yearEnd": 2016,
+      "engine": "L4 1.6L",
+      "updatedAt": "2026-08-01T10:00:00Z"
+    }
+  ]
+}
+```
+Este último paso es el que resuelve la selección a un fitment real — usa su `uuid` como
+`vehicleUuid` en `POST /v1/products`/`POST /v1/search` (ver esas secciones arriba) para
+mostrar solo productos compatibles. Todos los parámetros de este endpoint son opcionales y
+combinables (podés omitir `year`/`engine` si esos pasos no aplican); si guardás la
+selección del shopper para reusarla después (p. ej. "mi garage"), guarda el objeto completo
+que devuelve este endpoint, no solo el `uuid` — no existe un `GET /v1/vehicles/{uuid}` para
+recuperarlo por separado.
 
 ### `GET`/`PUT`/`PATCH`/`DELETE /v1/cart*` — carrito persistente
 

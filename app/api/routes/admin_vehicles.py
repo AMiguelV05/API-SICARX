@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
 from app.core.security import validate_admin_key
 from app.schemas.vehicle import (
-    VehicleAdminPublic,
+    VehiclePublic,
     VehicleCreateRequest,
     VehicleUpdateRequest,
     VehicleListResponse,
@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/vehicles", tags=["Admin - Vehicles"], dependencies=[Depends(validate_admin_key)])
 
 
-@router.post("", response_model=VehicleAdminPublic, status_code=status.HTTP_201_CREATED, summary="Crear un fitment de vehiculo (make/model/year-range/engine)")
+@router.post("", response_model=VehiclePublic, status_code=status.HTTP_201_CREATED, summary="Crear un fitment de vehiculo (make/model/year-range/engine)")
 async def admin_create_vehicle(db: DbDep, data: VehicleCreateRequest = Body()):
     vehicle = await vehicle_service.create_vehicle(db, data.vehicle_type, data.make, data.model, data.year_start, data.year_end, data.engine)
-    return VehicleAdminPublic.model_validate(vehicle)
+    return VehiclePublic.model_validate(vehicle)
 
 
 @router.get("", response_model=VehicleListResponse, summary="Buscar/listar vehiculos (filtrable por vehicleType/make/model)")
@@ -35,13 +35,13 @@ async def admin_list_vehicles(
     offset: int = Query(default=0, ge=0),
 ):
     total, vehicles = await vehicle_service.list_vehicles(db, vehicle_type=vehicle_type, make=make, model=model, limit=limit, offset=offset)
-    return VehicleListResponse(total=total, docs=[VehicleAdminPublic.model_validate(v) for v in vehicles])
+    return VehicleListResponse(total=total, docs=[VehiclePublic.model_validate(v) for v in vehicles])
 
 
-@router.patch("/{vehicle_uuid}", response_model=VehicleAdminPublic, summary="Actualizacion parcial de un vehiculo")
+@router.patch("/{vehicle_uuid}", response_model=VehiclePublic, summary="Actualizacion parcial de un vehiculo")
 async def admin_update_vehicle(vehicle_uuid: str, db: DbDep, data: VehicleUpdateRequest = Body()):
     vehicle = await vehicle_service.update_vehicle(db, vehicle_uuid, data.model_dump(exclude_unset=True))
-    return VehicleAdminPublic.model_validate(vehicle)
+    return VehiclePublic.model_validate(vehicle)
 
 
 @router.delete("/{vehicle_uuid}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar un vehiculo (bloqueado si tiene productos asignados)")

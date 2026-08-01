@@ -6,13 +6,13 @@ from app.schemas.base import CamelModel
 from app.schemas.products import ProductBasic
 
 # Admin (/v1/admin/vehicles/*, ver CLAUDE.md "Compatibilidad de vehiculos") - CRUD de
-# fitments (make/model/year-range/engine) y asignacion de productos. Sin equivalente
-# publico todavia (a diferencia de taxonomy.py/CategoryNode, que ya tenia GET /taxonomy) -
-# ver el plan de este slice para el alcance admin-only decidido con el usuario.
+# fitments (make/model/year-range/engine) y asignacion de productos. El surface publico de
+# solo lectura (facets en cascada + resolucion a uuid) vive en app/api/routes/vehicles.py -
+# ver CLAUDE.md para el contrato completo.
 
 VehicleType = Literal["AUTOMOTIVE", "MOTORCYCLE"]
 
-class VehicleAdminPublic(CamelModel):
+class VehiclePublic(CamelModel):
     uuid: str
     vehicle_type: VehicleType
     make: str
@@ -43,7 +43,7 @@ class VehicleUpdateRequest(CamelModel):
 
 class VehicleListResponse(CamelModel):
     total: int
-    docs: List[VehicleAdminPublic]
+    docs: List[VehiclePublic]
 
 class ReplaceVehicleProductsRequest(CamelModel):
     product_uuids: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de cada producto - reemplaza el conjunto completo asignado al vehiculo")
@@ -55,3 +55,20 @@ class ReplaceVehicleProductsResponse(CamelModel):
 class VehicleProductsResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
+
+# Publico (/v1/vehicles/*) - facets en cascada para un selector de vehiculo tipo
+# auto-refacciones (tipo -> marca -> modelo -> anio -> motor). Sin total/paginacion: son
+# listas de valores distintos, acotadas por naturaleza (un puñado de marcas/modelos/anios/
+# motores por seleccion), no una coleccion paginada.
+
+class VehicleMakesResponse(CamelModel):
+    docs: List[str]
+
+class VehicleModelsResponse(CamelModel):
+    docs: List[str]
+
+class VehicleYearsResponse(CamelModel):
+    docs: List[int]
+
+class VehicleEnginesResponse(CamelModel):
+    docs: List[str]
