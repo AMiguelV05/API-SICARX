@@ -630,6 +630,135 @@ Respuesta `200`:
 
 `404` si la categoría no existe.
 
+### Vehículos (compatibilidad)
+
+Endpoints para administrar `vehicles` — un catálogo plano de fitments
+make/model/year-range/engine (p. ej. "Chevrolet Aveo 2008-2016 L4 1.6L") — y para
+asignarle productos vía `product_vehicles`, el equivalente de "Categorías" arriba pero
+para "qué vehículos aplican a este producto" en vez de "en qué categoría está". A
+diferencia de categorías, **no hay tree/reparenteo** (una fila no tiene hijos) y **no
+hay ningún endpoint público equivalente a `GET /taxonomy`** todavía — `GET
+/v1/admin/vehicles` de abajo es hoy la única forma de buscar vehículos ya existentes,
+incluso para este mismo panel admin.
+
+`vehicles` fue sembrada una vez (2026-08-01) desde el catálogo público de referencia de
+Gonher (`catalogo.grupogonher.com`), acotado a los tipos "Automotriz" y "Motocicletas"
+(sin "Camiones, Tractocamiones y Fuera de Carretera" — casi enteramente maquinaria
+industrial pesada sin relación con este catálogo) — **41,937 filas**, ninguna vinculada
+todavía a un producto real (`product_vehicles` sigue vacía, igual que
+`product_categories` al lanzar categorías). Es un catálogo de referencia genérico para
+el picker del admin, con un origen heurístico (parseo de texto libre de un tercero) —
+no asumas que cada fila es 100% exacta; ver `import_gonher_vehicles.py` en el repo para
+el detalle completo si hace falta re-sembrar o auditar el origen de una fila en
+particular.
+
+#### `POST /v1/admin/vehicles` — crear un fitment
+
+```http
+POST /v1/admin/vehicles
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "vehicleType": "AUTOMOTIVE", "make": "Chevrolet", "model": "Aveo", "yearStart": 2008, "yearEnd": 2016, "engine": "L4 1.6L" }
+```
+
+`vehicleType` es `"AUTOMOTIVE"` o `"MOTORCYCLE"` (constantes en inglés, no las etiquetas
+en español de Gonher). `yearEnd` es opcional — se omite (o se manda `null`) para un
+fitment todavía vigente ("sigue en producción"). `engine` es texto libre, opcional.
+
+Respuesta `201`:
+```json
+{
+  "uuid": "8f2c1a4e-...",
+  "vehicleType": "AUTOMOTIVE",
+  "make": "Chevrolet",
+  "model": "Aveo",
+  "yearStart": 2008,
+  "yearEnd": 2016,
+  "engine": "L4 1.6L",
+  "updatedAt": "2026-08-01T12:00:00Z"
+}
+```
+
+`422` si `yearEnd` es menor que `yearStart`.
+
+#### `GET /v1/admin/vehicles` — buscar/listar vehículos
+
+```http
+GET /v1/admin/vehicles?vehicleType=MOTORCYCLE&make=italika&model=FT&limit=50&offset=0
+X-Admin-Key: <admin-key>
+```
+
+`make`/`model` son coincidencia parcial sin distinguir mayúsculas (`ILIKE`), pensados
+para un cuadro de búsqueda tipo autocomplete — no coincidencia exacta como
+`clientEmail` en `GET /admin/orders`. `vehicleType` sí es igualdad exacta. Paginado
+igual que el resto (`limit` 1-200, default 50; `offset`).
+
+Respuesta `200` — mismo shape que `POST`, dentro de `docs`, ordenado por
+`make`/`model`/`yearStart`:
+```json
+{
+  "total": 23,
+  "docs": [ { "uuid": "...", "vehicleType": "MOTORCYCLE", "make": "ITALIKA", "model": "FT125", "yearStart": 2007, "yearEnd": 2007, "engine": "124cc", "updatedAt": "..." } ]
+}
+```
+
+#### `PATCH /v1/admin/vehicles/{uuid}` — actualización parcial
+
+```http
+PATCH /v1/admin/vehicles/8f2c1a4e-.../
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "yearEnd": null }
+```
+
+Solo los campos incluidos en el body se tocan (`yearEnd: null` explícito marca el
+fitment como "todavía vigente"; ausente del body lo deja sin cambios). `422` si el
+rango de años resultante (mezclando lo que trae el body con lo que ya tenía la fila)
+queda con `yearEnd < yearStart`. Responde el mismo shape que `POST`.
+
+#### `DELETE /v1/admin/vehicles/{uuid}` — eliminar un fitment
+
+```http
+DELETE /v1/admin/vehicles/8f2c1a4e-.../
+X-Admin-Key: <admin-key>
+```
+
+`204` sin cuerpo si tiene éxito. `409` si todavía tiene productos asignados
+(`GET .../products` de abajo para revisarlos) — hay que quitarlos primero. A
+diferencia de categorías no hay chequeo de "hijos" (no existen).
+
+#### `PUT /v1/admin/vehicles/{uuid}/products` — reemplazar los productos asignados
+
+```http
+PUT /v1/admin/vehicles/8f2c1a4e-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
+```
+
+Mismo comportamiento que el equivalente de categorías arriba: **reemplazo completo, no
+incremental** (una lista vacía quita todos), `productUuids` son `sicar_uuid` de
+`Product`, `404` si el vehículo no existe o si algún `productUuid` no resuelve a un
+producto real y no eliminado (nombrando cuáles).
+
+Respuesta `200`:
+```json
+{ "vehicleUuid": "8f2c1a4e-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
+```
+
+#### `GET /v1/admin/vehicles/{uuid}/products` — listar productos asignados
+
+```http
+GET /v1/admin/vehicles/8f2c1a4e-.../products?limit=60&offset=0
+X-Admin-Key: <admin-key>
+```
+
+Mismo shape/paginación que el equivalente de categorías. `404` si el vehículo no
+existe.
+
 ## Notas y advertencias
 
 - **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo

@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses, client_orders, cart, payments, admin, admin_categories
+from app.api.routes import products, orders, sessions, taxonomy, search, auth, addresses, client_orders, cart, payments, admin, admin_categories, admin_vehicles
 
 # Agrupa toda la API bajo /v1. Cada sub-router ya declara su propio tags=/dependencies=
 # en su archivo -- no se repiten aqui para evitar que las listas de tags se dupliquen
@@ -21,3 +21,4 @@ v1_router.include_router(payments.router)
 # validate_api_key - ver app/core/security.py y CLAUDE.md, seccion "Admin API".
 v1_router.include_router(admin.router)
 v1_router.include_router(admin_categories.router)
+v1_router.include_router(admin_vehicles.router)
