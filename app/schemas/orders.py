@@ -120,7 +120,6 @@ class OrderPublic(CamelModel):
     serie_folio: Optional[str]
     status: str
     dispatch_status: Optional[str] = Field(default=None, description="Estado de cumplimiento en Sicar X: PENDING_ACCEPTANCE, PENDING, PREPARING, COMPLETE o DISPATCHED")
-    dispatch_history: Optional[list[dict[str, Any]]] = Field(default=None, description="Historial de cambios de dispatch_status")
     total: float
     total_quantity: float
     delivery_info: dict[str, Any]

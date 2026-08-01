@@ -21,6 +21,7 @@ async def search(db: DbDep, filter_data: SearchFilter = Body()):
             db, filter_data.q, filter_data.limit, filter_data.offset,
             department_uuid=filter_data.department_uuid,
             category_uuid=filter_data.category_uuid,
+            taxonomy_uuid=filter_data.taxonomy_uuid,
             in_stock=filter_data.in_stock,
         )
         return result

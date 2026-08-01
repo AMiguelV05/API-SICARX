@@ -1,128 +1,62 @@
-import httpx
 import logging
-from datetime import datetime, timezone, timedelta
-from fastapi import HTTPException
-from sqlalchemy import select, func
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-from app.models.taxonomy import Department, Category, department_category
-from app.services.session_service import get_or_refresh_customer_session
-from app.core.sicar_headers import storefront_headers
-from app.core.upstream_errors import raise_upstream_error
+from app.models.taxonomy import Category
 
 logger = logging.getLogger(__name__)
 
-STORE_URL = "https://api.sicarx.com/store/"
-TAXONOMY_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
-STALE_AFTER = timedelta(hours=24)
 
-TAXONOMY_QUERY = """{
-    content {
-        catalog {
-            categories { name uuid }
-            departments { name order uuid selection { uuid order } }
-        }
-    }
-}"""
+class CategoryTreeNode:
+    """Nodo en memoria del arbol de categorias - no es el modelo ORM (evita
+    mutar `Category.children`, que SQLAlchemy ya usa para su propia relacion
+    perezosa)."""
 
-async def fetch_taxonomy_from_sicar() -> dict:
-    """Obtiene departamentos y categorias desde Sicar X usando una sesion de cliente anonima."""
-    session_data = await get_or_refresh_customer_session(None)
-    token = session_data["token"]
-    branch_id = session_data.get("branchId", 151456)
+    __slots__ = ("uuid", "name", "slug", "children")
 
-    headers = storefront_headers(token, content_type="application/graphql", branch_id=branch_id)
+    def __init__(self, uuid: str, name: str, slug: str):
+        self.uuid = uuid
+        self.name = name
+        self.slug = slug
+        self.children: list["CategoryTreeNode"] = []
 
-    async with httpx.AsyncClient(timeout=TAXONOMY_TIMEOUT) as client:
-        response = await client.post(STORE_URL, content=TAXONOMY_QUERY, headers=headers)
 
-    if response.status_code != 200:
-        raise_upstream_error(response, "Error obteniendo taxonomia de Sicar", "No se pudo obtener la taxonomía de Sicar X.")
+async def get_category_tree(db: AsyncSession) -> list[CategoryTreeNode]:
+    """Arbol completo de categorias, siempre desde Postgres - ya no hay
+    sincronizacion perezosa con Sicar X (ver CLAUDE.md, "Taxonomia": esta
+    tabla es administrada por humanos, no un cache de Sicar X). La tabla es
+    chica (decenas/cientos de filas incluso con 500k productos, es taxonomia
+    no dato por producto) asi que se trae completa en una sola consulta y el
+    arbol se arma en Python agrupando por `parent_uuid`, en vez de una consulta
+    recursiva - mas simple y mas que suficiente a este tamano."""
+    result = await db.execute(select(Category.uuid, Category.name, Category.slug, Category.parent_uuid))
+    rows = result.all()
 
-    payload = response.json()
-    if "errors" in payload:
-        raise_upstream_error(response, "Errores GraphQL obteniendo taxonomia", "No se pudo obtener la taxonomía de Sicar X.")
+    nodes = {row.uuid: CategoryTreeNode(row.uuid, row.name, row.slug) for row in rows}
+    roots: list[CategoryTreeNode] = []
+    for row in rows:
+        node = nodes[row.uuid]
+        if row.parent_uuid and row.parent_uuid in nodes:
+            nodes[row.parent_uuid].children.append(node)
+        else:
+            roots.append(node)
+    return roots
 
-    catalog = payload.get("data", {}).get("content", {}).get("catalog") or {}
-    return {
-        "departments": catalog.get("departments") or [],
-        "categories": catalog.get("categories") or [],
-    }
 
-async def _sync_taxonomy(db: AsyncSession):
-    """Sincroniza el cache local (departamentos, categorias y su relacion N:M) desde Sicar X."""
-    data = await fetch_taxonomy_from_sicar()
-    now = datetime.now(timezone.utc)
-    departments = data["departments"]
-    categories = data["categories"]
-
-    if categories:
-        category_values = [
-            {"uuid": c["uuid"], "name": c.get("name", ""), "updated_at": now}
-            for c in categories if c.get("uuid")
-        ]
-        stmt = insert(Category)
-        update_dict = {c.name: c for c in stmt.excluded if not c.primary_key}
-        stmt = stmt.on_conflict_do_update(index_elements=["uuid"], set_=update_dict)
-        await db.execute(stmt, category_values)
-
-    if departments:
-        department_values = [
-            {
-                "uuid": d["uuid"],
-                "name": d.get("name", ""),
-                "sort_order": d.get("order", 0),
-                "updated_at": now,
-            }
-            for d in departments if d.get("uuid")
-        ]
-        stmt = insert(Department)
-        update_dict = {c.name: c for c in stmt.excluded if not c.primary_key}
-        stmt = stmt.on_conflict_do_update(index_elements=["uuid"], set_=update_dict)
-        await db.execute(stmt, department_values)
-
-        link_values = [
-            {
-                "department_uuid": d["uuid"],
-                "category_uuid": sel["uuid"],
-                "sort_order": sel.get("order", 0),
-            }
-            for d in departments if d.get("uuid")
-            for sel in (d.get("selection") or [])
-            if sel.get("uuid")
-        ]
-        if link_values:
-            stmt = insert(department_category)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["department_uuid", "category_uuid"],
-                set_={"sort_order": stmt.excluded.sort_order},
-            )
-            await db.execute(stmt, link_values)
-
-    await db.commit()
-    logger.info(f"Taxonomia sincronizada: {len(departments)} departamentos, {len(categories)} categorias.")
-
-async def get_local_taxonomy(db: AsyncSession) -> list[Department]:
-    """
-    Devuelve departamentos con sus categorias desde Postgres. Si el cache esta vacio (primera
-    llamada) o tiene mas de 24h, se sincroniza completo con Sicar X antes de responder.
-    """
-    latest = await db.scalar(select(func.max(Department.updated_at)))
-    needs_refresh = latest is None or (datetime.now(timezone.utc) - latest) > STALE_AFTER
-
-    if needs_refresh:
-        logger.info("Cache de taxonomia vacio o desactualizado. Sincronizando con Sicar X...")
-        try:
-            await _sync_taxonomy(db)
-        except HTTPException:
-            if latest is None:
-                raise
-            logger.warning("Fallo al refrescar taxonomia; sirviendo cache existente.")
-
-    result = await db.execute(
-        select(Department)
-        .options(selectinload(Department.categories))
-        .order_by(Department.sort_order)
-    )
-    return list(result.scalars().unique().all())
+async def get_descendant_uuids(db: AsyncSession, category_uuid: str) -> list[str]:
+    """`{category_uuid} unido a todos sus descendientes`, via `WITH RECURSIVE`
+    - usado para que filtrar por un nodo padre (p. ej. "Motocicleta") tambien
+    devuelva productos etiquetados solo en un hijo (p. ej. "Encendido"). Una
+    CTE recursiva es la herramienta correcta aqui - una tabla de cierre
+    transitivo o nested sets serian optimizacion prematura para un arbol de
+    este tamano (ver CLAUDE.md)."""
+    query = text("""
+        WITH RECURSIVE descendants AS (
+            SELECT uuid FROM categories WHERE uuid = :category_uuid
+            UNION ALL
+            SELECT c.uuid FROM categories c
+            INNER JOIN descendants d ON c.parent_uuid = d.uuid
+        )
+        SELECT uuid FROM descendants
+    """)
+    result = await db.execute(query, {"category_uuid": category_uuid})
+    return [row[0] for row in result.all()]

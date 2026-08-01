@@ -2,23 +2,36 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, case
 from app.models.product import Product
+from app.models.taxonomy import product_categories
+from app.services.taxonomy_service import get_descendant_uuids
 
 logger = logging.getLogger(__name__)
 
 async def get_local_catalog(db: AsyncSession, filters: dict):
     # Consulta base: solo productos activos y no eliminados
     stmt = select(Product).where(
-        Product.is_deleted == False, 
+        Product.is_deleted == False,
         Product.is_active == True
     )
-    
+
     if filters.get("department_uuid"):
         logger.debug(f"Aplicando filtro por departamento: {filters['department_uuid']}")
         stmt = stmt.where(Product.department_uuid == filters["department_uuid"])
-    
+
     if filters.get("category_uuid"):
         logger.debug(f"Aplicando filtro por categoria: {filters['category_uuid']}")
         stmt = stmt.where(Product.category_uuid == filters["category_uuid"])
+
+    if filters.get("taxonomy_uuid"):
+        # Distinto de category_uuid arriba: ese es la clasificacion cruda de
+        # Sicar X (1 sola por producto); esto es el arbol propio (PIM, N:M via
+        # product_categories) - ver CLAUDE.md "Taxonomia". Incluye descendientes:
+        # filtrar por un nodo padre tambien devuelve productos etiquetados solo
+        # en un hijo.
+        descendant_uuids = await get_descendant_uuids(db, filters["taxonomy_uuid"])
+        stmt = stmt.where(Product.id.in_(
+            select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
 
     if filters.get("in_stock"):
         stmt = stmt.where(Product.stock > 0)
@@ -53,7 +66,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, in_stock: bool = False):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, in_stock: bool = False):
     """Busqueda por substring (case-insensitive) en sku o name, acelerada por los
     indices GIN de pg_trgm. Los resultados donde sku o name empiezan con `q` se
     ordenan primero, antes que las coincidencias que solo contienen `q` en medio.
@@ -76,6 +89,12 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
 
     if category_uuid:
         stmt = stmt.where(Product.category_uuid == category_uuid)
+
+    if taxonomy_uuid:
+        descendant_uuids = await get_descendant_uuids(db, taxonomy_uuid)
+        stmt = stmt.where(Product.id.in_(
+            select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
 
     if in_stock:
         stmt = stmt.where(Product.stock > 0)

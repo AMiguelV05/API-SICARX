@@ -72,7 +72,6 @@ class AdminOrderPublic(CamelModel):
     serie_folio: Optional[str]
     status: str
     dispatch_status: Optional[str] = None
-    dispatch_history: Optional[list[dict[str, Any]]] = None
     total: float
     total_quantity: float
     delivery_info: dict[str, Any]

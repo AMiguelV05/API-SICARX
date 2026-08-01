@@ -2,27 +2,28 @@ import logging
 from fastapi import APIRouter, Depends
 from app.core.database import DbDep
 from app.core.security import validate_api_key
-from app.services.taxonomy_service import get_local_taxonomy
-from app.schemas.taxonomy import TaxonomyResponse, DepartmentWithCategories, CategoryBasic
+from app.services.taxonomy_service import get_category_tree
+from app.schemas.taxonomy import TaxonomyResponse, CategoryNode
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Taxonomy"], dependencies=[Depends(validate_api_key)])
 
-@router.get("/taxonomy", response_model=TaxonomyResponse, summary="Departamentos y categorías para filtros")
+
+def _to_schema(node) -> CategoryNode:
+    return CategoryNode(
+        uuid=node.uuid,
+        name=node.name,
+        slug=node.slug,
+        children=[_to_schema(child) for child in node.children],
+    )
+
+
+@router.get("/taxonomy", response_model=TaxonomyResponse, summary="Arbol de categorias para navegacion/filtros")
 async def get_taxonomy(db: DbDep):
     """
-    Devuelve los departamentos y sus categorías asociadas, para construir filtros en el
-    frontend. Se sirve desde la base de datos local con refresco perezoso (cache de 24h).
+    Devuelve el arbol completo de categorias (PIM propio, ver CLAUDE.md
+    "Taxonomia") para construir navegacion/filtros en el frontend. Siempre
+    desde Postgres - ya no hay sincronizacion con Sicar X.
     """
-    departments = await get_local_taxonomy(db)
-    return TaxonomyResponse(
-        departments=[
-            DepartmentWithCategories(
-                uuid=d.uuid,
-                name=d.name,
-                order=d.sort_order,
-                categories=[CategoryBasic(uuid=c.uuid, name=c.name) for c in d.categories]
-            )
-            for d in departments
-        ]
-    )
+    roots = await get_category_tree(db)
+    return TaxonomyResponse(categories=[_to_schema(node) for node in roots])

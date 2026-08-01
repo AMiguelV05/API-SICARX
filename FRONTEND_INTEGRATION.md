@@ -85,7 +85,7 @@ después de armar el carrito sin sesión, por si el visitante inicia sesión o s
 2. POST /v1/session/init                             → obtener token de sesión de Sicar X (una vez)
 3. POST /v1/products                                 → mostrar catálogo / resultados de filtro
 4. GET  /v1/products/{uuid}                          → detalle al abrir una ficha de producto
-5. POST /v1/orders                                   → reservar el pedido en Sicar X (queda TO_PAY) + preparar el cobro
+5. POST /v1/orders                                   → reservar el pedido localmente (queda TO_PAY) + preparar el cobro
 6. Renderizar el Payment Brick (Mercado Pago) con `amount`/`preferenceId` del paso 5
 7. POST /v1/orders/{order_id}/pay                    → cobrar (tarjeta/OXXO — el Brick llama a esto en su onSubmit)
    (el método Wallet de Mercado Pago NO llama a este paso — redirige directo a Mercado Pago)
@@ -93,10 +93,20 @@ después de armar el carrito sin sesión, por si el visitante inicia sesión o s
 ```
 
 **Importante — esto es un cambio incompatible sobre el flujo anterior**: `POST /v1/orders`
-ya **no** cobra ni deja el pedido pagado de inmediato — ahora solo lo reserva en Sicar X
+ya **no** cobra ni deja el pedido pagado de inmediato — ahora solo lo reserva localmente
 (`status: "TO_PAY"`) y prepara una preferencia de Mercado Pago. El pago real ocurre en el
 paso 7 (`POST /v1/orders/{order_id}/pay`) o, si el comprador elige pagar con su cuenta de
 Mercado Pago (Wallet), nunca pasa por este backend en absoluto — se confirma por webhook.
+
+**Importante — segundo cambio incompatible (2026-07-31): Sicar X ya no se entera de un
+pedido en absoluto hasta que un administrador lo acepta.** Antes, `POST /v1/orders` creaba
+un documento real en Sicar X en el acto; ahora Sicar X pasó a ser solo el ERP de inventario
+de la tienda — no sabe que este pedido existe hasta que se acepta del lado del dashboard
+admin (ver `ADMIN_INTEGRATION.md`), momento en el que este backend le avisa el descuento de
+inventario correspondiente de forma asíncrona. Esto no cambia ningún endpoint que ya uses
+tal cual — el contrato de `POST /v1/orders`, `/pay` y `/cancel` es el mismo — pero sí cambia
+el significado de algunos campos de la respuesta, ver la nota junto al ejemplo de respuesta
+más abajo.
 Ver "Pagos con Mercado Pago" más abajo.
 
 `/v1/session/init` normalmente se llama **una sola vez** al iniciar la sesión de compra (p. ej. al
@@ -476,8 +486,8 @@ Respuesta `200`:
   "docs": [
     {
       "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-      "sicarOrderId": "6a55165ada77fe7cd25d39e3",
-      "serieFolio": "TL518",
+      "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+      "serieFolio": null,
       "status": "PAID",
       "dispatchStatus": "PENDING_ACCEPTANCE",
       "dispatchHistory": null,
@@ -869,7 +879,7 @@ con una versión más vieja de este backend, esta es la causa más probable.
 
 **`Idempotency-Key` (header, opcional, recomendado).** Un reintento de red o un doble-click en
 "pagar" puede reenviar el mismo `POST /v1/orders` — sin este header, cada intento crea una orden
-nueva en Sicar X. Si se envía, genera un UUID una sola vez por click en el botón de checkout y
+local nueva (y descuenta el catálogo local otra vez). Si se envía, genera un UUID una sola vez por click en el botón de checkout y
 reenvía **exactamente el mismo valor** en cualquier reintento automático de esa misma solicitud
 (no uno nuevo por reintento). Si la clave ya se usó antes para este cliente:
 - Si la orden original ya terminó de crearse, se devuelve esa misma orden (mismo `200`, mismos
@@ -926,9 +936,9 @@ entrega — sigue siendo solo el total de productos.
 Respuesta `200`:
 ```json
 {
-  "id": "6a55165ada77fe7cd25d39e3",
-  "serieFolio": "TL518",
-  "date": 1783961178060.0,
+  "id": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "serieFolio": null,
+  "date": null,
   "status": "TO_PAY",
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "preferenceId": "123456789-abcdef01-2345-6789-abcd-ef0123456789",
@@ -936,7 +946,18 @@ Respuesta `200`:
 }
 ```
 
-**Esta llamada ya NO cobra ni deja el pedido pagado** — solo lo reserva en Sicar X (`status`
+**Importante (2026-07-31) — `id`/`serieFolio`/`date` cambiaron de significado**, aunque
+siguen presentes con los mismos nombres:
+- `id` ya **no** es un identificador emitido por Sicar X — se genera localmente en este
+  backend. Sigue siendo un string único que debes guardar y usar tal cual como `{order_id}`
+  en `POST /v1/orders/{order_id}/pay` y `/cancel`, exactamente igual que antes — pero si
+  tenías alguna validación de formato (longitud, solo-hexadecimal, etc.) asumiendo el formato
+  viejo de Sicar X, quítala: ahora es un UUID v4 estándar (con guiones).
+- `serieFolio` y `date` ahora **siempre vienen `null`** — ya no existe ningún documento en
+  Sicar X del que puedan salir. Si los mostrabas en algún lado (p. ej. un folio en la
+  confirmación de pedido), esa UI necesita quitar o reemplazar esos campos.
+
+**Esta llamada ya NO cobra ni deja el pedido pagado** — solo lo reserva localmente (`status`
 viene `"TO_PAY"`) y prepara el cobro con Mercado Pago. **Guarda `id`** — se usa como
 `{order_id}` tanto en `POST /v1/orders/{order_id}/pay` (siguiente paso) como en
 `POST /v1/orders/{order_id}/cancel`. **Guarda `orderUuid`** — identificador local del pedido,
@@ -953,7 +974,9 @@ Errores esperables:
   seleccionada existe pero le faltan campos necesarios para la entrega
 - `404` — (para `DELIVERYMAN`) `addressUuid` no existe o no pertenece a la cuenta autenticada
 - `409` — uno o más productos sin disponibilidad suficiente
-- `502` — Sicar X rechazó la orden (reintenta más tarde)
+- `502` — Sicar X rechazó la validación de precio/disponibilidad del carrito (reintenta más
+  tarde) — ya no significa "Sicar X rechazó la orden": Sicar X no ve ninguna orden en este
+  paso, solo se consulta para confirmar precio y stock en tiempo real antes de crearla.
 
 ## Pagos con Mercado Pago (Checkout Bricks)
 
@@ -1023,8 +1046,8 @@ token de auth — aquí no hay token, así que van explícitos en el body:
 ```json
 {
   "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "6a55165ada77fe7cd25d39e3",
-  "serieFolio": "TL518",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "serieFolio": null,
   "status": "PAID",
   "dispatchStatus": "PENDING_ACCEPTANCE",
   "dispatchHistory": null,
@@ -1067,9 +1090,10 @@ No la repetimos aquí — consulta la sección de `order-confirmed` arriba.
 **Body**: mismo shape que `order-confirmed` (un elemento de `GET /v1/auth/me/orders/{orderUuid}`
 más `clientEmail`/`clientName`), con `"status": "CANCELLED"`.
 
-**Importante — la cancelación en Sicar X puede seguir en curso cuando llega este
-webhook.** La cancelación local ya es un hecho consumado antes de que Sicar X confirme
-nada — ver la nota sobre `sicarTimestamp`/sincronización asíncrona en
+**Importante — si el pedido ya había sido aceptado por un administrador, avisarle a Sicar X
+puede seguir en curso cuando llega este webhook** (y si nunca fue aceptado, no se le avisa
+nada a Sicar X en absoluto). La cancelación local ya es un hecho consumado de cualquier forma
+— ver la nota sobre `sicarTimestamp`/sincronización asíncrona en
 `POST /v1/orders/{order_id}/cancel` más abajo, no la repetimos aquí. Para el correo al
 cliente esto no importa: la cancelación ya es definitiva de su lado en cuanto reciben
 esta notificación.
@@ -1163,7 +1187,7 @@ de `404` que `/cancel`, no confirma si el pedido existe pero es de otra cuenta).
 es el `id` que devolvió `POST /v1/orders`.
 
 ```http
-POST /v1/orders/6a55165ada77fe7cd25d39e3/pay
+POST /v1/orders/d65b89dc-9690-40b3-8dfb-aa2cdde18cc0/pay
 x-api-key: <api-key>
 X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 Content-Type: application/json
@@ -1197,7 +1221,10 @@ Respuesta `200`:
 ```
 
 `status` es el estado local del pedido después del intento de cobro:
-- `"PAID"` — aprobado. El pedido ya quedó pagado también en Sicar X.
+- `"PAID"` — aprobado. **(2026-07-31)** Esto ya no toca Sicar X en absoluto — el pago vive
+  solo en Mercado Pago y en este backend; Sicar X se entera del pedido más adelante, solo si
+  un administrador lo acepta (ver `ADMIN_INTEGRATION.md`), y solo se le avisa un descuento de
+  inventario, nunca un pago.
 - `"TO_PAY"` — pendiente (tarjeta en revisión, o pago OXXO esperando que el comprador pague en
   tienda). `ticketUrl` viene con la liga al comprobante/código de barras para métodos OXXO —
   muéstrala al comprador para que pueda completar el pago. El pedido se confirma después via
@@ -1220,7 +1247,7 @@ Mercado Pago asociado, esta llamada también lo reembolsa (si ya estaba aprobado
 para eso.
 
 ```http
-POST /v1/orders/6a55165ada77fe7cd25d39e3/cancel
+POST /v1/orders/d65b89dc-9690-40b3-8dfb-aa2cdde18cc0/cancel
 x-api-key: <api-key>
 X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 Content-Type: application/json
@@ -1253,7 +1280,7 @@ siempre a partir de lo que quedó guardado del pedido original en el servidor, n
 Respuesta `200`:
 ```json
 {
-  "documentUuid": "6a55165ada77fe7cd25d39e3",
+  "documentUuid": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
   "sicarTimestamp": 1783961225017.0,
   "message": "Pedido cancelado exitosamente.",
   "status": "CANCELLED"
@@ -1262,11 +1289,18 @@ Respuesta `200`:
 
 **Importante — esta respuesta ya no espera a Sicar X.** El pedido queda `CANCELLED` y el
 stock restaurado de inmediato en cuanto responde esta llamada (así un Sicar X caído nunca
-bloquea que un cliente cancele), pero avisarle a Sicar X ahora ocurre de forma asíncrona
-del lado del backend, con reintentos. `sicarTimestamp` pasó a significar "cuándo se aceptó
-la cancelación localmente", ya no "cuándo lo confirmó Sicar X" — para el frontend esto no
-cambia nada práctico, la cancelación ya es definitiva desde el punto de vista del cliente
-en cuanto llega esta respuesta `200`.
+bloquea que un cliente cancele). `sicarTimestamp` significa "cuándo se aceptó la cancelación
+localmente", nunca una confirmación de Sicar X — para el frontend esto no cambia nada
+práctico, la cancelación ya es definitiva desde el punto de vista del cliente en cuanto llega
+esta respuesta `200`.
+
+**Actualización (2026-07-31)**: si el pedido nunca llegó a ser aceptado por un administrador
+(el caso normal para casi cualquier cancelación — el cliente suele cancelar antes de que
+alguien lo revise), esta cancelación **no le avisa nada a Sicar X en absoluto**, porque Sicar X
+nunca supo que este pedido existía. Solo si el pedido ya había sido aceptado (ver
+`ADMIN_INTEGRATION.md`) se encola un aviso asíncrono a Sicar X para revertir el descuento de
+inventario que se le había avisado al aceptarlo. Ninguno de los dos casos cambia la respuesta
+que ves aquí ni requiere ningún manejo distinto del lado del frontend.
 
 Errores esperables:
 - `401` — falta o es inválido `X-Client-Token`
@@ -1290,12 +1324,14 @@ sigue desapareciendo de `GET /v1/auth/me/orders` en el acto.
 Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
 (mismo criterio que `/cancel`). Solo funciona sobre pedidos en `status: "TO_PAY"` — `409` si el
 pedido ya está `PAID` o `CANCELLED` (esos no se pueden borrar). No lleva body: el stock a
-restaurar y el registro de Sicar X ya se toman de lo guardado al crear el pedido, y si había un
-pago de Mercado Pago pendiente (OXXO sin pagar, tarjeta en revisión) se cancela automáticamente,
-igual que en `/cancel`.
+restaurar ya se toma de lo guardado al crear el pedido, y si había un pago de Mercado Pago
+pendiente (OXXO sin pagar, tarjeta en revisión) se cancela automáticamente, igual que en
+`/cancel`. **(2026-07-31)**: un pedido en `TO_PAY` nunca pudo haber sido aceptado por un
+administrador (eso requiere `status: "PAID"`), así que esta ruta nunca le avisa nada a Sicar
+X — a diferencia de `/cancel`, aquí no hay ni siquiera el caso condicional.
 
 ```http
-DELETE /v1/orders/6a55165ada77fe7cd25d39e3
+DELETE /v1/orders/d65b89dc-9690-40b3-8dfb-aa2cdde18cc0
 x-api-key: <api-key>
 X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 ```
@@ -1398,7 +1434,7 @@ async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
   return res.json();
 }
 
-// Ya NO cobra -- solo reserva el pedido en Sicar X (TO_PAY) y prepara el cobro con
+// Ya NO cobra -- solo reserva el pedido localmente (TO_PAY) y prepara el cobro con
 // Mercado Pago. Renderiza el Payment Brick con el `amount`/`preferenceId` de la respuesta.
 async function createOrder(sessionToken: string, clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
   const res = await fetch(`${API_URL}/v1/orders`, {

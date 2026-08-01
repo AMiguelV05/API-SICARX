@@ -30,8 +30,8 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
     `sicar_order_id` (columna NOT NULL/unica, tambien el identificador publico que el
     frontend usa en las URLs de /pay y /cancel) ya NO viene de una respuesta real de
     Sicar X - checkout no le avisa nada a Sicar X todavia - asi que se genera aqui mismo
-    con `uuid.uuid4()`. `serie_folio`/`sicar_date` se quedan en None para siempre: no hay
-    ningun documento de Sicar X del que puedan salir.
+    con `uuid.uuid4()`. `serie_folio` se queda en None para siempre: no hay ningun
+    documento de Sicar X del que pueda salir.
 
     `local_products` (sicar_uuid -> Product, el mismo dict ya cargado en routes/orders.py
     para build_order_payload) se usa solo para agregar `imageUrl` a cada item guardado

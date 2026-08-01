@@ -9,6 +9,7 @@ class LocalCatalogFilter(CamelModel):
     offset: int = Field(default=0, ge=0, description="Paginación (inicio)")
     department_uuid: Optional[str] = None
     category_uuid: Optional[str] = None
+    taxonomy_uuid: Optional[str] = Field(default=None, description="UUID de un nodo del arbol de categorias propio (PIM, GET /taxonomy) - distinto de category_uuid (clasificacion cruda de Sicar X). Incluye productos etiquetados en descendientes del nodo.")
     tag: Optional[str] = None
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
     sort_by: Optional[Literal["price_asc", "price_desc", "name_asc"]] = Field(

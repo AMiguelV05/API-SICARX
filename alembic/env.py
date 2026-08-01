@@ -11,7 +11,7 @@ from alembic import context
 from app.core.config import settings
 from app.core.database import Base
 from app.models.product import Product
-from app.models.taxonomy import Department, Category, department_category
+from app.models.taxonomy import Category, product_categories
 from app.models.client import ClientAccount, ClientAddress
 from app.models.order import Order
 from app.models.cart import Cart

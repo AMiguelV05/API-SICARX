@@ -22,14 +22,13 @@ class Order(Base):
     # conserva para no romper el contrato de URL con el frontend (POST /orders/{id}/pay,
     # /cancel) - ver CLAUDE.md, "SICAR es solo ERP de inventario".
     sicar_order_id = Column(String, unique=True, index=True, nullable=False)
-    # Deprecado/sin uso: existia para cachear el uuid RFC4122 real de un documento de
-    # Sicar X que ya no se crea nunca (antes lo exigia /documents/v1/sale/cancel, ver
-    # cancel_service.py antes de este cambio). Ninguna orden nueva lo pobla.
-    sicar_document_uuid = Column(String, nullable=True)
-    # Deprecado/sin uso por la misma razon: no hay ningun documento de Sicar X del que
-    # puedan salir.
+    # serie_folio: sin uso por la misma razon que sicar_order_id de arriba es
+    # generado localmente ahora - no hay ningun documento de Sicar X del que
+    # pueda salir un folio real. Se conserva (a diferencia de sicar_document_uuid/
+    # sicar_date, eliminadas) porque sigue expuesta en OrderPublic/AdminOrderPublic
+    # y leida en el reintento de idempotencia de POST /orders - drop cuando se
+    # limpie ese contrato tambien.
     serie_folio = Column(String, nullable=True)
-    sicar_date = Column(DateTime(timezone=True), nullable=True)
 
     # PAID: pagado (via Mercado Pago o legado); TO_PAY: orden creada en Sicar pero el
     # pago con Mercado Pago sigue pendiente/en proceso (OXXO, wallet, tarjeta en
@@ -42,7 +41,6 @@ class Order(Base):
     # una orden real, ver CLAUDE.md). Distinto de `status` (arriba), que es nuestro propio
     # tracking de pago/cancelacion - dos dimensiones separadas del mismo documento en Sicar.
     dispatch_status = Column(String, nullable=True)
-    dispatch_history = Column(JSON, nullable=True)
 
     branch_id = Column(Integer, nullable=True)
     total = Column(Numeric(10, 2), nullable=False)
@@ -182,9 +180,6 @@ class SicarSyncOutbox(Base):
     action = Column(String, nullable=False)  # "CANCEL"/"ACCEPT" hoy
     cash_register_uuid = Column(String, nullable=False)
     status = Column(String, nullable=False, default="PENDING")  # PENDING/IN_PROGRESS/SUCCEEDED/FAILED
-    # Deprecado/sin uso: existia para la accion "SYNC_DISPATCH_STATUS", eliminada junto
-    # con el resto del mirroring de dispatch_status hacia Sicar X.
-    target_dispatch_status = Column(String, nullable=True)
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(String, nullable=True)
     next_attempt_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
