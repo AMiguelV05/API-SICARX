@@ -882,6 +882,115 @@ Respuesta `200` (lista simple, sin paginar):
 `[]` si el producto existe pero no tiene ningún vehículo asignado. `404` si el
 `productUuid` no corresponde a un producto real y no eliminado.
 
+### Importación masiva por Excel
+
+#### `GET /v1/admin/bulk-import/template` — descargar una plantilla de ejemplo
+
+```http
+GET /v1/admin/bulk-import/template
+X-Admin-Key: <admin-key>
+```
+
+Respuesta `200`: el archivo `.xlsx` en sí (`Content-Type:
+application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, no JSON), con
+`Content-Disposition: attachment; filename=plantilla_importacion_masiva.xlsx` — un botón
+"Descargar plantilla" en el dashboard puede apuntar directo aquí. Trae las mismas dos
+hojas/columnas que `POST .../products` espera (nunca puede desalinearse: ambos lados
+comparten las mismas constantes en `bulk_import_service.py`), con encabezados en negritas,
+comentarios de celda explicando las columnas menos obvias (`categorySlug`, `make`/`model`
+insensibles a mayúsculas, `year` como año único no rango, `engine`/`vehicleType`
+opcionales), y una o dos filas de ejemplo con datos **claramente ficticios** (`sku`
+`"SKU-EJEMPLO-1"`, marca `"Marca-Ejemplo"`, etc.) — hay que reemplazarlas o borrarlas
+antes de subir datos reales; si se sube tal cual sin editar, cada fila de ejemplo
+simplemente sale como un error por fila (nada coincide con datos ficticios), no un fallo
+del archivo completo.
+
+`POST /v1/admin/bulk-import/products` — asigna categorías y/o compatibilidad de
+vehículos a muchos productos de una sola vez desde un archivo `.xlsx`, en vez de una
+asignación a la vez vía los endpoints de arriba. Pensado para poblar `product_categories`/
+`product_vehicles` sobre el catálogo real (hoy ambas siguen vacías — ver CLAUDE.md).
+
+```http
+POST /v1/admin/bulk-import/products
+X-Admin-Key: <admin-key>
+Content-Type: multipart/form-data
+
+file: <archivo .xlsx>
+```
+
+El archivo puede traer una o ambas de estas hojas (por nombre exacto, sin importar en qué
+orden estén dentro del archivo); si falta una, se trata como "0 filas" para esa hoja, no
+como error:
+
+- **`Categorias`** — columnas `sku`, `categorySlug`.
+- **`Vehiculos`** — columnas `sku`, `make`, `model`, `year`, y opcionalmente `vehicleType`
+  (`AUTOMOTIVE`/`MOTORCYCLE`) y `engine`.
+
+Cada fila es una sola asignación (formato largo, no una lista de categorías por celda).
+`sku` se busca primero contra `Product.sku` y, si no aparece ahí, contra
+`Product.additionalSkus` — nunca contra el `sicarUuid` interno. La comparación de `sku`,
+`make`, `model` y `engine` **no distingue mayúsculas/minúsculas** (el catálogo de
+`vehicles` tiene casing inconsistente entre filas, p. ej. `"ITALIKA"` vs. `"Chevrolet"`,
+y no tendría sentido que un admin fallara por escribir "honda" en vez de "Honda").
+`categorySlug` sí distingue mayúsculas/minúsculas (los slugs ya salen siempre en
+minúscula del slugify existente, así que no hay nada realista que pueda desalinearse ahí).
+
+En la hoja `Vehiculos`, `year` es **un solo año** (no un rango `yearStart`/`yearEnd`) —
+se resuelve contra los fitments ya existentes cuyo rango contenga ese año, exactamente
+igual que `POST /admin/vehicles/assign-by-model` de arriba. Si `engine` se omite, la fila
+aplica a **todas** las variantes de motor de esa marca/modelo/año.
+
+**Aditivo, no reemplazo** — igual que `assign-by-model`: los vínculos ya existentes de un
+producto (de esta u otra carga) nunca se eliminan, solo se agregan los nuevos. Subir el
+mismo archivo dos veces es seguro — la segunda vez `assignedCount` da `0` en ambas hojas
+sin duplicar nada ni fallar (`ON CONFLICT DO NOTHING` sobre las mismas PKs compuestas que
+usa `assign-by-model`).
+
+**Éxito parcial, no todo-o-nada** — una fila inválida (SKU inexistente, slug de categoría
+inexistente, ningún vehículo coincide) no bloquea el resto del archivo: se omite esa fila
+y se reporta en `errors`, el resto de las filas válidas se aplican igual. Solo un problema
+a nivel de archivo completo (no es un `.xlsx` real, faltan ambas hojas, o una hoja presente
+le falta una columna requerida) rechaza la solicitud entera.
+
+Respuesta `200`:
+```json
+{
+  "categories": {
+    "found": true,
+    "processedRows": 120,
+    "assignedCount": 118,
+    "errors": [
+      { "sheet": "Categorias", "row": 47, "reasonCode": "SKU_NOT_FOUND", "reason": "SKU no encontrado: ABC-999.", "sku": "ABC-999" }
+    ]
+  },
+  "vehicles": {
+    "found": true,
+    "processedRows": 340,
+    "assignedCount": 336,
+    "errors": [
+      { "sheet": "Vehiculos", "row": 12, "reasonCode": "VEHICLE_NOT_FOUND", "reason": "No se encontro ningun vehiculo para Honda Civic 1990.", "sku": "PR2057" }
+    ]
+  }
+}
+```
+`found: false` en cualquiera de las dos (en vez de `errors` vacío) significa que esa hoja
+no venía en el archivo, distinto de "venía pero con 0 filas de datos". `assignedCount`
+son vínculos **nuevos** realmente insertados — no cuenta pares que ya existían de una
+carga anterior, así que puede ser menor a `processedRows` incluso sin ningún error (fila
+válida mandada dos veces, o vínculo ya creado por otra vía como `assign-by-model`).
+
+Errores de fila (`errors[].reasonCode`): `MISSING_FIELDS` (celda requerida vacía),
+`SKU_NOT_FOUND`, `CATEGORY_SLUG_NOT_FOUND`, `INVALID_YEAR` (`year` no es un entero),
+`VEHICLE_NOT_FOUND` (ningún fitment coincide con marca/modelo/año/motor — también cubre
+un `vehicleType` mal escrito, que da el mismo resultado observable que no coincidir).
+
+Errores de archivo completo (rechazan toda la solicitud, no generan `errors` por fila):
+- `400` si el archivo no es un `.xlsx` válido, o pesa más de 15 MB.
+- `400` si no contiene ninguna hoja `Categorias` ni `Vehiculos`.
+- `400` si alguna hoja excede 20,000 filas de datos.
+- `422` si una hoja presente no tiene todas sus columnas requeridas (nombra la hoja y las
+  columnas que faltan).
+
 ## Notas y advertencias
 
 - **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo
