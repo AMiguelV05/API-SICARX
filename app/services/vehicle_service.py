@@ -2,7 +2,8 @@ import logging
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, delete, insert, or_, text
+from sqlalchemy import select, func, delete, insert, or_, and_, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.vehicle import Vehicle, product_vehicles
 from app.models.product import Product
@@ -161,6 +162,97 @@ async def get_vehicles_for_product(db: AsyncSession, product_uuid: str) -> list[
     ).order_by(Vehicle.make, Vehicle.model, Vehicle.year_start)
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def get_distinct_models_for_years(db: AsyncSession, *, make: str, years: list[int], vehicle_type: str | None = None) -> list[str]:
+    """Modelos de `make` disponibles para TODOS los anios en `years` (interseccion, no
+    union) - pensado para la pantalla admin de asignacion masiva: el admin selecciona
+    varios anios y solo debe poder elegir un modelo que exista en cada uno de ellos, no
+    solo en alguno. Mismo patron de `generate_series` que `get_distinct_years`, pero
+    agrupado por modelo y filtrado con `HAVING COUNT(DISTINCT y) = :num_years` para exigir
+    cobertura completa en vez de solo alguna."""
+    distinct_years = sorted(set(years))
+    current_year = datetime.now(timezone.utc).year
+    query = text("""
+        SELECT model
+        FROM vehicles v, generate_series(v.year_start, COALESCE(v.year_end, :current_year)) AS y
+        WHERE v.make = :make
+          AND (CAST(:vehicle_type AS VARCHAR) IS NULL OR v.vehicle_type = CAST(:vehicle_type AS VARCHAR))
+          AND y = ANY(CAST(:years AS INTEGER[]))
+        GROUP BY model
+        HAVING COUNT(DISTINCT y) = :num_years
+        ORDER BY model
+    """)
+    result = await db.execute(query, {
+        "make": make,
+        "vehicle_type": vehicle_type,
+        "years": distinct_years,
+        "current_year": current_year,
+        "num_years": len(distinct_years),
+    })
+    return [row[0] for row in result.all()]
+
+
+async def assign_products_to_model_years(
+    db: AsyncSession,
+    *,
+    make: str,
+    model: str,
+    years: list[int],
+    vehicle_type: str | None = None,
+    engine: str | None = None,
+    product_uuids: list[str],
+) -> tuple[list[str], list[str], int]:
+    """Asignacion masiva ADITIVA (a diferencia de `replace_vehicle_products`, no reemplaza
+    lo ya asignado a cada fitment) - agrega `product_uuids` a TODOS los fitments de
+    `make`/`model` cuyo rango de anios toque alguno de `years`, sin que el admin tenga que
+    conocer/elegir cada uuid de vehiculo individualmente (p. ej. una pastilla de freno que
+    aplica al Civic 2012-2015 sin importar el motor). `engine` es opcional - si se omite,
+    aplica a todas las variantes de motor de ese make/model/anios.
+
+    Devuelve (vehicle_uuids resueltos, product_uuids resueltos, cantidad de vinculos
+    (vehiculo, producto) nuevos realmente insertados) - pares que ya existian de una
+    asignacion previa se ignoran via `ON CONFLICT DO NOTHING` sobre la PK compuesta de
+    `product_vehicles`, no cuentan como error ni se duplican (idempotente ante reintentos)."""
+    unique_product_uuids = sorted(set(product_uuids))
+    result = await db.execute(
+        select(Product.id, Product.sicar_uuid).where(Product.sicar_uuid.in_(unique_product_uuids), Product.is_deleted == False)
+    )
+    found = {row.sicar_uuid: row.id for row in result.all()}
+    missing = [u for u in unique_product_uuids if u not in found]
+    if missing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Productos no encontrados: {', '.join(missing)}")
+    product_ids = [found[u] for u in unique_product_uuids]
+
+    year_conditions = [
+        and_(Vehicle.year_start <= y, or_(Vehicle.year_end.is_(None), Vehicle.year_end >= y))
+        for y in sorted(set(years))
+    ]
+    stmt = select(Vehicle).where(Vehicle.make == make, Vehicle.model == model, or_(*year_conditions))
+    if vehicle_type:
+        stmt = stmt.where(Vehicle.vehicle_type == vehicle_type)
+    if engine:
+        stmt = stmt.where(Vehicle.engine == engine)
+
+    result = await db.execute(stmt)
+    vehicles = list(result.scalars().all())
+    if not vehicles:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No se encontraron vehiculos para esa combinacion de marca/modelo/anios.")
+
+    rows = [{"vehicle_uuid": v.uuid, "product_id": pid} for v in vehicles for pid in product_ids]
+    insert_stmt = pg_insert(product_vehicles).values(rows).on_conflict_do_nothing(
+        index_elements=["vehicle_uuid", "product_id"]
+    ).returning(product_vehicles.c.vehicle_uuid)
+    insert_result = await db.execute(insert_stmt)
+    inserted_count = len(insert_result.all())
+    await db.commit()
+
+    vehicle_uuids = sorted({v.uuid for v in vehicles})
+    logger.info(
+        f"Asignacion masiva via /admin: {len(unique_product_uuids)} producto(s) -> "
+        f"{make} {model} anios={years} -> {len(vehicle_uuids)} vehiculo(s), {inserted_count} vinculo(s) nuevos."
+    )
+    return vehicle_uuids, unique_product_uuids, inserted_count
 
 
 # --- Publico (/v1/vehicles/*) - facets en cascada para un selector de vehiculo -------------

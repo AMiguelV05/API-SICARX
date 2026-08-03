@@ -774,6 +774,85 @@ Respuesta `200`:
 { "vehicleUuid": "8f2c1a4e-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
 ```
 
+#### `GET /v1/admin/vehicles/models-for-years` — modelos disponibles en varios años a la vez
+
+```http
+GET /v1/admin/vehicles/models-for-years?make=Honda&vehicleType=AUTOMOTIVE&years=2012&years=2013&years=2014
+X-Admin-Key: <admin-key>
+```
+
+Primer paso de la asignación masiva de abajo: dado `make` y una lista de `years`
+(repetir el parámetro por cada año), devuelve solo los modelos que existen en **todos**
+esos años a la vez (intersección, no unión) — así el admin no puede elegir un modelo
+que en realidad no cubre uno de los años que seleccionó. Compárese con el selector
+público en cascada (`GET /v1/vehicles/years`/`/models`), que resuelve un año a la vez;
+este endpoint es admin-only y existe específicamente para alimentar la asignación
+masiva de abajo.
+
+Respuesta `200`:
+```json
+{ "docs": ["Civic", "Accord", "Cr-V"] }
+```
+Lista vacía si ningún modelo de esa marca cubre todos los años dados.
+
+#### `POST /v1/admin/vehicles/assign-by-model` — asignar productos a un modelo a través de varios años
+
+```http
+POST /v1/admin/vehicles/assign-by-model
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{
+  "vehicleType": "AUTOMOTIVE",
+  "make": "Honda",
+  "model": "Civic",
+  "years": [2012, 2013, 2014],
+  "engine": null,
+  "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"]
+}
+```
+
+Resuelve **todos** los fitments de `make`/`model` (y `vehicleType` si se manda) cuyo
+rango `yearStart`–`yearEnd` toque **alguno** de los `years` dados, y les agrega los
+`productUuids` — pensado para "esta pastilla de freno le queda al Civic 2012-2014" sin
+que el admin tenga que buscar/elegir cada `uuid` de vehículo (motor por motor, año por
+año) uno por uno. `model` normalmente sale de `GET .../models-for-years` de arriba, ya
+filtrado a modelos que sí cubren todos esos años.
+
+**A diferencia de `PUT /admin/vehicles/{uuid}/products` (que reemplaza el conjunto
+completo de UN vehículo), esta asignación es aditiva**: agrega los productos a cada
+fitment que coincide sin tocar lo que ese fitment ya tuviera asignado de antes (de este
+u otro producto) — necesario porque esta operación toca muchos vehículos a la vez, y un
+reemplazo por-vehículo aquí borraría silenciosamente asignaciones de otros productos en
+esos mismos fitments. Repetir la misma llamada es seguro (idempotente) — pares
+vehículo-producto que ya existían de una asignación previa se ignoran, no se duplican
+ni cuentan como error.
+
+`engine` es opcional — si se omite, la asignación aplica a **todas** las variantes de
+motor de ese make/model/años (p. ej. las 4 variantes de motor que puede tener el Civic
+2012); si se manda, solo a los fitments con ese `engine` exacto.
+
+Respuesta `200`:
+```json
+{
+  "make": "Honda",
+  "model": "Civic",
+  "years": [2012, 2013, 2014],
+  "engine": null,
+  "vehicleUuids": ["...", "...", "..."],
+  "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"],
+  "assignedCount": 11
+}
+```
+`vehicleUuids` son todos los fitments que coincidieron (para que el dashboard pueda
+mostrar/confirmar cuáles). `assignedCount` es la cantidad de vínculos (vehículo,
+producto) realmente nuevos — puede ser menor a `vehicleUuids.length * productUuids.length`
+si alguna combinación ya existía de una asignación anterior.
+
+- `404` si algún `productUuid` no resuelve a un producto real y no eliminado (nombrando
+  cuáles), o si ningún fitment coincide con la combinación de marca/modelo/años(/motor)
+  dada.
+
 #### `GET /v1/admin/vehicles/{uuid}/products` — listar productos asignados
 
 ```http

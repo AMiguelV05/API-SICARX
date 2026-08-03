@@ -4,13 +4,17 @@ from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
 from app.core.security import validate_admin_key
 from app.schemas.vehicle import (
+    VehicleType,
     VehiclePublic,
     VehicleCreateRequest,
     VehicleUpdateRequest,
     VehicleListResponse,
+    VehicleModelsResponse,
     ReplaceVehicleProductsRequest,
     ReplaceVehicleProductsResponse,
     VehicleProductsResponse,
+    AssignProductsToModelRequest,
+    AssignProductsToModelResponse,
 )
 from app.schemas.products import ProductBasic
 from app.services import vehicle_service
@@ -29,6 +33,39 @@ async def admin_create_vehicle(db: DbDep, data: VehicleCreateRequest = Body()):
 async def admin_list_product_vehicles(product_uuid: str, db: DbDep):
     vehicles = await vehicle_service.get_vehicles_for_product(db, product_uuid)
     return [VehiclePublic.model_validate(v) for v in vehicles]
+
+
+@router.get("/models-for-years", response_model=VehicleModelsResponse, summary="Modelos de una marca disponibles en TODOS los anios dados (interseccion, para asignacion masiva)")
+async def admin_list_models_for_years(
+    db: DbDep,
+    make: str = Query(...),
+    years: List[int] = Query(..., description="Repetir el parametro por cada anio, p. ej. ?years=2012&years=2013"),
+    vehicle_type: Optional[VehicleType] = Query(default=None, alias="vehicleType"),
+):
+    docs = await vehicle_service.get_distinct_models_for_years(db, make=make, years=years, vehicle_type=vehicle_type)
+    return VehicleModelsResponse(docs=docs)
+
+
+@router.post("/assign-by-model", response_model=AssignProductsToModelResponse, summary="Asignar productos a todos los fitments de un modelo que toquen alguno de los anios dados (aditivo, no reemplaza)")
+async def admin_assign_products_by_model(db: DbDep, data: AssignProductsToModelRequest = Body()):
+    vehicle_uuids, product_uuids, assigned_count = await vehicle_service.assign_products_to_model_years(
+        db,
+        make=data.make,
+        model=data.model,
+        years=data.years,
+        vehicle_type=data.vehicle_type,
+        engine=data.engine,
+        product_uuids=data.product_uuids,
+    )
+    return AssignProductsToModelResponse(
+        make=data.make,
+        model=data.model,
+        years=sorted(set(data.years)),
+        engine=data.engine,
+        vehicle_uuids=vehicle_uuids,
+        product_uuids=product_uuids,
+        assigned_count=assigned_count,
+    )
 
 
 @router.get("", response_model=VehicleListResponse, summary="Buscar/listar vehiculos (filtrable por vehicleType/make/model)")
