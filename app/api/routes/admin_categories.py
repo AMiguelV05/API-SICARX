@@ -1,4 +1,5 @@
 import logging
+from typing import List
 from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
 from app.core.security import validate_admin_key
@@ -21,6 +22,12 @@ router = APIRouter(prefix="/admin/categories", tags=["Admin - Taxonomy"], depend
 async def admin_create_category(db: DbDep, data: CategoryCreateRequest = Body()):
     category = await taxonomy_service.create_category(db, data.name, data.parent_uuid)
     return CategoryAdminPublic.model_validate(category)
+
+
+@router.get("/by-product/{product_uuid}", response_model=List[CategoryAdminPublic], summary="Listar las categorias asignadas directamente a un producto")
+async def admin_list_product_categories(product_uuid: str, db: DbDep):
+    categories = await taxonomy_service.get_categories_for_product(db, product_uuid)
+    return [CategoryAdminPublic.model_validate(c) for c in categories]
 
 
 @router.patch("/{category_uuid}", response_model=CategoryAdminPublic, summary="Renombrar y/o mover (reasignar padre) un nodo de categoria")

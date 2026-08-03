@@ -27,25 +27,25 @@ async def list_makes(
     return VehicleMakesResponse(docs=docs)
 
 
-@router.get("/models", response_model=VehicleModelsResponse, summary="Modelos distintos para una marca (paso 2)")
-async def list_models(
-    db: DbDep,
-    make: str = Query(...),
-    vehicle_type: Optional[VehicleType] = Query(default=None, alias="vehicleType"),
-):
-    docs = await vehicle_service.get_distinct_models(db, make=make, vehicle_type=vehicle_type)
-    return VehicleModelsResponse(docs=docs)
-
-
-@router.get("/years", response_model=VehicleYearsResponse, summary="Anios distintos para marca+modelo (paso 3)")
+@router.get("/years", response_model=VehicleYearsResponse, summary="Anios distintos para una marca (paso 2)")
 async def list_years(
     db: DbDep,
     make: str = Query(...),
-    model: str = Query(...),
     vehicle_type: Optional[VehicleType] = Query(default=None, alias="vehicleType"),
 ):
-    docs = await vehicle_service.get_distinct_years(db, make=make, model=model, vehicle_type=vehicle_type)
+    docs = await vehicle_service.get_distinct_years(db, make=make, vehicle_type=vehicle_type)
     return VehicleYearsResponse(docs=docs)
+
+
+@router.get("/models", response_model=VehicleModelsResponse, summary="Modelos distintos para marca+anio (paso 3)")
+async def list_models(
+    db: DbDep,
+    make: str = Query(...),
+    year: int = Query(...),
+    vehicle_type: Optional[VehicleType] = Query(default=None, alias="vehicleType"),
+):
+    docs = await vehicle_service.get_distinct_models(db, make=make, year=year, vehicle_type=vehicle_type)
+    return VehicleModelsResponse(docs=docs)
 
 
 @router.get("/engines", response_model=VehicleEnginesResponse, summary="Motores distintos para marca+modelo+anio (paso 4)")

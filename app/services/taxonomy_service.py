@@ -33,8 +33,14 @@ async def get_category_tree(db: AsyncSession) -> list[CategoryTreeNode]:
     chica (decenas/cientos de filas incluso con 500k productos, es taxonomia
     no dato por producto) asi que se trae completa en una sola consulta y el
     arbol se arma en Python agrupando por `parent_uuid`, en vez de una consulta
-    recursiva - mas simple y mas que suficiente a este tamano."""
-    result = await db.execute(select(Category.uuid, Category.name, Category.slug, Category.parent_uuid))
+    recursiva - mas simple y mas que suficiente a este tamano. Se ordena por
+    `name` (insensible a mayusculas) en la consulta - como el arbol se arma
+    iterando estas filas una sola vez, un orden global por nombre alcanza para
+    que tanto `roots` como los `children` de cada nodo salgan alfabetizados
+    (toda subsecuencia de una secuencia ordenada esta ordenada)."""
+    result = await db.execute(
+        select(Category.uuid, Category.name, Category.slug, Category.parent_uuid).order_by(func.lower(Category.name))
+    )
     rows = result.all()
 
     nodes = {row.uuid: CategoryTreeNode(row.uuid, row.name, row.slug) for row in rows}
@@ -66,6 +72,23 @@ async def get_descendant_uuids(db: AsyncSession, category_uuid: str) -> list[str
     """)
     result = await db.execute(query, {"category_uuid": category_uuid})
     return [row[0] for row in result.all()]
+
+
+async def get_categories_for_product(db: AsyncSession, product_uuid: str) -> list[Category]:
+    """Direccion inversa de `list_category_products` - dado un producto, que categorias
+    tiene asignadas DIRECTAMENTE (sin incluir ancestros). Pensada para una pantalla admin
+    de "editar tags de este producto" que necesita precargar la seleccion actual."""
+    product = await db.scalar(select(Product).where(Product.sicar_uuid == product_uuid, Product.is_deleted == False))
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+
+    stmt = select(Category).join(
+        product_categories, Category.uuid == product_categories.c.category_uuid
+    ).where(
+        product_categories.c.product_id == product.id
+    ).order_by(func.lower(Category.name))
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
 
 
 # --- Admin: CRUD del arbol + asignacion de productos (/v1/admin/categories/*) ---

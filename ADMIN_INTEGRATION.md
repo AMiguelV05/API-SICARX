@@ -630,16 +630,41 @@ Respuesta `200`:
 
 `404` si la categoría no existe.
 
+#### `GET /v1/admin/categories/by-product/{productUuid}` — listar las categorías de un producto
+
+```http
+GET /v1/admin/categories/by-product/3Cny4OOxdX1GoSzL9rEsTZNL7un
+X-Admin-Key: <admin-key>
+```
+
+Dirección inversa de `GET .../{uuid}/products` de arriba: dado un producto, qué
+categorías tiene asignadas **directamente** (sin ancestros) — pensado para precargar
+la selección actual en una pantalla de "editar tags de este producto" antes de un
+`PUT .../{uuid}/products`. `productUuid` es el `sicarUuid` del producto, igual que en
+todos los demás endpoints de esta API.
+
+Respuesta `200` (lista simple, sin paginar — un producto no está tageado en cientos de
+categorías):
+```json
+[
+  { "uuid": "3f9a1c2e-...", "name": "Herramientas Eléctricas", "slug": "herramientas-electricas", "parentUuid": "6a4fd308da77fe7cd25d1dd9", "updatedAt": "2026-08-01T12:00:00Z" }
+]
+```
+`[]` si el producto existe pero no tiene ninguna categoría asignada. `404` si el
+`productUuid` no corresponde a un producto real y no eliminado.
+
 ### Vehículos (compatibilidad)
 
 Endpoints para administrar `vehicles` — un catálogo plano de fitments
 make/model/year-range/engine (p. ej. "Chevrolet Aveo 2008-2016 L4 1.6L") — y para
 asignarle productos vía `product_vehicles`, el equivalente de "Categorías" arriba pero
 para "qué vehículos aplican a este producto" en vez de "en qué categoría está". A
-diferencia de categorías, **no hay tree/reparenteo** (una fila no tiene hijos) y **no
-hay ningún endpoint público equivalente a `GET /taxonomy`** todavía — `GET
-/v1/admin/vehicles` de abajo es hoy la única forma de buscar vehículos ya existentes,
-incluso para este mismo panel admin.
+diferencia de categorías, **no hay tree/reparenteo** (una fila no tiene hijos). `GET
+/v1/admin/vehicles` de abajo (búsqueda libre por `make`/`model` con `ILIKE`) es la forma
+de buscar vehículos ya existentes desde este panel admin — el equivalente público a `GET
+/taxonomy` ya existe (`GET /v1/vehicles/makes`/`/models`/`/years`/`/engines`/``, ver
+`FRONTEND_INTEGRATION.md`), pero es un selector en cascada pensado para un shopper que ya
+sabe su vehículo, no una búsqueda libre como la de este panel.
 
 `vehicles` fue sembrada una vez (2026-08-01) desde el catálogo público de referencia de
 Gonher (`catalogo.grupogonher.com`), acotado a los tipos "Automotriz" y "Motocicletas"
@@ -758,6 +783,25 @@ X-Admin-Key: <admin-key>
 
 Mismo shape/paginación que el equivalente de categorías. `404` si el vehículo no
 existe.
+
+#### `GET /v1/admin/vehicles/by-product/{productUuid}` — listar los vehículos de un producto
+
+```http
+GET /v1/admin/vehicles/by-product/3Cny4OOxdX1GoSzL9rEsTZNL7un
+X-Admin-Key: <admin-key>
+```
+
+Dirección inversa de `GET .../{uuid}/products` de arriba, mismo propósito que el
+equivalente de categorías (precargar una pantalla de "editar tags de este producto").
+
+Respuesta `200` (lista simple, sin paginar):
+```json
+[
+  { "uuid": "8f2c1a4e-...", "vehicleType": "AUTOMOTIVE", "make": "Chevrolet", "model": "Aveo", "yearStart": 2008, "yearEnd": 2016, "engine": "L4 1.6L", "updatedAt": "2026-08-01T12:00:00Z" }
+]
+```
+`[]` si el producto existe pero no tiene ningún vehículo asignado. `404` si el
+`productUuid` no corresponde a un producto real y no eliminado.
 
 ## Notas y advertencias
 

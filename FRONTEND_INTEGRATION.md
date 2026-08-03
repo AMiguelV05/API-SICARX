@@ -682,7 +682,7 @@ en la UI. Puede tardar un poco más la primera vez que se pide un producto (o si
 `detailsUpdatedAt` tiene más de 24h) — internamente refresca `tags`/`additionalImages`/
 `additionalSkus`/`descriptionDetails`/`salesUnitUuid` desde Sicar X antes de responder.
 
-### `GET /v1/taxonomy` — departamentos y categorías (para filtros)
+### `GET /v1/taxonomy` — árbol de categorías (para filtros)
 
 ```http
 GET /v1/taxonomy
@@ -692,28 +692,40 @@ x-api-key: <api-key>
 Respuesta `200`:
 ```json
 {
-  "departments": [
+  "categories": [
     {
       "uuid": "4aa3e82c-3ea2-4018-b8a7-12e727247cfa",
       "name": "FERRETERÍA",
-      "order": 70,
-      "categories": [
-        { "uuid": "137bcaba-5aa2-4559-8545-2cab151d8369", "name": "VIDAL" }
+      "slug": "ferreteria",
+      "children": [
+        {
+          "uuid": "137bcaba-5aa2-4559-8545-2cab151d8369",
+          "name": "VIDAL",
+          "slug": "vidal",
+          "children": []
+        }
       ]
     }
   ]
 }
 ```
 
-Una categoría puede aparecer bajo varios departamentos (relación muchos-a-muchos), no es una
-jerarquía estricta.
+Árbol auto-referenciado de profundidad arbitraria (no un `departments`/`categories` de 2
+niveles fijos) — cada nodo tiene una sola lista de `children`, que puede estar vacía o
+anidarse tan profundo como se haya armado desde el admin. Los nodos raíz (sin padre) son los
+elementos de primer nivel en `categories`; `slug` viene derivado del `name` y es único, útil
+para URLs bonitas del lado del frontend si se necesitan. Usa el `uuid` de cualquier nodo
+(raíz o anidado) como `taxonomyUuid` en `POST /v1/products`/`POST /v1/search` — filtrar por
+un nodo padre también devuelve productos etiquetados solo en un descendiente.
 
 ### `GET /v1/vehicles*` — selector de vehículo ("¿qué le queda a mi carro?")
 
-Cinco endpoints públicos para armar un selector en cascada (tipo → marca → modelo → año →
+Cinco endpoints públicos para armar un selector en cascada (tipo → marca → año → modelo →
 motor), como en los sitios de refacciones. El **tipo** (`"AUTOMOTIVE"`/`"MOTORCYCLE"`) no
 necesita ninguna llamada — son solo 2 valores fijos que el frontend ya conoce; empieza la
-cascada real en marcas. Cada paso se filtra con lo ya elegido en los pasos anteriores:
+cascada real en marcas. **Año va antes que modelo** (no es el orden más común en sitios de
+refacciones, pero es el que se decidió aquí) — cada paso se filtra con lo ya elegido en los
+pasos anteriores:
 
 ```http
 GET /v1/vehicles/makes?vehicleType=AUTOMOTIVE
@@ -724,23 +736,24 @@ x-api-key: <api-key>
 ```
 
 ```http
-GET /v1/vehicles/models?vehicleType=AUTOMOTIVE&make=Chevrolet
-x-api-key: <api-key>
-```
-```json
-{ "docs": ["Aveo", "Spark", "..."] }
-```
-
-```http
-GET /v1/vehicles/years?vehicleType=AUTOMOTIVE&make=Chevrolet&model=Aveo
+GET /v1/vehicles/years?vehicleType=AUTOMOTIVE&make=Chevrolet
 x-api-key: <api-key>
 ```
 ```json
 { "docs": [2016, 2015, 2014, 2013, 2012, 2011, 2010, 2009, 2008] }
 ```
 Años en orden descendente (más reciente primero). Vienen de expandir el rango `yearStart`–
-`yearEnd` de cada fitment — un fitment sin `yearEnd` (todavía en producción) cuenta como
-vigente hasta el año calendario actual.
+`yearEnd` de cada fitment de esa marca — un fitment sin `yearEnd` (todavía en producción)
+cuenta como vigente hasta el año calendario actual.
+
+```http
+GET /v1/vehicles/models?vehicleType=AUTOMOTIVE&make=Chevrolet&year=2012
+x-api-key: <api-key>
+```
+```json
+{ "docs": ["Aveo", "Spark", "..."] }
+```
+Modelos de esa marca cuyo rango `yearStart`–`yearEnd` incluye el año elegido.
 
 ```http
 GET /v1/vehicles/engines?vehicleType=AUTOMOTIVE&make=Chevrolet&model=Aveo&year=2012

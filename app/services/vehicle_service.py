@@ -38,8 +38,7 @@ async def create_vehicle(db: AsyncSession, vehicle_type: str, make: str, model: 
 async def update_vehicle(db: AsyncSession, vehicle_uuid: str, data: dict) -> Vehicle:
     """`data` viene de `VehicleUpdateRequest.model_dump(exclude_unset=True)` en la ruta -
     mismo patron que `taxonomy_service.update_category`. El rango de anios se valida
-    contra los valores EFECTIVOS (lo que trae `data`, o si no, lo que ya tiene la fila)
-    ya que un PATCH puede tocar solo uno de los dos campos."""
+    contra los valores EFECTIVOS"""
     vehicle = await db.get(Vehicle, vehicle_uuid)
     if vehicle is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehiculo no encontrado.")
@@ -147,6 +146,23 @@ async def list_vehicle_products(db: AsyncSession, vehicle_uuid: str, limit: int,
     return total or 0, list(result.scalars().all())
 
 
+async def get_vehicles_for_product(db: AsyncSession, product_uuid: str) -> list[Vehicle]:
+    """Direccion inversa de `list_vehicle_products` - dado un producto, que vehiculos tiene
+    asignados. Mismo proposito que `taxonomy_service.get_categories_for_product`: precargar
+    una pantalla admin de "editar tags de este producto"."""
+    product = await db.scalar(select(Product).where(Product.sicar_uuid == product_uuid, Product.is_deleted == False))
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+
+    stmt = select(Vehicle).join(
+        product_vehicles, Vehicle.uuid == product_vehicles.c.vehicle_uuid
+    ).where(
+        product_vehicles.c.product_id == product.id
+    ).order_by(Vehicle.make, Vehicle.model, Vehicle.year_start)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
 # --- Publico (/v1/vehicles/*) - facets en cascada para un selector de vehiculo -------------
 # A diferencia de `list_vehicles` (admin, busqueda libre con ILIKE), estas funciones asumen
 # que cada valor recibido ya viene de un paso previo de la cascada (una llamada anterior a
@@ -160,15 +176,7 @@ async def get_distinct_makes(db: AsyncSession, *, vehicle_type: str | None = Non
     return [row[0] for row in result.all()]
 
 
-async def get_distinct_models(db: AsyncSession, *, make: str, vehicle_type: str | None = None) -> list[str]:
-    stmt = select(Vehicle.model).distinct().where(Vehicle.make == make)
-    if vehicle_type:
-        stmt = stmt.where(Vehicle.vehicle_type == vehicle_type)
-    result = await db.execute(stmt.order_by(Vehicle.model))
-    return [row[0] for row in result.all()]
-
-
-async def get_distinct_years(db: AsyncSession, *, make: str, model: str, vehicle_type: str | None = None) -> list[int]:
+async def get_distinct_years(db: AsyncSession, *, make: str, vehicle_type: str | None = None) -> list[int]:
     """`year_start`/`year_end` son un rango, no una columna de anio individual - expandir
     cada fila con `generate_series` (raw SQL, mismo patron que
     `taxonomy_service.get_descendant_uuids` para una consulta incomoda en el ORM) es mas
@@ -178,11 +186,25 @@ async def get_distinct_years(db: AsyncSession, *, make: str, model: str, vehicle
     query = text("""
         SELECT DISTINCT y AS year
         FROM vehicles v, generate_series(v.year_start, COALESCE(v.year_end, :current_year)) AS y
-        WHERE v.make = :make AND v.model = :model
+        WHERE v.make = :make
           AND (CAST(:vehicle_type AS VARCHAR) IS NULL OR v.vehicle_type = CAST(:vehicle_type AS VARCHAR))
         ORDER BY y DESC
     """)
-    result = await db.execute(query, {"make": make, "model": model, "vehicle_type": vehicle_type, "current_year": current_year})
+    result = await db.execute(query, {"make": make, "vehicle_type": vehicle_type, "current_year": current_year})
+    return [row[0] for row in result.all()]
+
+
+async def get_distinct_models(db: AsyncSession, *, make: str, year: int, vehicle_type: str | None = None) -> list[str]:
+    """Segundo paso de la cascada (ahora anio antes que modelo, ver CLAUDE.md) - filtra por
+    contencion de rango (`year_start`/`year_end`), igual que `get_distinct_engines`."""
+    stmt = select(Vehicle.model).distinct().where(
+        Vehicle.make == make,
+        Vehicle.year_start <= year,
+        or_(Vehicle.year_end.is_(None), Vehicle.year_end >= year),
+    )
+    if vehicle_type:
+        stmt = stmt.where(Vehicle.vehicle_type == vehicle_type)
+    result = await db.execute(stmt.order_by(Vehicle.model))
     return [row[0] for row in result.all()]
 
 

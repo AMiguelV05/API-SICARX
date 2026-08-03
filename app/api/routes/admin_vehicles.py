@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import List, Optional
 from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
 from app.core.security import validate_admin_key
@@ -23,6 +23,12 @@ router = APIRouter(prefix="/admin/vehicles", tags=["Admin - Vehicles"], dependen
 async def admin_create_vehicle(db: DbDep, data: VehicleCreateRequest = Body()):
     vehicle = await vehicle_service.create_vehicle(db, data.vehicle_type, data.make, data.model, data.year_start, data.year_end, data.engine)
     return VehiclePublic.model_validate(vehicle)
+
+
+@router.get("/by-product/{product_uuid}", response_model=List[VehiclePublic], summary="Listar los vehiculos asignados directamente a un producto")
+async def admin_list_product_vehicles(product_uuid: str, db: DbDep):
+    vehicles = await vehicle_service.get_vehicles_for_product(db, product_uuid)
+    return [VehiclePublic.model_validate(v) for v in vehicles]
 
 
 @router.get("", response_model=VehicleListResponse, summary="Buscar/listar vehiculos (filtrable por vehicleType/make/model)")
