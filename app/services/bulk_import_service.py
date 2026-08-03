@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass, field
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
@@ -15,7 +16,7 @@ from app.models.vehicle import Vehicle, product_vehicles
 logger = logging.getLogger(__name__)
 
 MAX_ROWS_PER_SHEET = 20_000
-MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB - limite crudo antes de siquiera abrir el workbook
+MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024  # 4 MB - limite crudo antes de siquiera abrir el workbook
 MAX_VEHICLE_COMBOS_PER_QUERY = 300  # troceo defensivo, ver _resolve_vehicle_combos
 
 CATEGORIES_SHEET = "Categorias"
@@ -101,6 +102,18 @@ def _read_sheet(wb, sheet_name: str, required_columns: tuple[str, ...]) -> tuple
 
 def _clean_str(value) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def _split_slugs(value) -> list[str]:
+    """`categorySlug` acepta un solo slug o una lista separada por coma/punto y coma en la
+    misma celda (p. ej. `"herramientas, jardineria"`) - asi un producto con varias
+    categorias no necesita una fila por categoria. Tokens vacios (comas de mas, celda en
+    blanco) se descartan; sin ningun delimitador presente se devuelve una lista de un solo
+    elemento, asi que el formato de una sola categoria por fila sigue funcionando igual."""
+    raw = _clean_str(value)
+    if not raw:
+        return []
+    return [token.strip() for token in re.split(r"[,;]", raw) if token.strip()]
 
 
 async def _resolve_products(db: AsyncSession, skus: set[str]) -> dict[str, int]:
@@ -215,26 +228,30 @@ async def _bulk_insert_pairs(db: AsyncSession, table, pairs: list[dict], conflic
 def _process_categories_rows(
     rows: list[tuple[int, dict]], product_map: dict[str, int], category_map: dict[str, str]
 ) -> tuple[list[dict], list[_RowError]]:
+    """Una fila puede traer varios slugs en `categorySlug` (ver `_split_slugs`) - cada slug
+    se resuelve de forma independiente, asi que una fila con 3 slugs donde 1 no existe
+    agrega las 2 categorias validas y reporta un solo error (no bloquea las otras 2)."""
     pairs, errors = [], []
     seen = set()
     for row_num, data in rows:
         sku = _clean_str(data.get("sku"))
-        slug = _clean_str(data.get("categorySlug"))
-        if not sku or not slug:
+        slugs = _split_slugs(data.get("categorySlug"))
+        if not sku or not slugs:
             errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: falta sku o categorySlug.", sku or None))
             continue
         product_id = product_map.get(sku.upper())
         if product_id is None:
             errors.append(_RowError(row_num, "SKU_NOT_FOUND", f"SKU no encontrado: {sku}.", sku))
             continue
-        category_uuid = category_map.get(slug)
-        if category_uuid is None:
-            errors.append(_RowError(row_num, "CATEGORY_SLUG_NOT_FOUND", f"Categoria con slug no encontrado: {slug}.", sku))
-            continue
-        key = (category_uuid, product_id)
-        if key not in seen:
-            seen.add(key)
-            pairs.append({"category_uuid": category_uuid, "product_id": product_id})
+        for slug in slugs:
+            category_uuid = category_map.get(slug)
+            if category_uuid is None:
+                errors.append(_RowError(row_num, "CATEGORY_SLUG_NOT_FOUND", f"Categoria con slug no encontrado: {slug}.", sku))
+                continue
+            key = (category_uuid, product_id)
+            if key not in seen:
+                seen.add(key)
+                pairs.append({"category_uuid": category_uuid, "product_id": product_id})
     return pairs, errors
 
 
@@ -315,7 +332,9 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
                {_clean_str(r.get("sku")) for _, r in veh_rows if _clean_str(r.get("sku"))}
     product_map = await _resolve_products(db, all_skus)
 
-    category_slugs = {_clean_str(r.get("categorySlug")) for _, r in cat_rows if _clean_str(r.get("categorySlug"))}
+    category_slugs: set[str] = set()
+    for _, r in cat_rows:
+        category_slugs.update(_split_slugs(r.get("categorySlug")))
     category_map = await _resolve_categories(db, category_slugs)
 
     vehicle_combos: set[tuple[str | None, str, str, str | None]] = set()
@@ -372,9 +391,10 @@ def build_template_workbook() -> bytes:
     ws_cat = wb.active
     ws_cat.title = CATEGORIES_SHEET
     _write_header(ws_cat, CATEGORIES_REQUIRED_COLUMNS, {
-        "categorySlug": "Slug (no nombre ni uuid) de una categoria ya existente - ver GET /taxonomy o GET /admin/categories.",
+        "categorySlug": "Slug (no nombre ni uuid) de una categoria ya existente - ver GET /taxonomy o GET /admin/categories. Para asignar varias categorias al mismo producto en una sola fila, separalas por coma o punto y coma (p. ej. \"categoria-ejemplo-1, categoria-ejemplo-2\").",
     })
-    ws_cat.append(["SKU-EJEMPLO-1", "categoria-ejemplo"])
+    ws_cat.append(["SKU-EJEMPLO-1", "categoria-ejemplo-1"])
+    ws_cat.append(["SKU-EJEMPLO-1", "categoria-ejemplo-2, categoria-ejemplo-3"])
 
     ws_veh = wb.create_sheet(VEHICLES_SHEET)
     veh_columns = VEHICLES_REQUIRED_COLUMNS + ("vehicleType", "engine")

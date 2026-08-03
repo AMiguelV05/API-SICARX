@@ -926,8 +926,13 @@ como error:
 - **`Vehiculos`** — columnas `sku`, `make`, `model`, `year`, y opcionalmente `vehicleType`
   (`AUTOMOTIVE`/`MOTORCYCLE`) y `engine`.
 
-Cada fila es una sola asignación (formato largo, no una lista de categorías por celda).
-`sku` se busca primero contra `Product.sku` y, si no aparece ahí, contra
+Cada fila de `Vehiculos` es una sola asignación (formato largo). En `Categorias`, la
+celda `categorySlug` puede traer **un solo slug o varios separados por coma o punto y
+coma** (p. ej. `"herramientas, jardineria"`) para asignar varias categorías al mismo
+producto sin repetir la fila — cada slug de la lista se resuelve por separado, así que
+si uno no existe los demás de esa misma fila igual se asignan (se reporta un error solo
+por el slug que falló, no por toda la fila). `sku` se busca primero contra `Product.sku`
+y, si no aparece ahí, contra
 `Product.additionalSkus` — nunca contra el `sicarUuid` interno. La comparación de `sku`,
 `make`, `model` y `engine` **no distingue mayúsculas/minúsculas** (el catálogo de
 `vehicles` tiene casing inconsistente entre filas, p. ej. `"ITALIKA"` vs. `"Chevrolet"`,
@@ -948,9 +953,10 @@ usa `assign-by-model`).
 
 **Éxito parcial, no todo-o-nada** — una fila inválida (SKU inexistente, slug de categoría
 inexistente, ningún vehículo coincide) no bloquea el resto del archivo: se omite esa fila
-y se reporta en `errors`, el resto de las filas válidas se aplican igual. Solo un problema
-a nivel de archivo completo (no es un `.xlsx` real, faltan ambas hojas, o una hoja presente
-le falta una columna requerida) rechaza la solicitud entera.
+(o, en `Categorias` con varios slugs en una celda, solo el slug que falló) y se reporta en
+`errors`, el resto se aplica igual. Solo un problema a nivel de archivo completo (no es un
+`.xlsx` real, faltan ambas hojas, o una hoja presente le falta una columna requerida)
+rechaza la solicitud entera.
 
 Respuesta `200`:
 ```json
