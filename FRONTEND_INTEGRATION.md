@@ -36,22 +36,21 @@ Sin este header, cualquier ruta responde `403`. La única excepción en todo el 
 header; se autentica distinto, ver esa sección más abajo) — no es una ruta que el frontend
 necesite llamar nunca.
 
-### 2. Token de sesión de Sicar X — solo para `POST /v1/orders`
+### 2. Token de cuenta de cliente (`X-Client-Token`) — obligatorio para `POST /v1/orders` y `POST /v1/orders/{order_id}/cancel`
 
-Un JWT por comprador, obtenido de `POST /v1/session/init` y reenviado como `Authorization` al
-crear un pedido. **Nunca** se usa en ninguna otra ruta — `/v1/products`, `/v1/products/{uuid}`,
-`/v1/taxonomy` no lo necesitan, solo el `x-api-key`.
+**Login ahora es obligatorio para comprar — ya no existe checkout anónimo.** Un segundo JWT,
+distinto del `x-api-key`, obtenido de `POST /v1/auth/register` o `POST /v1/auth/login` y reenviado
+en una cabecera aparte, `X-Client-Token`. Identifica qué cuenta queda dueña del pedido, para que
+después pueda verlo en `GET /v1/auth/me/orders`. Sin este header, `POST /v1/orders` y
+`POST /v1/orders/{order_id}/cancel` responden `401`.
 
-### 3. Token de cuenta de cliente (`X-Client-Token`) — obligatorio para `POST /v1/orders` y `POST /v1/orders/{order_id}/cancel`
+(Antes existía un tercer token, el de sesión de Sicar X obtenido de `POST /v1/session/init` y
+reenviado en `Authorization` — esa ruta y ese requisito fueron eliminados por completo: la
+validación de carrito ahora es puramente local, sin ninguna llamada en vivo a Sicar X en el
+checkout. Si tu build todavía llama a `/v1/session/init` o manda `Authorization` en `/v1/orders`,
+quítalo — `Authorization` ya no tiene ningún uso en esa ruta.)
 
-**Login ahora es obligatorio para comprar — ya no existe checkout anónimo.** Un tercer JWT, distinto
-de los dos anteriores, obtenido de `POST /v1/auth/register` o `POST /v1/auth/login` y reenviado en
-una cabecera aparte, `X-Client-Token` (NO en `Authorization`, que en estas dos rutas ya está ocupada
-por el token de sesión de Sicar X del punto 2). Identifica qué cuenta queda dueña del pedido, para
-que después pueda verlo en `GET /v1/auth/me/orders`. Sin este header, `POST /v1/orders` y
-`POST /v1/orders/{order_id}/cancel` responden `401` antes de siquiera intentar hablar con Sicar X.
-
-### 4. Cookie del carrito anónimo (`charly_cart_token`) — automática, sin gestionarla a mano
+### 3. Cookie del carrito anónimo (`charly_cart_token`) — automática, sin gestionarla a mano
 
 El carrito anónimo (sin login) ya **no** se identifica con un header manual — el backend emite una
 cookie `httpOnly` (`charly_cart_token`, alcance `/v1/cart`) la primera vez que se escribe un
@@ -65,7 +64,7 @@ toda llamada `fetch`/`axios` a `/v1/cart*` debe mandar `credentials: "include"` 
 `withCredentials: true` en axios) o el navegador nunca la envía ni la guarda, y cada llamada se ve
 como un visitante anónimo nuevo. Ver la sección `/v1/cart` más abajo.
 
-Para el carrito, el mismo token de cuenta del punto 3 sigue mandándose de forma distinta según la
+Para el carrito, el mismo token de cuenta del punto 2 sigue mandándose de forma distinta según la
 ruta: `X-Client-Token` en `GET`/`PUT`/`DELETE`/`PATCH /v1/cart*`, pero `Authorization` en
 `POST /v1/cart/merge` (igual que `/v1/auth/me/addresses` y `/v1/auth/me/orders`, que también usan
 `Authorization`). No es un error tipográfico — revisa la cabecera exacta de cada ejemplo con
@@ -82,20 +81,19 @@ después de armar el carrito sin sesión, por si el visitante inicia sesión o s
 
 ```
 1. POST /v1/auth/register o /v1/auth/login          → obtener token de cuenta (X-Client-Token), una vez
-2. POST /v1/session/init                             → obtener token de sesión de Sicar X (una vez)
-3. POST /v1/products                                 → mostrar catálogo / resultados de filtro
-4. GET  /v1/products/{uuid}                          → detalle al abrir una ficha de producto
-5. POST /v1/orders                                   → reservar el pedido localmente (queda TO_PAY) + preparar el cobro
-6. Renderizar el Payment Brick (Mercado Pago) con `amount`/`preferenceId` del paso 5
-7. POST /v1/orders/{order_id}/pay                    → cobrar (tarjeta/OXXO — el Brick llama a esto en su onSubmit)
+2. POST /v1/products                                 → mostrar catálogo / resultados de filtro
+3. GET  /v1/products/{uuid}                          → detalle al abrir una ficha de producto
+4. POST /v1/orders                                   → reservar el pedido localmente (queda TO_PAY) + preparar el cobro
+5. Renderizar el Payment Brick (Mercado Pago) con `amount`/`preferenceId` del paso 4
+6. POST /v1/orders/{order_id}/pay                    → cobrar (tarjeta/OXXO — el Brick llama a esto en su onSubmit)
    (el método Wallet de Mercado Pago NO llama a este paso — redirige directo a Mercado Pago)
-8. (si aplica) POST /v1/orders/{order_id}/cancel     → cancelar el pedido (usa el token del paso 1)
+7. (si aplica) POST /v1/orders/{order_id}/cancel     → cancelar el pedido (usa el token del paso 1)
 ```
 
 **Importante — esto es un cambio incompatible sobre el flujo anterior**: `POST /v1/orders`
 ya **no** cobra ni deja el pedido pagado de inmediato — ahora solo lo reserva localmente
 (`status: "TO_PAY"`) y prepara una preferencia de Mercado Pago. El pago real ocurre en el
-paso 7 (`POST /v1/orders/{order_id}/pay`) o, si el comprador elige pagar con su cuenta de
+paso 6 (`POST /v1/orders/{order_id}/pay`) o, si el comprador elige pagar con su cuenta de
 Mercado Pago (Wallet), nunca pasa por este backend en absoluto — se confirma por webhook.
 
 **Importante — segundo cambio incompatible (2026-07-31): Sicar X ya no se entera de un
@@ -109,11 +107,8 @@ el significado de algunos campos de la respuesta, ver la nota junto al ejemplo d
 más abajo.
 Ver "Pagos con Mercado Pago" más abajo.
 
-`/v1/session/init` normalmente se llama **una sola vez** al iniciar la sesión de compra (p. ej. al
-cargar el carrito o al primer intento de checkout), no en cada request. Guarda el `token`
-devuelto (en memoria, cookie, o storage del lado cliente) y reenvíalo tal cual en `Authorization`
-al llamar a `/v1/orders`. Guarda también el token de `/v1/auth/login`/`/v1/auth/register` (distinto)
-para reenviarlo en `X-Client-Token`.
+Guarda el token de `/v1/auth/login`/`/v1/auth/register` para reenviarlo en `X-Client-Token` en
+`/v1/orders` y `/v1/orders/{order_id}/cancel` — es el único token que necesita ese flujo.
 
 `/v1/cart` es independiente de este flujo — es persistencia opcional del carrito (ver referencia
 abajo), no un paso obligatorio antes de `/v1/orders`. `POST /v1/orders` sigue recibiendo el
@@ -129,40 +124,11 @@ carrito directo en el body, no lo lee de `/v1/cart`.
 > no es una migración forzada de entrada, solo de salida. No construyas código nuevo dependiendo
 > de esto: no está garantizado que el soporte a snake_case se mantenga indefinidamente.
 
-### `POST /v1/session/init` — iniciar o refrescar sesión
-
-Sin `Authorization`: crea una sesión anónima nueva. Con `Authorization` (token previo): lo valida
-y refresca si expiró.
-
-```http
-POST /v1/session/init
-x-api-key: <api-key>
-Authorization: <token-anterior>     # opcional
-```
-
-Respuesta `200`:
-```json
-{
-  "token": "eyJhbGciOiJIUzI1NiIs...",
-  "priceListUuid": "0b8b0848-3880-4085-b213-3b3d30c79429",
-  "branchId": 151456,
-  "deliveryCost": 50,
-  "contentId": "145952"
-}
-```
-
-Guarda `token` — es lo que se reenvía como `Authorization` en `/v1/orders`. Limitado a 30
-solicitudes por minuto por IP (`429` si se excede). `502` si Sicar X no responde al crear o
-refrescar la sesión — reintenta más tarde.
-
 ### `POST /v1/auth/register` / `POST /v1/auth/login` — cuentas de cliente (login propio, separado de Sicar X)
 
-Esto es un tercer tipo de token, **distinto** del token de `/v1/session/init` de arriba.
-`/v1/session/init` gestiona la sesión anónima de compra contra Sicar X (necesaria para
-`/v1/orders`); `/v1/auth/register` y `/v1/auth/login` son cuentas de cliente propias de esta API —
-para que un usuario tenga un login persistente en el sitio (guardar direcciones, ver histórico,
-etc. — todavía no implementado, solo existe el login por ahora). Ambos requieren `x-api-key` igual
-que cualquier otra ruta.
+`/v1/auth/register` y `/v1/auth/login` son cuentas de cliente propias de esta API — para que un
+usuario tenga un login persistente en el sitio (guardar direcciones, ver histórico, etc.). Ambos
+requieren `x-api-key` igual que cualquier otra ruta.
 
 ```http
 POST /v1/auth/register
@@ -246,8 +212,7 @@ responde `429` con `{"error": "Rate limit exceeded: ..."}`.
 Guarda el `token` de la respuesta — se reenvía en dos lugares distintos: como `Authorization` en
 `GET`/`PATCH /v1/auth/me` (y las rutas de direcciones/historial de pedidos abajo), y como
 `X-Client-Token` en `POST /v1/orders`/`POST /v1/orders/{order_id}/cancel` (ver "Dos capas de
-autenticación" arriba — ahí sí importa la cabecera exacta, `Authorization` está ocupada por el
-token de sesión de Sicar X en esas dos rutas).
+autenticación" arriba — revisa la cabecera exacta de cada ejemplo con cuidado).
 
 ### `POST /v1/auth/google` — iniciar sesión o registrarse con Google
 
@@ -660,6 +625,7 @@ Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `s
   "tags": ["oferta"],
   "additionalImages": null,
   "salesUnitUuid": "0b8b0848-3880-4085-b213-3b3d30c79429",
+  "unitShortName": "PZA",
   "departmentUuid": "4aa3e82c-3ea2-4018-b8a7-12e727247cfa",
   "categoryUuid": "137bcaba-5aa2-4559-8545-2cab151d8369",
   "price": 8.62069,
@@ -680,7 +646,11 @@ falta revisarlos en el frontend, solo se incluyen porque son parte del modelo in
 `id`/`lastSyncId` son identificadores internos de sincronización, no pensados para mostrarse
 en la UI. Puede tardar un poco más la primera vez que se pide un producto (o si
 `detailsUpdatedAt` tiene más de 24h) — internamente refresca `tags`/`additionalImages`/
-`additionalSkus`/`descriptionDetails`/`salesUnitUuid` desde Sicar X antes de responder.
+`additionalSkus`/`descriptionDetails`/`salesUnitUuid`/`unitShortName` desde Sicar X antes de
+responder. `unitShortName` (p. ej. `"PZA"`/`"MTR"`) es el nombre legible de la unidad de venta
+resuelto a partir de `salesUnitUuid` — puede venir `null` si nunca se resolvió (fallback a
+`"PZA"` en el checkout, ver `POST /v1/orders`); antes solo se resolvía efímeramente en cada
+llamada a `/v1/orders`, ahora queda persistido aquí en el primer refresco de detalle.
 
 ### `GET /v1/taxonomy` — árbol de categorías (para filtros)
 
@@ -806,7 +776,7 @@ producto.
 **Sin login** — no mandes `X-Client-Token` ni `Authorization`, y **siempre** manda
 `credentials: "include"` (o `withCredentials: true`) en el `fetch`/`axios` — es lo único que hace
 falta para que la identidad anónima funcione, la cookie `charly_cart_token` la maneja el navegador
-solo (ver el punto 4 de "Dos capas de autenticación" arriba). No hay ningún header que armar a mano
+solo (ver el punto 3 de "Dos capas de autenticación" arriba). No hay ningún header que armar a mano
 para esto:
 
 ```http
@@ -933,14 +903,14 @@ como el de login.
 
 ### `POST /v1/orders` — reservar pedido (todavía no cobra)
 
-Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, impuestos,
-sku, totales) lo calcula el backend.** Requiere **login** (ver punto 3 de "Dos capas de
-autenticación" arriba): `X-Client-Token` es obligatorio junto con `Authorization`.
+Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, sku, totales)
+lo calcula el backend a partir del catálogo local — sin ninguna llamada en vivo a Sicar X.**
+Requiere **login** (ver punto 2 de "Dos capas de autenticación" arriba): `X-Client-Token` es
+obligatorio.
 
 ```http
 POST /v1/orders
 x-api-key: <api-key>
-Authorization: <token de /v1/session/init>
 X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 Content-Type: application/json
 
@@ -988,17 +958,15 @@ Es opcional y retrocompatible: si no se envía, el comportamiento es igual que a
 header existir.
 
 Cuatro campos opcionales más a nivel raíz — normalmente no hace falta mandarlos, cada uno tiene
-su propio fallback si se omiten (o se mandan como `null`):
+su propio valor por defecto si se omiten (o se mandan como `null`):
 
-- `contentId` — si se omite, usa el `contentId` devuelto por `/v1/session/init` y, si tampoco
-  está disponible ahí, genera uno nuevo (`uuid4`).
-- `branchId` — si se omite, usa el `branchId` de `/v1/session/init` y si tampoco está ahí, `151456`.
-- `priceListUuid` — si se omite, usa el `priceListUuid` de `/v1/session/init` y si tampoco está
-  ahí, el de configuración del servidor.
-- `wholesalePrices` — `false` por defecto; en `true` pide precios de mayoreo a Sicar X.
+- `contentId` — si se omite, genera uno nuevo (`uuid4`).
+- `branchId` — si se omite, `151456`.
+- `priceListUuid` — si se omite, el de configuración del servidor.
+- `wholesalePrices` — `false` por defecto; se guarda como metadata del pedido, no cambia qué
+  precio local se cobra.
 
-En la práctica casi nunca hace falta enviarlos explícitamente — solo tiene sentido si se necesita
-forzar una sucursal/lista de precios distinta a la de la sesión activa.
+En la práctica casi nunca hace falta enviarlos explícitamente.
 
 Para entrega a domicilio, manda `addressUuid` (el `uuid` de una dirección ya guardada — ver
 `POST /v1/auth/me/addresses` arriba) en vez de una dirección escrita a mano en cada pedido:
@@ -1065,15 +1033,13 @@ soportando tarjeta/OXXO, solo no tendrá la opción de pagar con cuenta/Wallet d
 del Payment Brick, no un total calculado en el frontend.
 
 Errores esperables:
-- `401` — falta o expiró el token de sesión, o falta/es inválido `X-Client-Token` (llama de nuevo a
-  `/v1/session/init` o `/v1/auth/login` según cuál haya fallado)
+- `401` — falta o es inválido `X-Client-Token` (llama de nuevo a `/v1/auth/login`)
 - `400` — carrito vacío, datos de entrega inválidos, o (para `DELIVERYMAN`) la dirección
   seleccionada existe pero le faltan campos necesarios para la entrega
 - `404` — (para `DELIVERYMAN`) `addressUuid` no existe o no pertenece a la cuenta autenticada
-- `409` — uno o más productos sin disponibilidad suficiente
-- `502` — Sicar X rechazó la validación de precio/disponibilidad del carrito (reintenta más
-  tarde) — ya no significa "Sicar X rechazó la orden": Sicar X no ve ninguna orden en este
-  paso, solo se consulta para confirmar precio y stock en tiempo real antes de crearla.
+- `409` — uno o más productos sin disponibilidad suficiente (sin stock, o precio local
+  inconsistente — ver nota abajo) — validación 100% local contra Postgres, sin ninguna llamada
+  en vivo a Sicar X en este paso.
 
 ## Pagos con Mercado Pago (Checkout Bricks)
 
@@ -1443,18 +1409,6 @@ Respuesta `204` (sin body) en éxito.
 const API_URL = process.env.NEXT_PUBLIC_API_URL!;   // ej. https://api-production-cf7a.up.railway.app
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY!;    // provisto por backend
 
-async function initSession(previousToken?: string) {
-  const res = await fetch(`${API_URL}/v1/session/init`, {
-    method: "POST",
-    headers: {
-      "x-api-key": API_KEY,
-      ...(previousToken ? { Authorization: previousToken } : {}),
-    },
-  });
-  if (!res.ok) throw new Error("No se pudo iniciar sesión");
-  return res.json(); // { token, priceListUuid, branchId, deliveryCost, contentId }
-}
-
 async function getCatalog(filters: { limit?: number; offset?: number; departmentUuid?: string }) {
   const res = await fetch(`${API_URL}/v1/products`, {
     method: "POST",
@@ -1466,7 +1420,7 @@ async function getCatalog(filters: { limit?: number; offset?: number; department
 
 // credentials: "include" es obligatorio en TODA llamada a /v1/cart* -- sin esto el navegador
 // nunca manda ni guarda la cookie httpOnly del carrito anonimo (cross-site, ver la seccion
-// "Dos capas de autenticacion", punto 4).
+// "Dos capas de autenticacion", punto 3).
 async function saveCart(items: { uuid: string; quantity: number }[], clientToken?: string) {
   const res = await fetch(`${API_URL}/v1/cart`, {
     method: "PUT",
@@ -1499,7 +1453,7 @@ async function adjustCartItem(productUuid: string, delta: number, clientToken?: 
 }
 
 // cartToken (opcional) es el de un carrito anonimo armado antes de iniciar sesion -- guardado en
-// memoria desde una respuesta previa de /v1/cart (ver el punto 4 de "Dos capas de autenticacion").
+// memoria desde una respuesta previa de /v1/cart (ver el punto 3 de "Dos capas de autenticacion").
 // La fusion ocurre en esta misma llamada; la respuesta ya trae `cart` listo para pintar la UI.
 async function login(email: string, password: string, cartToken?: string) {
   const res = await fetch(`${API_URL}/v1/auth/login`, {
@@ -1533,12 +1487,11 @@ async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
 
 // Ya NO cobra -- solo reserva el pedido localmente (TO_PAY) y prepara el cobro con
 // Mercado Pago. Renderiza el Payment Brick con el `amount`/`preferenceId` de la respuesta.
-async function createOrder(sessionToken: string, clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
+async function createOrder(clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
   const res = await fetch(`${API_URL}/v1/orders`, {
     method: "POST",
     headers: {
       "x-api-key": API_KEY,
-      Authorization: sessionToken,
       "X-Client-Token": clientToken,
       "Content-Type": "application/json",
     },
@@ -1577,11 +1530,10 @@ async function payOrder(orderId: string, clientToken: string, formData: Record<s
 ## Notas y advertencias
 
 - **Precios/stock pueden cambiar entre que se muestran y se compran** — `/v1/orders` valida
-  disponibilidad en tiempo real contra Sicar X antes de confirmar; un `409` en checkout es
-  normal y esperado, no un bug.
-- **El token de sesión expira** — si `/v1/orders` responde `401`, vuelve a llamar
-  `/v1/session/init` pasando el token viejo en `Authorization` para refrescarlo, y reintenta. Si
-  en cambio es `X-Client-Token` el que expiró/falta, vuelve a llamar `/v1/auth/login`.
+  disponibilidad contra el catálogo local (sincronizado desde Sicar X cada 5 minutos, sin
+  ninguna llamada en vivo en este paso) antes de confirmar; un `409` en checkout es normal y
+  esperado, no un bug.
+- **`X-Client-Token` expira** — si `/v1/orders` responde `401`, vuelve a llamar `/v1/auth/login`.
 - **Login es obligatorio para comprar** — no existe checkout anónimo; sin una cuenta autenticada
   (`X-Client-Token` válido) `/v1/orders`, `/v1/orders/{order_id}/pay` y
   `/v1/orders/{order_id}/cancel` responden `401`.
@@ -1597,13 +1549,13 @@ async function payOrder(orderId: string, clientToken: string, formData: Record<s
 - **No hay seguimiento de paquete en tránsito todavía** (ubicación en vivo, ETA) — es una
   integración futura con el webhook de envia.com, no construida en este cambio. El webhook
   `order-status-changed` de arriba solo cubre aceptado/listo-para-recoger/enviado.
-- **`/v1/cart*` no valida disponibilidad en tiempo real** — a diferencia de `/v1/orders`, guardar
-  o leer el carrito no consulta a Sicar X, solo el catálogo local (que se sincroniza cada 5 min).
-  El `409` de "sin disponibilidad suficiente" solo puede pasar hasta el checkout real
-  (`/v1/orders`), no al guardar el carrito.
+- **`/v1/cart*` no valida disponibilidad** — guardar o leer el carrito no revisa stock/precio en
+  absoluto, ni siquiera contra el catálogo local (que sí usa `/v1/orders`, ver arriba). El `409`
+  de "sin disponibilidad suficiente" solo puede pasar hasta el checkout real (`/v1/orders`), no
+  al guardar el carrito.
 - **La cabecera de la cuenta cambia según la ruta del carrito** — `X-Client-Token` en
   `GET`/`PUT`/`PATCH`/`DELETE /v1/cart*`, `Authorization` en `POST /v1/cart/merge`. Revisa la
-  sección "Dos capas de autenticación" (punto 4) y los ejemplos de cada endpoint si algo da `401`
+  sección "Dos capas de autenticación" (punto 3) y los ejemplos de cada endpoint si algo da `401`
   inesperado.
 - **`credentials: "include"` es obligatorio en toda llamada a `/v1/cart*`** — sin esto, el carrito
   anónimo (cookie `httpOnly` `charly_cart_token`, cross-site entre `ferreteriacharly.com` y
@@ -1611,6 +1563,6 @@ async function payOrder(orderId: string, clientToken: string, formData: Record<s
   carrito nuevo vacío. No aplica a `/v1/auth/*` ni al resto de la API — es específico de `/v1/cart*`.
 - **Ya no existe `X-Cart-Token` ni almacenamiento manual del carrito anónimo** — si el frontend
   todavía tiene un `lib/cartToken.ts` o similar guardando ese header en `localStorage`, puede
-  eliminarse: la identidad anónima ahora es 100% automática vía cookie (ver el punto 4 de "Dos
+  eliminarse: la identidad anónima ahora es 100% automática vía cookie (ver el punto 3 de "Dos
   capas de autenticación"). Solo sigue haciendo falta guardar `cartToken` **en memoria** (no
   persistente) para pasarlo como `cartToken` en `/v1/auth/login`/`/v1/auth/register`.

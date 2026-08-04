@@ -49,6 +49,7 @@ async def get_product_details(uuid: str, db: DbDep):
             product.description_details = full_data.get("details")
             product.tags = full_data.get("tags")
             product.sales_unit_uuid = full_data.get("sales_unit_uuid")
+            product.unit_short_name = full_data.get("unit_short_name")
             product.additional_images = full_data.get("additional_images")
             product.details_updated_at = datetime.now(timezone.utc)
 

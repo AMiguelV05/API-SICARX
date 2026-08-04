@@ -7,11 +7,9 @@ from sqlalchemy import select
 from app.core.database import DbDep
 from app.core.security import validate_api_key, CurrentClientHeaderDep
 from app.core.rate_limit import limiter
-from app.models.product import Product
 from app.models.order import Order
 from app.services.order_service import validate_cart_items, build_order_payload, _to_decimal
 from app.services.product_stock_service import apply_stock_deltas
-from app.services.session_service import get_or_refresh_customer_session
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment, prepare_local_cancellation
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
@@ -31,28 +29,28 @@ async def create_order(
     client: CurrentClientHeaderDep,
     db: DbDep,
     order_payload: OrderCreate = Body(),
-    authorization: str = Header(None, alias="Authorization", description="Token de sesión del cliente web"),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", description="Opcional. Si se repite la misma clave (p. ej. un reintento de red del mismo submit de checkout), se devuelve la orden ya creada en vez de crear una duplicada."),
 ):
     """
     Contrato semiautomático: el frontend solo envía `products: [{uuid, quantity}]` y
-    `deliveryInfo`; precios, impuestos, sku, descripción, unidad y totales se calculan
-    en el backend a partir de Sicar X y del catálogo local (`order_service.build_order_payload`).
+    `deliveryInfo`; precios, sku, descripción, unidad y totales se calculan en el
+    backend a partir del catálogo local (`order_service.build_order_payload`) — sin
+    ninguna llamada en vivo a Sicar X en esta ruta.
 
     `Idempotency-Key` (opcional): un identificador generado por el frontend (p. ej. un
     UUID por click en "pagar") que, si se reenvía sin cambios en un reintento, hace que
     esta llamada devuelva la orden ya creada la primera vez en vez de crear una segunda
-    orden en Sicar X. Sin este header el comportamiento es igual que antes.
+    orden. Sin este header el comportamiento es igual que antes.
 
-    Requiere DOS tokens distintos, ninguno reemplaza al otro:
-    - `Authorization`: JWT de sesión del cliente web en Sicar X (obtenido de
-      `POST /session/init`) — se usa para validar el carrito y crear la orden en Sicar X.
-    - `X-Client-Token`: JWT de la cuenta de cliente local (obtenido de `POST /auth/login`
-      o `/auth/register`) — identifica qué `ClientAccount` queda dueña de la orden para
-      que después pueda verla en `GET /auth/me/orders`. Login ahora es obligatorio para
-      comprar; ya no existe checkout anónimo.
+    Requiere `X-Client-Token`: JWT de la cuenta de cliente local (obtenido de
+    `POST /auth/login` o `/auth/register`) — identifica qué `ClientAccount` queda dueña
+    de la orden para que después pueda verla en `GET /auth/me/orders`. Login es
+    obligatorio para comprar; no existe checkout anónimo. (Ya no requiere ningún otro
+    token — el antiguo `Authorization` con el token de sesión del cliente web en Sicar X,
+    obtenido de `POST /session/init`, fue eliminado junto con esa ruta: la validación de
+    carrito ahora es puramente local, ver CLAUDE.md.)
 
-    Esta llamada SOLO reserva el pedido en Sicar X (queda en `TO_PAY`) y prepara el cobro
+    Esta llamada SOLO reserva el pedido localmente (queda en `TO_PAY`) y prepara el cobro
     con Mercado Pago — todavía no cobra nada. Devuelve `preferenceId`/`amount` para que
     el frontend renderice el Payment Brick, y `orderUuid`/`id` para el siguiente paso:
     `POST /orders/{id}/pay` con el `formData` del `onSubmit` del Brick (tarjeta/OXXO). Si
@@ -67,22 +65,9 @@ async def create_order(
     cobra ningún costo de envío en esta llamada (`amount` sigue siendo solo el total de
     productos, igual que en `PICKUP`) — pendiente de una futura integración.
     """
-    if not authorization:
-        logger.warning("Intento de creacion de orden rechazado: No se proporciono token de sesión.")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de sesión del cliente en los headers.")
-
-    # Verificación y refresco de la sesión del cliente
-    try:
-        session_data = await get_or_refresh_customer_session(authorization)
-        # Obtenemos el token (ya sea el mismo si era válido, o uno nuevo si había expirado)
-        valid_client_token = session_data.get("token")
-    except Exception as e:
-        logger.error(f"Fallo al validar o refrescar sesion del cliente: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se pudo validar ni refrescar la sesión del cliente.")
-
-    branch_id = order_payload.branchId or session_data.get("branchId") or 151456
-    price_list_uuid = order_payload.priceListUuid or session_data.get("priceListUuid") or settings.SICAR_PRICE_LIST_ID
-    content_id = order_payload.contentId or session_data.get("contentId") or str(uuid4())
+    branch_id = order_payload.branchId or 151456
+    price_list_uuid = order_payload.priceListUuid or settings.SICAR_PRICE_LIST_ID
+    content_id = order_payload.contentId or str(uuid4())
 
     # Suma en Decimal (no float) para lineas duplicadas del mismo producto: sumar floats
     # directamente (p. ej. 0.1 + 0.2 en un producto a granel) puede arrastrar ruido de
@@ -139,11 +124,7 @@ async def create_order(
 
     try:
         # Pre-validación de stock/disponibilidad y datos de precio/impuestos usando el token fresco
-        cart_data = await validate_cart_items(uuids, requested_quantities, valid_client_token, branch_id, price_list_uuid)
-
-        # Productos ya sincronizados localmente (sku, nombre, unidad de venta)
-        result = await db.execute(select(Product).where(Product.sicar_uuid.in_(uuids)))
-        local_products = {p.sicar_uuid: p for p in result.scalars().all()}
+        local_products = await validate_cart_items(db, uuids, requested_quantities)
 
         delivery_address_snapshot = None
         if order_payload.deliveryInfo.deliveryType == "DELIVERYMAN":
@@ -185,7 +166,6 @@ async def create_order(
             delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True)
 
         order_payload_dict = build_order_payload(
-            cart_data=cart_data,
             local_products=local_products,
             quantities=requested_quantities,
             delivery_info=delivery_info_dict,

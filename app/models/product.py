@@ -33,6 +33,7 @@ class Product(Base):
     tags = Column(JSONB, nullable=True)               # Listas: ["oferta", "pretul"]; JSONB (no JSON) para poder filtrar por contencion con indice GIN
     additional_images = Column(JSON, nullable=True)  # Listado de URLs de listImages
     sales_unit_uuid = Column(String, nullable=True)  # Para saber si se vende por PZA, MTR, KGS
+    unit_short_name = Column(String, nullable=True)  # Nombre corto resuelto (p.ej. "PZA"/"MTR") via content.units - ver fetch_full_details_from_sicar
 
     # Clasificación
     department_uuid = Column(String, index=True, nullable=True)

@@ -25,6 +25,12 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
         listImages (uuid: "{safe_uuid}") {{
             url
         }}
+        content {{
+            units {{
+                uuid
+                shortName
+            }}
+        }}
     }}"""
 
     # Sub-función para empaquetar la petición HTTP
@@ -47,12 +53,20 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
 
         product_data = data.get("data", {}).get("product") or {}
         images_data = data.get("data", {}).get("listImages") or []
+        units_data = (data.get("data", {}).get("content") or {}).get("units") or []
+
+        sales_unit_uuid = product_data.get("salesUnitUuid")
+        unit_short_name = next(
+            (u.get("shortName") for u in units_data if isinstance(u, dict) and u.get("uuid") == sales_unit_uuid),
+            None,
+        )
 
         return {
             "skus": product_data.get("skus"),
             "details": product_data.get("details"),
             "tags": product_data.get("tags"),
-            "sales_unit_uuid": product_data.get("salesUnitUuid"),
+            "sales_unit_uuid": sales_unit_uuid,
+            "unit_short_name": unit_short_name,
             "additional_images": [img.get("url") for img in images_data if isinstance(img, dict) and img.get("url")]
         }
 

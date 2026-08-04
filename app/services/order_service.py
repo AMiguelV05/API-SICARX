@@ -1,88 +1,44 @@
-import httpx
-import json
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 from fastapi import HTTPException
-from app.core.sicar_headers import storefront_headers
-from app.core.sicar_validation import is_safe_sicar_id
-from app.core.upstream_errors import raise_upstream_error
-
-STORE_URL = "https://api.sicarx.com/store/"
-SICAR_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.product import Product
 
 logger = logging.getLogger(__name__)
 
-async def validate_cart_items(uuids: list, requested_quantities: dict, token: str, branch_id: str, price_list_uuid: str):
-    """Validación de stock y precios usando el token del cliente web"""
-    if not is_safe_sicar_id(price_list_uuid) or not all(is_safe_sicar_id(u) for u in uuids):
-        raise HTTPException(status_code=400, detail="Uno o más identificadores de producto o de lista de precios no son válidos.")
-    safe_price_list_uuid = price_list_uuid
-    safe_uuids = uuids
+async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantities: dict) -> dict[str, Product]:
+    """Valida stock/disponibilidad/precio localmente contra Postgres - ya no hace ninguna
+    llamada de red a Sicar X (ver CLAUDE.md, eliminacion de la dependencia del token de
+    sesion del cliente web). Devuelve los Product locales indexados por sicar_uuid;
+    build_order_payload los consume directamente en vez de una respuesta GraphQL.
 
-    graphql_uuids = json.dumps(safe_uuids)
+    `product.price <= 0` se trata como no disponible, no como precio legitimo: un producto
+    sincronizado con precio 0.00 (por ejemplo si Sicar X no devolvio ninguna entrada en su
+    diccionario de precios para ese producto durante el sync - caso real confirmado en
+    sync.log) no debe poder comprarse gratis."""
+    result = await db.execute(
+        select(Product).where(
+            Product.sicar_uuid.in_(uuids),
+            Product.is_deleted == False,
+            Product.is_active == True,
+        )
+    )
+    products_by_uuid = {p.sicar_uuid: p for p in result.scalars().all()}
 
-    query = f"""{{
-        products(uuids:{graphql_uuids}, branchId: {branch_id}, priceListId: "{safe_price_list_uuid}") {{
-            available
-            stock
-            lot
-            uuid
-            type
-            priceList {{
-                netPrice1
-                price1
-                saleTaxes
-                iso
-                productUuid
-                priceListUuid
-            }}
-        }}
-        stockForProducts(uuids: {graphql_uuids}) {{
-            uuid
-            stock
-        }}
-        content {{
-            units {{
-                uuid
-                shortName
-            }}
-        }}
-    }}"""
-
-    headers = storefront_headers(token, content_type="application/graphql", branch_id=branch_id)
-
-    async with httpx.AsyncClient(timeout=SICAR_TIMEOUT) as client:
-        response = await client.post(STORE_URL, content=query, headers=headers)
-        if response.status_code != 200:
-            raise_upstream_error(response, "Error en pre-validacion de carrito en Sicar", "No se pudo validar el carrito con Sicar X. Intenta nuevamente.")
-        payload = response.json()
-
-    if "errors" in payload:
-        raise_upstream_error(response, "Errores GraphQL en pre-validacion de carrito", "No se pudo validar el carrito con Sicar X. Intenta nuevamente.")
-
-    data = payload.get("data", payload)
-    products = data.get("products") or []
-    stock_for_products = data.get("stockForProducts") or []
-    products_by_uuid = {p.get("uuid"): p for p in products if isinstance(p, dict)}
-    stock_by_uuid = {s.get("uuid"): s.get("stock") for s in stock_for_products if isinstance(s, dict)}
-
-    # Verificamos disponibilidad y stock suficiente para cada producto solicitado.
     insufficient = []
-    for product_uuid in safe_uuids:
+    for product_uuid in uuids:
         requested_qty = requested_quantities.get(product_uuid, 0)
-        product_info = products_by_uuid.get(product_uuid)
+        product = products_by_uuid.get(product_uuid)
 
-        if not product_info:
-            insufficient.append(product_uuid)
-            continue
-
-        if product_info.get("available") is False:
-            insufficient.append(product_uuid)
-            continue
-
-        available_stock = stock_by_uuid.get(product_uuid, product_info.get("stock"))
-        if available_stock is not None and requested_qty > float(available_stock):
+        if (
+            product is None
+            or product.stock is None
+            or Decimal(str(requested_qty)) > product.stock
+            or product.price is None
+            or product.price <= 0
+        ):
             insufficient.append(product_uuid)
 
     if insufficient:
@@ -92,7 +48,7 @@ async def validate_cart_items(uuids: list, requested_quantities: dict, token: st
             detail=f"Los siguientes productos no tienen disponibilidad suficiente: {', '.join(insufficient)}"
         )
 
-    return data
+    return products_by_uuid
 
 def _to_decimal(value) -> Decimal:
     """Convierte a Decimal via str() para no heredar el error de representación binaria de float."""
@@ -106,7 +62,6 @@ def _format_quantity(value) -> str:
     return str(int(qty)) if qty == int(qty) else str(qty)
 
 def build_order_payload(
-    cart_data: dict,
     local_products: dict,
     quantities: dict,
     delivery_info: dict,
@@ -124,44 +79,45 @@ def build_order_payload(
     directamente, ya que replicar ese cálculo (impuestos, `amountTax` como total de línea
     y no precio unitario, etc.) sigue siendo la fuente de verdad de cómo se cobra
     correctamente — ver la nota histórica sobre el bug de "precio alterado" en CLAUDE.md.
-    """
-    products_by_uuid = {p.get("uuid"): p for p in (cart_data.get("products") or []) if isinstance(p, dict)}
-    units_by_uuid = {
-        u.get("uuid"): u.get("shortName")
-        for u in (cart_data.get("content") or {}).get("units") or []
-        if isinstance(u, dict)
-    }
 
+    Ya no recibe una respuesta GraphQL en vivo (`cart_data`) - todo campo por línea sale
+    ahora del snapshot local ya sincronizado por `sync_task.py`/`fetch_full_details_from_sicar`
+    (el `Product` de `local_products`, ya validado por `validate_cart_items` antes de esta
+    llamada). `type`/`taxesIds` (el código de tipo de producto y los IDs de impuesto de
+    Sicar X) se eliminaron por completo de la línea - eran artefactos exclusivos del
+    documento de orden que Sicar X ya no recibe, no algo que este backend o el frontend
+    usen para calcular o mostrar nada (confirmado: `amountTax` sale solo de precio ×
+    cantidad, y el contrato documentado en FRONTEND_INTEGRATION.md nunca los incluye).
+    """
     order_lines = []
     total = Decimal("0")
 
     for product_uuid, quantity in quantities.items():
-        sicar_info = products_by_uuid.get(product_uuid) or {}
         local_product = local_products.get(product_uuid)
-        price_list = sicar_info.get("priceList") or {}
 
-        net_price = price_list.get("netPrice1")
-        if net_price is None:
-            logger.error(f"Sicar no devolvio precio para el producto {product_uuid}.")
-            raise HTTPException(status_code=502, detail="No se pudo obtener el precio de uno o más productos.")
+        # Defensa en profundidad: validate_cart_items ya garantiza price > 0 para cada
+        # uuid en quantities antes de que esta funcion corra, asi que esto es ahora una
+        # violacion de invariante interno (no una falla de un proveedor externo) si
+        # llegara a pasar - de ahi el 500, no el 502 que se usaba cuando el precio venia
+        # de una respuesta en vivo de Sicar X.
+        if local_product is None or local_product.price is None or local_product.price <= 0:
+            logger.error(f"Inconsistencia de datos: falta el precio local del producto {product_uuid}.")
+            raise HTTPException(status_code=500, detail="Inconsistencia de datos: falta el precio local de uno o más productos.")
 
-        net_price_decimal = _to_decimal(net_price)
+        net_price_decimal = _to_decimal(local_product.price)
         quantity_decimal = _to_decimal(quantity)
         line_total_decimal = net_price_decimal * quantity_decimal
         total += line_total_decimal
-        sales_unit_uuid = local_product.sales_unit_uuid if local_product else None
 
         order_lines.append({
             "uuid": product_uuid,
-            "type": sicar_info.get("type", 0),
-            "sku": local_product.sku if local_product else "",
-            "description": local_product.name if local_product else "",
+            "sku": local_product.sku or "",
+            "description": local_product.name or "",
             "quantity": _format_quantity(quantity),
-            "unit": units_by_uuid.get(sales_unit_uuid, "PZA"),
+            "unit": local_product.unit_short_name or "PZA",
             "priceBaseTax": _format_amount(net_price_decimal),
             "priceTax": _format_amount(net_price_decimal),
             "amountTax": _format_amount(line_total_decimal),
-            "taxesIds": price_list.get("saleTaxes") or [],
         })
 
     total_str = _format_amount(total)

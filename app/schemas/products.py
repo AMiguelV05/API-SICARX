@@ -44,6 +44,7 @@ class ProductDetail(CamelModel):
     tags: Optional[list[str]]
     additional_images: Optional[list[str]]
     sales_unit_uuid: Optional[str]
+    unit_short_name: Optional[str]
     department_uuid: Optional[str]
     category_uuid: Optional[str]
     price: float
