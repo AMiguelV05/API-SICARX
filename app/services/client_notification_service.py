@@ -15,20 +15,7 @@ WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 logger = logging.getLogger(__name__)
 
 async def notify_verification_requested(client: ClientAccount) -> None:
-    """Avisa al frontend (via webhook firmado) que hay que enviar un correo de
-    verificacion, para que el frontend lo envie con su propio template de react-email y
-    su propia cuenta de Resend - mismo patron que order_notification_service.
-    notify_order_confirmed (unico otro ejemplo de webhook saliente en este codebase), ver
-    FRONTEND_INTEGRATION.md para el contrato completo. No fatal si falla, sin reintento
-    automatico - mismas razones que notify_order_confirmed.
-
-    Nombrado "verification-requested" (no "email-verification") a proposito: el evento es
-    "hay que mandar un correo de verificacion", no "el correo ya se verifico" - evita
-    confusion con un futuro evento "verified".
-
-    Esta firma (headers X-Webhook-*) es un esquema propio de este backend, sin relacion
-    con el esquema de Mercado Pago (x-signature/x-request-id, ver
-    payment_service.verify_mercadopago_webhook_signature) - no confundir ambos."""
+    """Avisa al frontend que debe enviar el correo de verificacion (el frontend lo manda con su propio Resend). No fatal, sin reintento. Nombrado "requested", no "email-verification", para no confundirse con un futuro evento "verified"."""
     try:
         token = create_email_verification_token(client.uuid)
         body = {

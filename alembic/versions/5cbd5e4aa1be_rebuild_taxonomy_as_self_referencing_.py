@@ -31,9 +31,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def _slugify(name: str) -> str:
-    """ascii, minusculas, guiones - sin depender de un paquete externo de
-    slugify. Quita acentos (comunes en nombres de categoria en espanol, p.ej.
-    "Ferreteria") via unicodedata en vez de una tabla de reemplazo manual."""
+    """ascii/minusculas/guiones, sin paquete externo; quita acentos via unicodedata."""
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
     return slug or "categoria"
@@ -45,8 +43,7 @@ def _unique_slug(base_slug: str, used: set[str], disambiguator: str) -> str:
     candidate = f"{base_slug}-{disambiguator[:6]}"
     if candidate not in used:
         return candidate
-    # Ultimo recurso, virtualmente inalcanzable con los ~cientos de filas de
-    # esta tabla, pero evita un fallo duro si de verdad colisiona.
+    # Ultimo recurso, virtualmente inalcanzable; evita un fallo duro si colisiona.
     suffix = 2
     while f"{candidate}-{suffix}" in used:
         suffix += 1
@@ -57,9 +54,7 @@ def upgrade() -> None:
     """Upgrade schema."""
     bind = op.get_bind()
 
-    # 1. slug nullable primero (safe-migration pattern: backfill antes de
-    # exigir NOT NULL/UNIQUE) - ver supabase-postgres-best-practices,
-    # schema-constraints.md.
+    # 1. slug nullable primero: backfill antes de exigir NOT NULL/UNIQUE.
     op.add_column('categories', sa.Column('slug', sa.String(), nullable=True))
 
     used_slugs: set[str] = set()
@@ -72,17 +67,12 @@ def upgrade() -> None:
     op.alter_column('categories', 'slug', nullable=False)
     op.create_unique_constraint('ux_categories_slug', 'categories', ['slug'])
 
-    # 2. parent_uuid - nullable, ninguna fila existente necesita backfill (todas
-    # se quedan como nodos raiz, ver docstring del modulo).
+    # 2. parent_uuid nullable - filas existentes se quedan como nodos raiz.
     op.add_column('categories', sa.Column('parent_uuid', sa.String(), nullable=True))
     op.create_index('ix_categories_parent_uuid', 'categories', ['parent_uuid'], unique=False)
     op.create_foreign_key('fk_categories_parent_uuid', 'categories', 'categories', ['parent_uuid'], ['uuid'])
 
-    # 3. Migra cada `department` a una fila nueva en `categories` (nodo raiz) -
-    # reusa el uuid del departamento tal cual (namespaces de uuid de Sicar X
-    # distintos para departamentos y categorias, no deberian colisionar; el
-    # chequeo de existencia de abajo es una defensa extra, no la garantia
-    # principal).
+    # 3. Migra cada department a una fila raiz en categories, reusando su uuid.
     departments = bind.execute(sa.text("SELECT uuid, name, updated_at FROM departments")).fetchall()
     for row in departments:
         already_exists = bind.execute(
@@ -100,8 +90,7 @@ def upgrade() -> None:
             {"uuid": row.uuid, "name": row.name, "slug": slug, "updated_at": row.updated_at},
         )
 
-    # 4. Tablas viejas fuera - ya no hay nada que las use (department_category
-    # antes de departments por la FK).
+    # 4. Tablas viejas fuera (department_category antes de departments por la FK).
     op.drop_table('department_category')
     op.drop_table('departments')
 
@@ -117,14 +106,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema.
-
-    Con perdida de datos a proposito: no hay forma de saber, despues del
-    hecho, cuales filas de `categories` originalmente venian de `departments`
-    (se insertaron como categorias normales), ni de reconstruir el N:M
-    original department_category (nunca se intento reconstruir al subir, ver
-    docstring del modulo). Esto revierte el ESQUEMA (columnas/tablas nuevas
-    fuera, tablas viejas de vuelta, vacias) - no restaura el contenido."""
+    """Downgrade schema. Perdida de datos a proposito: no se puede saber que categorias
+    venian de departments ni reconstruir el N:M original; solo revierte el esquema, vacio."""
     op.drop_index('ix_product_categories_product_id', table_name='product_categories')
     op.drop_table('product_categories')
 

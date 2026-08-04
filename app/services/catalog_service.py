@@ -9,7 +9,6 @@ from app.services.taxonomy_service import get_descendant_uuids
 logger = logging.getLogger(__name__)
 
 async def get_local_catalog(db: AsyncSession, filters: dict):
-    # Consulta base: solo productos activos y no eliminados
     stmt = select(Product).where(
         Product.is_deleted == False,
         Product.is_active == True
@@ -24,11 +23,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         stmt = stmt.where(Product.category_uuid == filters["category_uuid"])
 
     if filters.get("taxonomy_uuid"):
-        # Distinto de category_uuid arriba: ese es la clasificacion cruda de
-        # Sicar X (1 sola por producto); esto es el arbol propio (PIM, N:M via
-        # product_categories) - ver CLAUDE.md "Taxonomia". Incluye descendientes:
-        # filtrar por un nodo padre tambien devuelve productos etiquetados solo
-        # en un hijo.
+        # taxonomy_uuid es el arbol PIM propio (N:M via product_categories), distinto de category_uuid (clasificacion cruda de Sicar X); incluye descendientes.
         descendant_uuids = await get_descendant_uuids(db, filters["taxonomy_uuid"])
         stmt = stmt.where(Product.id.in_(
             select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
@@ -45,11 +40,9 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     if filters.get("tag"):
         stmt = stmt.where(Product.tags.contains([filters["tag"]]))
 
-    # Contar el total de resultados
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)
 
-    # Orden de los resultados
     sort_by = filters.get("sort_by")
     if sort_by == "price_asc":
         stmt = stmt.order_by(Product.price.asc())
@@ -58,10 +51,8 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     elif sort_by == "name_asc":
         stmt = stmt.order_by(Product.name.asc())
 
-    # Aplicar paginación
     stmt = stmt.limit(filters.get("limit", 60)).offset(filters.get("offset", 0))
-    
-    # Ejecutar la consulta
+
     result = await db.execute(stmt)
     products = result.scalars().all()
 
@@ -73,12 +64,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     }
 
 async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False):
-    """Busqueda por substring (case-insensitive) en sku o name, acelerada por los
-    indices GIN de pg_trgm. Los resultados donde sku o name empiezan con `q` se
-    ordenan primero, antes que las coincidencias que solo contienen `q` en medio.
-
-    `q` se escapa antes de armar el patron ILIKE - de lo contrario `%`/`_` en la busqueda
-    se interpretan como comodines de ILIKE en vez de caracteres literales."""
+    """Substring search (ILIKE) en sku/name via GIN pg_trgm; prefix matches ordenan primero. `q` se escapa para que %/_ no se interpreten como comodines ILIKE."""
     escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped_q}%"
     prefix_pattern = f"{escaped_q}%"

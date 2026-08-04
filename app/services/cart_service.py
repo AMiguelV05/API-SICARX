@@ -14,8 +14,7 @@ from app.services.order_service import _to_decimal
 logger = logging.getLogger(__name__)
 
 async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPublic], float, float]:
-    """Enriquece las lineas guardadas (solo uuid+quantity) con datos en vivo de Product -
-    precio/nombre/stock nunca se guardan en el carrito, siempre se leen frescos aqui."""
+    """Enriquece lineas guardadas (uuid+quantity) con datos frescos de Product - precio/nombre/stock nunca se guardan en el carrito."""
     uuids = [item.get("uuid") for item in raw_items if item.get("uuid")]
     products_by_uuid = {}
     if uuids:
@@ -62,8 +61,7 @@ async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartRespo
         return CartResponse(items=[], subtotal=0.0, totalQuantity=0.0, cartToken=None, updatedAt=None)
 
     enriched, subtotal, total_quantity = await _enrich(db, cart.items or [])
-    # cartToken siempre se deriva del uuid real del carrito resuelto, nunca se hace eco de lo
-    # que mando el cliente - un X-Cart-Token obsoleto/no reconocido nunca se repite de vuelta.
+    # cartToken siempre se deriva del carrito resuelto, nunca hace eco de lo que mando el cliente.
     cart_token = cart.uuid if cart.client_account_id is None else None
     return CartResponse(
         items=enriched,
@@ -99,11 +97,7 @@ async def replace_cart(
     return await get_cart_response(db, cart)
 
 async def _lock_cart(db: AsyncSession, cart_id: int) -> Cart:
-    """Relockea el carrito con SELECT...FOR UPDATE antes de leer/mutar `items`. Sin esto,
-    dos solicitudes concurrentes sobre el mismo carrito (doble click, dos pestañas) leen el
-    mismo estado inicial y cada una escribe de vuelta de forma independiente - un lost
-    update clasico donde uno de los ajustes desaparece. Mismo patron ya usado para `Order`
-    en order_history_service.prepare_local_cancellation/finalize_order_payment."""
+    """SELECT...FOR UPDATE antes de mutar `items` - sin esto, dos requests concurrentes sobre el mismo carrito producen un lost update."""
     result = await db.execute(
         select(Cart).where(Cart.id == cart_id).with_for_update().execution_options(populate_existing=True)
     )
@@ -116,11 +110,7 @@ async def clear_cart(db: AsyncSession, cart: Optional[Cart]) -> None:
     await db.commit()
 
 async def _reparent_or_merge(db: AsyncSession, client: ClientAccount, anon_cart: Cart) -> Cart:
-    """Nucleo compartido entre la fusion estricta (POST /cart/merge) y la tolerante (embebida
-    en login/registro): dado un carrito anonimo ya resuelto, lo reasigna a la cuenta (si no
-    tenia carrito propio) o suma cantidades linea por linea en el carrito existente,
-    eliminando el anonimo ya consumido. No decide que hacer si el token no resuelve a nada -
-    eso es responsabilidad de cada llamador."""
+    """Nucleo compartido entre /cart/merge y el merge tolerante de login/registro: reasigna o suma cantidades linea por linea. No resuelve el token - eso es responsabilidad del llamador."""
     client_cart = await db.scalar(select(Cart).where(Cart.client_account_id == client.id))
 
     if client_cart is None:
@@ -142,10 +132,7 @@ async def _reparent_or_merge(db: AsyncSession, client: ClientAccount, anon_cart:
     return client_cart
 
 async def merge_cart(db: AsyncSession, client: ClientAccount, cart_token: str) -> CartResponse:
-    """Fusiona un carrito anonimo (identificado por su uuid/cartToken) en el carrito de la
-    cuenta autenticada. No encontrarlo es un 404 (a diferencia del PUT anonimo, que crea uno
-    nuevo en silencio) - aqui el llamador ya deberia tener un token real en la mano, asi que
-    un exito silencioso enmascararia un bug real."""
+    """Fusiona un carrito anonimo en el de la cuenta autenticada. No encontrarlo es 404 (a diferencia del PUT anonimo, que crea uno en silencio) - aqui un exito silencioso enmascararia un bug real."""
     anon_cart = await db.scalar(
         select(Cart).where(Cart.uuid == cart_token, Cart.client_account_id.is_(None))
     )
@@ -157,11 +144,7 @@ async def merge_cart(db: AsyncSession, client: ClientAccount, cart_token: str) -
     return await get_cart_response(db, result_cart)
 
 async def try_merge_cart_token(db: AsyncSession, client: ClientAccount, cart_token: Optional[str]) -> Optional[Cart]:
-    """Version tolerante para login/registro: un cart_token ausente o que no resuelve a un
-    carrito anonimo real simplemente se ignora (se registra en el log) en vez de fallar el
-    login/registro completo - el frontend no puede saber si un token guardado sigue siendo
-    valido, y el login no debe volverse fragil por eso. Devuelve el Cart resultante si SI se
-    fusiono algo, o None si no paso nada (para que el caller sepa si limpiar la cookie)."""
+    """Version tolerante para login/registro: un cart_token invalido/ausente se ignora (logueado) en vez de fallar el login. Devuelve None si no fusiono nada."""
     if not cart_token:
         return None
     anon_cart = await db.scalar(
@@ -181,11 +164,7 @@ async def adjust_cart_item(
     product_uuid: str,
     delta: float,
 ) -> CartResponse:
-    """PATCH /cart/items: incrementa o decrementa una sola linea sin necesitar el listado
-    completo del carrito. Cantidad resultante <=0 elimina la linea. Sin carrito + delta>0
-    crea uno nuevo (mismo mint silencioso que PUT); sin carrito + delta<=0, o producto
-    ausente + delta<=0, es un no-op (200 con el estado actual) - no es un error del llamador,
-    es el mismo idioma que ya usan GET/DELETE de este recurso para la ausencia."""
+    """Incrementa/decrementa una linea por delta; cantidad <=0 la elimina. Sin carrito+delta<=0, o producto ausente+delta<=0, es un no-op 200 (mismo idioma que GET/DELETE para la ausencia)."""
     if existing_cart is None:
         if delta <= 0:
             return await get_cart_response(db, None)
@@ -208,8 +187,7 @@ async def adjust_cart_item(
                 raw_items.pop(idx)
             else:
                 raw_items[idx] = {"uuid": product_uuid, "quantity": new_qty}
-        # Reasignacion completa, no mutacion in-place: la columna JSON no esta envuelta en
-        # MutableList, SQLAlchemy solo detecta el cambio si se reemplaza el atributo entero.
+        # Reasignacion completa (no in-place): la columna JSON no usa MutableList, SQLAlchemy solo detecta cambios de atributo completo.
         existing_cart.items = raw_items
         cart = existing_cart
 

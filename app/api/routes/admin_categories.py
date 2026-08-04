@@ -20,29 +20,45 @@ router = APIRouter(prefix="/admin/categories", tags=["Admin - Taxonomy"], depend
 
 @router.post("", response_model=CategoryAdminPublic, status_code=status.HTTP_201_CREATED, summary="Crear un nodo de categoria")
 async def admin_create_category(db: DbDep, data: CategoryCreateRequest = Body()):
+    """Crea un nodo del arbol de categorias. `slug` siempre se deriva de `name` (nunca lo
+    manda el admin), desambiguado contra los slugs actuales. `parentUuid` omitido crea un
+    nodo raiz; `404` si se manda uno que no existe."""
     category = await taxonomy_service.create_category(db, data.name, data.parent_uuid)
     return CategoryAdminPublic.model_validate(category)
 
 
 @router.get("/by-product/{product_uuid}", response_model=List[CategoryAdminPublic], summary="Listar las categorias asignadas directamente a un producto")
 async def admin_list_product_categories(product_uuid: str, db: DbDep):
+    """Direccion inversa: dado un producto, sus categorias asignadas directamente (no
+    incluye ancestros). Pensado para precargar una pantalla de edicion de tags. Lista sin
+    paginar (acotada por naturaleza); `[]` si el producto existe pero no tiene ninguna."""
     categories = await taxonomy_service.get_categories_for_product(db, product_uuid)
     return [CategoryAdminPublic.model_validate(c) for c in categories]
 
 
 @router.patch("/{category_uuid}", response_model=CategoryAdminPublic, summary="Renombrar y/o mover (reasignar padre) un nodo de categoria")
 async def admin_update_category(category_uuid: str, db: DbDep, data: CategoryUpdateRequest = Body()):
+    """Actualizacion parcial (`exclude_unset`): renombrar y/o mover (reasignar
+    `parentUuid`) en la misma llamada, no hay endpoint de "mover" separado. Renombrar
+    recalcula el slug; mover valida que el nuevo padre no sea el nodo mismo ni uno de sus
+    propios descendientes (`409` si lo es, guarda contra ciclos)."""
     category = await taxonomy_service.update_category(db, category_uuid, data.model_dump(exclude_unset=True))
     return CategoryAdminPublic.model_validate(category)
 
 
 @router.delete("/{category_uuid}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar un nodo de categoria (bloqueado si tiene subcategorias o productos asignados)")
 async def admin_delete_category(category_uuid: str, db: DbDep):
+    """Borrado real (no soft-delete). `409` si el nodo todavia tiene subcategorias o
+    productos asignados en `product_categories` - hay que reasignarlos/quitarlos primero,
+    deliberadamente sin cascada ni reparenteo automatico."""
     await taxonomy_service.delete_category(db, category_uuid)
 
 
 @router.put("/{category_uuid}/products", response_model=ReplaceCategoryProductsResponse, summary="Reemplazar el conjunto completo de productos asignados a una categoria")
 async def admin_replace_category_products(category_uuid: str, db: DbDep, data: ReplaceCategoryProductsRequest = Body()):
+    """Reemplaza el conjunto COMPLETO de productos asignados directamente a la categoria
+    (`productUuids`, resueltos contra `Product.sicar_uuid`) - unica forma de poblar
+    `product_categories`. Reemplazo, no incremental. `404` si algun uuid no resuelve."""
     product_uuids = await taxonomy_service.replace_category_products(db, category_uuid, data.product_uuids)
     return ReplaceCategoryProductsResponse(category_uuid=category_uuid, product_uuids=product_uuids)
 
@@ -54,5 +70,8 @@ async def admin_list_category_products(
     limit: int = Query(default=60, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    """Lista paginada de productos asignados directamente al nodo (sin descendientes -
+    para eso esta el filtro `taxonomyUuid` de `/catalog`/`/search`). Pensada para poblar
+    la UI de edicion antes de un PUT de arriba."""
     total, products = await taxonomy_service.list_category_products(db, category_uuid, limit, offset)
     return CategoryProductsResponse(total=total, docs=[ProductBasic.model_validate(p) for p in products])

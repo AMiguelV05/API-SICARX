@@ -27,9 +27,7 @@ def upgrade() -> None:
     op.add_column('orders', sa.Column('mp_payment_method_id', sa.String(), nullable=True))
     op.add_column('orders', sa.Column('mp_ticket_url', sa.String(), nullable=True))
     op.create_index(op.f('ix_orders_mp_payment_id'), 'orders', ['mp_payment_id'], unique=True)
-    # NOTA: autogenerate tambien detecto los indices GIN de pg_trgm (ix_products_sku_trgm,
-    # ix_products_name_trgm) como "removidos" -- falso positivo ya documentado en la
-    # migracion d8ca048fb64d (no estan declarados en el modelo Product), removido de aqui.
+    # Drop de ix_products_*_trgm omitido: falso positivo (ver d8ca048fb64d).
     # ### end Alembic commands ###
 
 

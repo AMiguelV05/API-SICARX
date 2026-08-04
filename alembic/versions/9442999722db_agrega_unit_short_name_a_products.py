@@ -20,9 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # Nota: autogenerate tambien propuso create_index('ix_order_idempotency_keys_id', ...),
-    # una deriva preexistente sin relacion con este cambio (ver advertencia de CLAUDE.md
-    # sobre falsos positivos de autogenerate) - se omite a proposito, fuera de alcance aqui.
+    # ix_order_idempotency_keys_id omitido a proposito: ya cubierto por la PK.
     op.add_column('products', sa.Column('unit_short_name', sa.String(), nullable=True))
 
 

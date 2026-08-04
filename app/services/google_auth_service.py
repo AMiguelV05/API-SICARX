@@ -11,9 +11,7 @@ logger = logging.getLogger(__name__)
 GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 GOOGLE_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
 
-# Instancia a nivel de modulo -- igual que sicar_auth (app/services/sicar_auth.py) -- para
-# reusar el cache interno de PyJWKClient entre requests en vez de refetchear las llaves
-# publicas de Google en cada login.
+# Instancia a nivel de modulo para reusar el cache interno de PyJWKClient entre requests.
 _jwks_client = PyJWKClient(GOOGLE_JWKS_URL)
 
 class GoogleIdentity(TypedDict):
@@ -23,9 +21,7 @@ class GoogleIdentity(TypedDict):
     name: str
 
 def _verify_google_id_token_sync(id_token: str) -> dict:
-    """Sincrona a proposito: PyJWKClient.fetch_data usa urllib bloqueante (no httpx) para
-    buscar el JWKS de Google - ver verify_google_id_token para el wrapper en threadpool,
-    mismo patron que _hash_password_sync/hash_password en app/core/security.py."""
+    """Sincrona a proposito: PyJWKClient usa urllib bloqueante; ver verify_google_id_token para el wrapper en threadpool."""
     signing_key = _jwks_client.get_signing_key_from_jwt(id_token)
     return jwt.decode(
         id_token,
@@ -37,10 +33,7 @@ def _verify_google_id_token_sync(id_token: str) -> dict:
     )
 
 async def verify_google_id_token(id_token: str) -> GoogleIdentity:
-    """Verifica un ID token de Google Identity Services (emitido del lado del frontend) y
-    devuelve los datos de identidad ya validados. No hay intercambio servidor-a-servidor
-    con Google (sin GOOGLE_CLIENT_SECRET) - solo se valida la firma/aud/iss del token que
-    el frontend ya obtuvo directamente de Google."""
+    """Verifica un ID token de Google ya obtenido por el frontend; no hay intercambio servidor-a-servidor (sin GOOGLE_CLIENT_SECRET)."""
     try:
         payload = await asyncio.to_thread(_verify_google_id_token_sync, id_token)
     except jwt.PyJWTError as e:  # cubre tambien PyJWKClientError/PyJWKClientConnectionError

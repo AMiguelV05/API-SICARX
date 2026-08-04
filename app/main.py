@@ -1,22 +1,39 @@
 import logging
-from fastapi import FastAPI
+import uuid
+from contextvars import ContextVar
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
+from app.core.config import settings
 from app.core.rate_limit import limiter
 from app.api.v1_router import v1_router
 
+# Contextvar + logging.Filter para correlacionar todas las lineas de log de una misma
+# peticion en app.log (el worker tiene su propio sync.log aparte, no cubierto por esto -
+# ver CLAUDE.md sobre los dos procesos con logging independiente).
+request_id_ctx_var: ContextVar[str] = ContextVar("request_id", default="-")
+
+class _RequestIdLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx_var.get()
+        return True
+
 _log_formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "%(asctime)s - %(name)s - %(levelname)s - [%(request_id)s] - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 _file_handler = logging.FileHandler("app.log")
 _file_handler.setFormatter(_log_formatter)
+_file_handler.addFilter(_RequestIdLogFilter())
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_log_formatter)
+_stream_handler.addFilter(_RequestIdLogFilter())
 
 logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler])
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="API Integración Sicar X",
@@ -25,9 +42,29 @@ app = FastAPI(
     version="1.0.0"
 )
 
+if not settings.ADMIN_API_KEY:
+    logger.warning(
+        "ADMIN_API_KEY no esta configurada: todas las rutas /v1/admin/* responderan 401 "
+        "hasta que se configure (ver CLAUDE.md, seccion Admin API)."
+    )
+
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    """Asigna un X-Request-ID (del cliente o generado aqui) a cada peticion, lo expone en
+    la respuesta e inyecta cada linea de log via `request_id_ctx_var` - para grepear
+    app.log por una sola peticion en vez de correlacionar por timestamp."""
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    token = request_id_ctx_var.set(request_id)
+    try:
+        response = await call_next(request)
+    finally:
+        request_id_ctx_var.reset(token)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 origins = [
     "http://localhost",

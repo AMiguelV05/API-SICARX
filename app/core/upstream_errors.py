@@ -6,13 +6,10 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 def raise_upstream_error(response: httpx.Response, log_context: str, user_message: str, status_code: int = 502) -> NoReturn:
-    """Registra la respuesta completa de Sicar X/Mercado Pago (como ya se hacia en cada
-    sitio antes de esto) y levanta un HTTPException cuyo `detail` es `user_message` (el
-    mismo texto generico que ya se devolvia) mas, si el cuerpo de la respuesta trae un
-    mensaje legible, ese mensaje entre parentesis. Nunca se filtra `response.text` crudo
-    al cliente (podria traer HTML, stack traces o nombres de campos internos de Sicar) -
-    solo el valor de una de las claves `message`/`error`/`detail` si el cuerpo es JSON,
-    truncado a 300 caracteres. El texto completo sigue yendo integro al log."""
+    """Loguea la respuesta completa y levanta un HTTPException con `user_message` mas,
+    si lo hay, un mensaje legible del upstream entre parentesis (solo `message`/`error`/
+    `detail` de un body JSON, truncado a 300 chars) - nunca `response.text` crudo, que
+    podria traer HTML o detalles internos de Sicar."""
     logger.error(f"{log_context}: {response.status_code} - {response.text}")
 
     upstream_message = None

@@ -4,14 +4,10 @@ from pydantic import Field
 from app.schemas.base import CamelModel
 from app.schemas.client import ClientAddressPublic
 
-# GET /admin/health
-
 class AdminHealthResponse(CamelModel):
     database_ok: bool = Field(description="True si SELECT 1 respondio contra Postgres")
     sicar_token_present: bool = Field(description="True si el proceso sicar_auth de este worker/api actualmente sostiene un token en memoria")
     outbox_counts: dict[str, int] = Field(description="Conteo de sicar_sync_outbox agrupado por status (PENDING/IN_PROGRESS/SUCCEEDED/FAILED)")
-
-# GET /admin/sync/catalog-status
 
 class SyncStatusResponse(CamelModel):
     last_run_started_at: Optional[datetime] = None
@@ -20,8 +16,6 @@ class SyncStatusResponse(CamelModel):
     products_processed: Optional[int] = None
     products_deactivated: Optional[int] = None
     last_error: Optional[str] = None
-
-# GET /admin/sync/outbox
 
 class OutboxRowPublic(CamelModel):
     id: int
@@ -38,9 +32,7 @@ class OutboxListResponse(CamelModel):
     total: int
     docs: List[OutboxRowPublic]
 
-# Guia de envio con envia.com (POST /admin/orders/{uuid}/shipping/quote|generate) - ver
-# ADMIN_INTEGRATION.md. Definida antes de AdminOrderPublic para que su campo
-# `shipping_label` pueda referenciarla directamente.
+# Definida antes de AdminOrderPublic para que su campo shipping_label pueda referenciarla directamente.
 
 class ShippingLabelInfo(CamelModel):
     carrier: str
@@ -58,15 +50,8 @@ class ShippingLabelInfo(CamelModel):
     height: float
     generated_at: datetime
 
-# GET /admin/orders, GET /admin/orders/{uuid}
-
 class AdminOrderPublic(CamelModel):
-    """Superconjunto de OrderPublic (schemas/orders.py) para uso admin - misma forma base
-    (uuid/sicar_order_id/status/dispatch_status/.../items/created_at) mas campos que el
-    cliente no necesita ver de si mismo: clientEmail/clientName resueltos igual que
-    order_notification_service.notify_order_confirmed, deletedAt (los admins SI necesitan
-    ver ordenes soft-deleted), y los nuevos campos de aceptacion/mensajeria de este mismo
-    cambio (accepted_at/accepted_by/delivery_company/delivery_assigned_at)."""
+    """Superconjunto de OrderPublic para uso admin: agrega clientEmail/clientName, deletedAt (admins ven soft-deleted) y campos de aceptacion/mensajeria."""
     uuid: str
     sicar_order_id: str
     serie_folio: Optional[str]
@@ -93,8 +78,6 @@ class AdminOrderListResponse(CamelModel):
     total: int
     docs: List[AdminOrderPublic]
 
-# POST /admin/orders/{uuid}/accept
-
 class OrderAcceptRequest(CamelModel):
     accepted_by: Optional[str] = Field(default=None, description="Identificador/nombre de quien acepta - texto libre, no hay modelo de usuarios admin todavia")
 
@@ -105,8 +88,6 @@ class OrderAcceptResponse(CamelModel):
     dispatch_status: str
     sync_status: Literal["QUEUED"] = "QUEUED"
     note: str = "La aceptación ya se aplicó localmente (dispatchStatus = PENDING); se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
-
-# POST /admin/orders/{uuid}/advance-status
 
 class AdvanceDispatchStatusRequest(CamelModel):
     dispatch_status: Literal["PREPARING", "COMPLETE", "DISPATCHED"] = Field(
@@ -120,8 +101,6 @@ class AdvanceDispatchStatusResponse(CamelModel):
     sync_status: Literal["QUEUED"] = "QUEUED"
     note: str = "El nuevo estado ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
 
-# POST /admin/orders/{uuid}/assign-delivery
-
 class DeliveryAssignRequest(CamelModel):
     delivery_company: str = Field(min_length=1, description="Nombre de la paqueteria/repartidor asignado - texto libre, no valida contra ningun catalogo")
 
@@ -130,15 +109,8 @@ class DeliveryAssignResponse(CamelModel):
     delivery_company: str
     delivery_assigned_at: datetime
 
-# POST /admin/orders/{uuid}/shipping/quote
-
 class ShippingOriginOverride(CamelModel):
-    """Override opcional, campo por campo, del origen que envia.com usa para cotizar/generar
-    una guia - normalmente la direccion fija de la tienda (`ENVIA_ORIGIN_*`, ver
-    CLAUDE.md/Configuration). Cualquier campo omitido (o mandado vacio) cae de vuelta al
-    valor de `.env` correspondiente - ver `shipping_service._origin_address`. `country`/
-    `phone_code` deliberadamente no son parte de esto: el negocio solo envia dentro de
-    Mexico, no hay motivo para que el admin los cambie por pedido."""
+    """Override opcional campo por campo del origen (ENVIA_ORIGIN_*); lo omitido cae al valor de .env. Sin country/phone_code: el negocio solo envia dentro de Mexico."""
     name: Optional[str] = None
     company: Optional[str] = None
     phone: Optional[str] = None
@@ -152,9 +124,7 @@ class ShippingOriginOverride(CamelModel):
     reference: Optional[str] = None
 
 class ShippingDimensionsRequest(CamelModel):
-    """Dimensiones/peso del paquete - compartido por /shipping/quote y /shipping/generate.
-    Todos > 0 via Field(gt=0): un valor faltante o <= 0 responde 422 (Pydantic), no el
-    400 hecho a mano que ADMIN_INTEGRATION.md menciona como sugerencia original."""
+    """Dimensiones/peso del paquete, compartido por /shipping/quote y /shipping/generate; validado > 0 via Pydantic (422, no 400)."""
     weight: float = Field(gt=0, description="Kilogramos")
     length: float = Field(gt=0, description="Centimetros")
     width: float = Field(gt=0, description="Centimetros")
@@ -174,8 +144,6 @@ class ShippingQuoteOption(CamelModel):
 
 class ShippingQuoteResponse(CamelModel):
     options: List[ShippingQuoteOption]
-
-# POST /admin/orders/{uuid}/shipping/generate
 
 class ShippingGenerateRequest(ShippingDimensionsRequest):
     carrier: str = Field(min_length=1)

@@ -28,6 +28,9 @@ def _sheet_result(outcome, sheet_name: str) -> BulkImportSheetResult:
     summary="Descargar una plantilla .xlsx de ejemplo para POST /admin/bulk-import/products",
 )
 async def admin_bulk_import_template():
+    """Descarga un .xlsx de ejemplo con las hojas/columnas exactas que espera `POST
+    /products` (comparten las mismas constantes, no pueden desalinearse) - encabezados en
+    negritas, comentarios de celda y filas de ejemplo con datos ficticios."""
     file_bytes = bulk_import_service.build_template_workbook()
     return Response(
         content=file_bytes,
@@ -42,6 +45,11 @@ async def admin_bulk_import_template():
     summary="Asignacion masiva ADITIVA de categorias/vehiculos a productos desde un .xlsx (hojas 'Categorias'/'Vehiculos')",
 )
 async def admin_bulk_import_products(db: DbDep, file: UploadFile = File(...)):
+    """Importacion masiva ADITIVA de `product_categories`/`product_vehicles` desde un
+    .xlsx (hojas opcionales 'Categorias'/'Vehiculos'), resolviendo productos por `sku`
+    (+ `additional_skus` como fallback). Exito parcial: filas invalidas se omiten y se
+    reportan individualmente, solo problemas a nivel de archivo completo rechazan todo.
+    Re-subir el mismo archivo es un no-op seguro (`ON CONFLICT DO NOTHING`)."""
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Se espera un archivo .xlsx.")
 

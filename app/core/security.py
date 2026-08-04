@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import secrets
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 import bcrypt
 import jwt
-from fastapi import Security, HTTPException, status, Header, Depends
+from fastapi import Security, HTTPException, status, Header, Depends, Request
 from fastapi.security.api_key import APIKeyHeader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,10 +23,6 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 CLIENT_JWT_ALGORITHM = "HS256"
 
 async def validate_api_key(api_key: str = Security(api_key_header)):
-    """
-    Dependencia para validar que la petición provenga de nuestro
-    frontend independiente utilizando la llave secreta.
-    """
     if not api_key:
         logger.error("Falta la cabecera de autenticacion x-api-key.")
         raise HTTPException(
@@ -41,13 +39,35 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
 
     return api_key
 
-async def validate_admin_key(x_admin_key: str = Header(None, alias="X-Admin-Key")):
+# Throttle en memoria para /v1/admin/* por IP, independiente del limiter de slowapi -
+# decorar cada ruta admin individualmente seria un diff grande para una sola dependencia.
+# Mismo caveat que ese limiter: solo valido mientras `api` corra como una sola instancia.
+_ADMIN_KEY_WINDOW_SECONDS = 60
+_ADMIN_KEY_MAX_ATTEMPTS = 30
+_admin_key_attempts: dict[str, list[float]] = defaultdict(list)
+
+def _admin_key_rate_limited(client_ip: str) -> bool:
+    now = time.monotonic()
+    window_start = now - _ADMIN_KEY_WINDOW_SECONDS
+    attempts = [t for t in _admin_key_attempts[client_ip] if t > window_start]
+    attempts.append(now)
+    _admin_key_attempts[client_ip] = attempts
+    return len(attempts) > _ADMIN_KEY_MAX_ATTEMPTS
+
+async def validate_admin_key(request: Request, x_admin_key: str = Header(None, alias="X-Admin-Key")):
     """
-    Dependencia para el router /v1/admin/*. `ADMIN_API_KEY` es Optional (ver
-    app/core/config.py) porque todavia no existe un dashboard admin real - mientras no se
-    configure, `settings.ADMIN_API_KEY` es None y esta dependencia rechaza toda peticion
-    sin importar la cabecera, en vez de intentar comparar contra un valor que no existe.
+    Dependencia para el router /v1/admin/*. `ADMIN_API_KEY` es Optional (ver config.py)
+    - mientras no se configure, rechaza toda peticion sin importar la cabecera. Tambien
+    throttlea por IP (ver `_admin_key_rate_limited`), a diferencia de x-api-key.
     """
+    client_ip = request.client.host if request.client else "unknown"
+    if _admin_key_rate_limited(client_ip):
+        logger.error("Acceso denegado a ruta admin: demasiados intentos desde %s.", client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Demasiados intentos, intenta de nuevo en un minuto."
+        )
+
     if not settings.ADMIN_API_KEY or not x_admin_key or not secrets.compare_digest(x_admin_key, settings.ADMIN_API_KEY):
         logger.error("Acceso denegado a ruta admin: X-Admin-Key invalida, ausente, o ADMIN_API_KEY sin configurar.")
         raise HTTPException(
@@ -87,11 +107,10 @@ def create_client_token(client_uuid: str) -> str:
 EMAIL_VERIFICATION_EXPIRE_MINUTES = 60 * 24  # 24 horas
 
 def create_email_verification_token(client_uuid: str) -> str:
-    """Token de un solo proposito para confirmar propiedad de un correo (POST
-    /auth/verify-email). Reusa CLIENT_JWT_SECRET (no un secreto nuevo - si CLIENT_JWT_SECRET
-    se filtra, ya se pueden forjar tokens de sesion directamente, que es estrictamente peor)
-    pero lleva un claim `purpose` que _resolve_client_from_token rechaza explicitamente, para
-    que este token nunca sirva como token de sesion aunque se filtre."""
+    """Token de un solo proposito para POST /auth/verify-email. Reusa CLIENT_JWT_SECRET
+    (si ese secreto se filtra ya se pueden forjar sesiones directamente, es estrictamente
+    peor) pero lleva un claim `purpose` que _resolve_client_from_token rechaza, para que
+    nunca sirva como token de sesion."""
     expire = datetime.now(timezone.utc) + timedelta(minutes=EMAIL_VERIFICATION_EXPIRE_MINUTES)
     payload = {"sub": client_uuid, "exp": expire, "purpose": "email_verify"}
     return jwt.encode(payload, settings.CLIENT_JWT_SECRET, algorithm=CLIENT_JWT_ALGORITHM)
@@ -99,9 +118,8 @@ def create_email_verification_token(client_uuid: str) -> str:
 def decode_email_verification_token(token: str) -> str:
     """Inverso de create_email_verification_token. A diferencia de
     _resolve_client_from_token (que rechaza CUALQUIER `purpose`, por compatibilidad con
-    tokens de sesion ya emitidos antes de que este claim existiera), aqui se exige
-    explicitamente purpose == "email_verify" - todo token de este tipo es nuevo, no hay
-    compatibilidad hacia atras que preservar."""
+    tokens de sesion previos), aqui se exige purpose == "email_verify" explicitamente -
+    todo token de este tipo es nuevo, sin compatibilidad que preservar."""
     try:
         payload = jwt.decode(token, settings.CLIENT_JWT_SECRET, algorithms=[CLIENT_JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -130,11 +148,9 @@ async def _resolve_client_from_token(token: str, db: AsyncSession) -> ClientAcco
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
 
-    # Los tokens de un solo proposito (p. ej. verificacion de correo, ver
-    # create_email_verification_token) se firman con el mismo CLIENT_JWT_SECRET pero
-    # llevan un claim `purpose` que un token de sesion real nunca tiene - si esta presente,
-    # se rechaza aqui para que un enlace de verificacion filtrado no sirva tambien como
-    # token de sesion valido (misma firma, mismo sub/exp).
+    # Tokens de un solo proposito (p. ej. verificacion de correo) llevan un claim `purpose`
+    # que un token de sesion real nunca tiene - si esta presente, se rechaza para que un
+    # enlace de verificacion filtrado no sirva tambien como token de sesion.
     if payload.get("purpose") is not None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
 
@@ -162,11 +178,8 @@ async def get_current_client_header(
     x_client_token: str = Header(None, alias="X-Client-Token", description="Token JWT de la cuenta de cliente"),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Igual que `get_current_client`, pero toma el token de la cabecera `X-Client-Token`
-    en vez de `Authorization`. Usada únicamente en `/orders` y `/cancel`, donde
-    `Authorization` ya está ocupada por el token de sesión de Sicar X.
-    """
+    """Igual que `get_current_client`, pero toma el token de `X-Client-Token` en vez de
+    `Authorization`. Usada en `/orders` y `/cancel` por razones históricas (ver CLAUDE.md)."""
     if not x_client_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de la cuenta de cliente (X-Client-Token).")
 
@@ -177,10 +190,9 @@ async def get_optional_client_header(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Como `get_current_client_header`, pero devuelve `None` si la cabecera esta ausente (para
-    rutas donde el cliente puede ser anonimo, p. ej. el carrito) en vez de 401. Si la cabecera
-    SI viene pero es invalida/expirada, sigue respondiendo 401 - no se baja silenciosamente a
-    anonimo, el cliente afirmo explicitamente estar logueado.
+    Como `get_current_client_header`, pero devuelve `None` si la cabecera esta ausente
+    (rutas con cliente anonimo, p. ej. el carrito) en vez de 401 - si SI viene pero es
+    invalida/expirada, sigue respondiendo 401 en vez de bajar a anonimo en silencio.
     """
     if not x_client_token:
         return None

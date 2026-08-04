@@ -20,10 +20,6 @@ def _to_schema(node) -> CategoryNode:
 
 @router.get("/taxonomy", response_model=TaxonomyResponse, summary="Arbol de categorias para navegacion/filtros")
 async def get_taxonomy(db: DbDep):
-    """
-    Devuelve el arbol completo de categorias (PIM propio, ver CLAUDE.md
-    "Taxonomia") para construir navegacion/filtros en el frontend. Siempre
-    desde Postgres - ya no hay sincronizacion con Sicar X.
-    """
+    """Arbol completo de categorias (PIM propio, ver CLAUDE.md), siempre desde Postgres."""
     roots = await get_category_tree(db)
     return TaxonomyResponse(categories=[_to_schema(node) for node in roots])

@@ -1,8 +1,6 @@
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-# Limiter en memoria por IP -- suficiente para un solo proceso `api` (no hay multiples
-# instancias horizontales de este servicio en Railway hoy). Si eso cambia, este limiter
-# necesitaria un backend compartido (p. ej. Redis) para que el conteo sea consistente
-# entre instancias.
+# En memoria por IP - valido solo mientras `api` corra como una sola instancia;
+# necesitaria un backend compartido (p. ej. Redis) si eso cambia.
 limiter = Limiter(key_func=get_remote_address)

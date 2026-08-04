@@ -11,6 +11,10 @@ engine = create_async_engine(
     future=True,
     # pool_pre_ping: descarta conexiones muertas antes de entregarlas
     pool_pre_ping=True,
+    # pool_recycle: recicla conexiones ociosas cada 30 min, defensa adicional junto con
+    # pool_pre_ping contra cierres inesperados del lado del servidor (ver CLAUDE.md,
+    # incidentes de Postgres-O4xA).
+    pool_recycle=1800,
     # api y worker son dos procesos independientes, cada uno con su propio pool -- limites
     # explicitos y conservadores evitan agotar las conexiones del plan de Postgres en Railway.
     pool_size=5,

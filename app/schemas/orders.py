@@ -17,11 +17,7 @@ class ContactInfo(CamelModel):
     @field_validator("phone", mode="before")
     @classmethod
     def strip_phone_formatting(cls, v: Any) -> Any:
-        # El frontend (input con mascara, +52, espacios, guiones) puede mandar el
-        # telefono con formato - Sicar X (y el limite de 10 caracteres arriba) solo
-        # quiere los digitos. Un numero mexicano local son 10 digitos, asi que si
-        # sobran (por un +52 o un 1 de larga distancia antepuesto) nos quedamos con
-        # los ultimos 10 en vez de rechazar de plano.
+        # Frontend puede mandar telefono con formato (+52, espacios, guiones); nos quedamos con los ultimos 10 digitos en vez de rechazar.
         if isinstance(v, str):
             digits = re.sub(r"\D", "", v)
             return digits[-10:] if len(digits) > 10 else digits
@@ -30,9 +26,7 @@ class ContactInfo(CamelModel):
     @field_validator("email", mode="before")
     @classmethod
     def blank_email_to_none(cls, v: Any) -> Any:
-        # Un campo de email opcional sin tocar en el formulario del frontend suele
-        # mandarse como "" en vez de omitirse o null - EmailStr rechaza "" como
-        # invalido, aunque el campo sea opcional.
+        # Campo opcional sin tocar en el frontend suele llegar como "" - EmailStr lo rechaza aunque sea opcional.
         if isinstance(v, str) and v.strip() == "":
             return None
         return v
@@ -50,15 +44,8 @@ class DeliveryInfo(CamelModel):
             raise ValueError("addressUuid no debe enviarse cuando deliveryType es PICKUP.")
         return self
 
-# MODELOS PRINCIPALES
-
 class OrderCreate(CamelModel):
-    """
-    Contrato simplificado: el frontend solo envía el carrito (uuid + cantidad) y los
-    datos de entrega. Precios, impuestos, sku, descripción, unidad y totales se calculan
-    en el backend (ver order_service.build_order_payload) a partir de datos de Sicar X y
-    del catálogo local.
-    """
+    """Contrato simplificado: el frontend solo envia carrito + datos de entrega; precio/sku/totales se calculan en el backend (ver build_order_payload)."""
     products: List[ProductItem]
     deliveryInfo: DeliveryInfo
     contentId: Optional[str] = None
@@ -85,8 +72,6 @@ class OrderCancelResponse(CamelModel):
     message: str = Field(description="Mensaje de confirmación de cancelación")
     status: str = Field(description="Estado de la orden después de la cancelación")
 
-# PAGO CON MERCADO PAGO (POST /orders/{id}/pay)
-
 class PayerIdentification(CamelModel):
     type: Optional[str] = None
     number: Optional[str] = None
@@ -96,8 +81,7 @@ class PaymentPayer(CamelModel):
     identification: Optional[PayerIdentification] = None
 
 class PaymentSubmit(CamelModel):
-    """Shape del `formData` que entrega el `onSubmit` del Payment Brick (ver
-    payments_submissions/cards.md y other-payment-methods.md) - se reenvia tal cual."""
+    """Shape del `formData` del onSubmit del Payment Brick de Mercado Pago - se reenvia tal cual."""
     token: Optional[str] = Field(default=None, description="Token de tarjeta generado por el Brick (ausente en OXXO/otros metodos sin tarjeta)")
     paymentMethodId: str = Field(description="p. ej. visa, oxxo, etc.")
     issuerId: Optional[str] = None
@@ -111,8 +95,6 @@ class OrderPayResponse(CamelModel):
     mpStatus: Optional[str] = Field(default=None, description="Estado crudo de Mercado Pago: approved/pending/in_process/rejected/cancelled")
     mpStatusDetail: Optional[str] = Field(default=None, description="Detalle del estado, p. ej. motivo de rechazo")
     ticketUrl: Optional[str] = Field(default=None, description="Liga a la ficha/barcode de pago (OXXO y similares) si aplica")
-
-# HISTORIAL DE ORDENES DEL CLIENTE (GET /auth/me/orders)
 
 class OrderPublic(CamelModel):
     uuid: str

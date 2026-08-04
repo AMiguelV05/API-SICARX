@@ -24,9 +24,7 @@ def upgrade() -> None:
     op.add_column('orders', sa.Column('dispatch_status', sa.String(), nullable=True))
     op.add_column('orders', sa.Column('dispatch_history', sa.JSON(), nullable=True))
     # ### end Alembic commands ###
-    # NOTA: autogenerate tambien detecta un drop de ix_products_name_trgm/ix_products_sku_trgm
-    # como falso positivo (indices GIN creados con SQL crudo en 224799e4444b) - eliminado a
-    # proposito, ver la misma nota en 45f23f03f9ce.
+    # Drop de ix_products_*_trgm omitido: falso positivo (ver 45f23f03f9ce).
 
 
 def downgrade() -> None:

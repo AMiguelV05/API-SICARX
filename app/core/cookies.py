@@ -3,8 +3,7 @@ from app.core.config import settings
 
 CART_COOKIE_NAME = "charly_cart_token"
 CART_COOKIE_PATH = "/v1/cart"
-CART_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # ~1 anio: Cart no tiene auto-expiracion por diseno,
-                                            # una cookie de sesion contradiria eso silenciosamente.
+CART_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # ~1 anio: Cart no expira por diseno, una cookie de sesion lo contradiria.
 
 def _is_prod() -> bool:
     return settings.ENVIRONMENT.lower() == "production"

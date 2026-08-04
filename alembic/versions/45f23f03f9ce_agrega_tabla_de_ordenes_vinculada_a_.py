@@ -44,9 +44,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_orders_sicar_order_id'), 'orders', ['sicar_order_id'], unique=True)
     op.create_index(op.f('ix_orders_uuid'), 'orders', ['uuid'], unique=True)
     # ### end Alembic commands ###
-    # NOTA: autogenerate tambien detecta un drop de ix_products_name_trgm/ix_products_sku_trgm
-    # como falso positivo (son indices GIN creados con SQL crudo en 224799e4444b; Alembic no
-    # los reconoce via reflexion normal). Eliminado a proposito de este archivo - no tocar esos indices aqui.
+    # Drop de ix_products_*_trgm omitido: falso positivo, son indices GIN via SQL crudo (224799e4444b).
 
 
 def downgrade() -> None:

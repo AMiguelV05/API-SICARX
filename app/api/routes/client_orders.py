@@ -15,11 +15,7 @@ async def list_my_orders(
     limit: int = Query(default=60, ge=1, le=200, description="Cantidad de ordenes por pagina (1-200)"),
     offset: int = Query(default=0, ge=0, description="Paginacion (inicio)"),
 ):
-    """
-    Historial de pedidos de la cuenta autenticada, mas recientes primero. Solo
-    Postgres local (sin llamadas a Sicar X) — igual que `POST /products` frente a
-    `GET /products/{uuid}`.
-    """
+    """Historial de pedidos de la cuenta autenticada, mas recientes primero. Solo Postgres local."""
     total, orders = await list_client_orders(db, client.id, limit, offset)
     return OrderListResponse(total=total, docs=orders)
 

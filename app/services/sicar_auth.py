@@ -13,20 +13,14 @@ class SicarAuthManager:
     """Gestor centralizado para la autenticación B2B con Sicar X"""
 
     def __init__(self):
-        # Inicia con el token configurado en las variables de entorno
         self._current_token = settings.SICAR_TOKEN
         self._refresh_lock = asyncio.Lock()
 
     async def get_token(self) -> str:
-        # Devuelve el token administrativo activo en memoria.
         return self._current_token
 
     async def refresh_token(self, stale_token: str = None) -> str:
-        """
-        Fuerza un inicio de sesión con Sicar, actualiza la caché y devuelve el nuevo token.
-        Si `stale_token` ya no coincide con el token en caché al obtener el lock, significa
-        que otra corrutina ya lo refrescó, así que evitamos un login duplicado.
-        """
+        """Refresca el token con Sicar X; si `stale_token` ya no coincide con el cache, otra corrutina ya lo refresco y se evita un login duplicado."""
         async with self._refresh_lock:
             if stale_token is not None and stale_token != self._current_token:
                 return self._current_token
@@ -82,11 +76,7 @@ class SicarAuthManager:
                 return self._current_token
 
     async def request_with_retry(self, request_func):
-        """
-        Ejecuta `request_func(token)` con el token administrativo actual y,
-        si Sicar X responde 401, refresca el token una sola vez (deduplicado
-        entre corrutinas concurrentes) y reintenta la petición.
-        """
+        """Reintenta una vez con token refrescado si Sicar X responde 401 (refresh deduplicado entre corrutinas)."""
         token = await self.get_token()
         response = await request_func(token)
 
@@ -97,5 +87,4 @@ class SicarAuthManager:
 
         return response
 
-# Instancia global
 sicar_auth = SicarAuthManager()

@@ -7,20 +7,12 @@ from app.models.order import OrderIdempotencyKey
 
 logger = logging.getLogger(__name__)
 
-# Sin infraestructura de limpieza en segundo plano para reclamos abandonados (p. ej. el
-# proceso murio entre el reclamo y la creacion real de la orden) - se resuelve al vuelo
-# en cada intento comparando la antiguedad del reclamo contra este umbral.
+# Reclamos abandonados no se limpian en segundo plano; se detectan al vuelo comparando antiguedad contra este umbral.
 ABANDONED_CLAIM_THRESHOLD = timedelta(minutes=2)
 
 
 async def claim_idempotency_key(db: AsyncSession, client_account_id: int, idempotency_key: str) -> tuple[OrderIdempotencyKey, bool]:
-    """Intenta reclamar `idempotency_key` para este cliente en su propia mini-transaccion
-    (independiente del resto del flujo de creacion de la orden). Devuelve `(fila, is_new)`:
-    `is_new=True` si la clave nunca se habia visto (reclamo exitoso, seguir con la
-    creacion normal). `is_new=False` si ya existia - el llamador decide que hacer segun
-    si `order_uuid` ya esta poblado (orden ya creada, reintento seguro) o sigue en NULL
-    (en proceso o abandonada). La fila devuelta siempre tiene sus atributos cargados
-    (nunca expirados), sea por `refresh` tras el commit o por la consulta directa."""
+    """Reclama `idempotency_key`; is_new=False si ya existia (el llamador decide segun si order_uuid ya esta poblado)."""
     claim = OrderIdempotencyKey(client_account_id=client_account_id, idempotency_key=idempotency_key)
     db.add(claim)
     try:
@@ -46,7 +38,6 @@ def is_claim_abandoned(claim: OrderIdempotencyKey) -> bool:
 
 
 async def discard_claim(db: AsyncSession, claim: OrderIdempotencyKey) -> None:
-    """Borra un reclamo abandonado o fallido para que el cliente pueda reintentar de
-    inmediato con la misma clave, en vez de esperar ABANDONED_CLAIM_THRESHOLD."""
+    """Borra un reclamo abandonado para permitir reintento inmediato con la misma clave."""
     await db.delete(claim)
     await db.commit()

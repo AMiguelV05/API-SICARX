@@ -25,14 +25,7 @@ def _mp_headers(idempotency_key: str | None = None) -> dict:
     return headers
 
 async def create_preference(order: Order) -> dict | None:
-    """Crea una preferencia de Mercado Pago para habilitar la opcion de pago con
-    cuenta/wallet en el Payment Brick (initialization.preferenceId, ver
-    default_rendering.md). Un solo item agregado (no uno por producto) - SICAR permite
-    cantidades fraccionarias (productos por peso) que el schema de items de MP no
-    soporta bien, y el desglose por producto es puramente cosmetico en la pagina de MP.
-
-    No fatal: si falla, la orden sigue soportando tarjeta/OXXO sin la opcion de wallet -
-    mismo patron que otros pasos de enriquecimiento no criticos en este codebase."""
+    """Crea una preferencia de MP para habilitar pago con wallet en el Payment Brick. Un solo item agregado (no uno por producto) - MP no soporta bien cantidades fraccionarias. No fatal: si falla, la orden sigue soportando tarjeta/OXXO."""
     payload = {
         "items": [
             {
@@ -64,11 +57,7 @@ async def create_preference(order: Order) -> dict | None:
         return None
 
 async def create_payment(order: Order, submit_data: dict) -> dict:
-    """Cobra via Mercado Pago (POST /v1/payments). `transaction_amount` siempre se toma
-    de `order.total` (ya persistido en Postgres), nunca de submit_data - mismo principio
-    de "no confiar en el precio que manda el cliente" que build_order_payload aplica en
-    order_service.py. Usa order.uuid como X-Idempotency-Key para que un submit repetido
-    del frontend deduplique del lado de Mercado Pago en vez de cobrar dos veces."""
+    """Cobra via MP. `transaction_amount` siempre viene de `order.total` en Postgres, nunca de submit_data. Usa order.uuid como X-Idempotency-Key para deduplicar reintentos."""
     payload = {
         "transaction_amount": float(order.total),
         "description": f"Pedido Ferretería Charly #{order.uuid}",
@@ -106,9 +95,7 @@ async def create_payment(order: Order, submit_data: dict) -> dict:
     return response.json()
 
 async def get_payment(payment_id: str) -> dict:
-    """Consulta el estado autoritativo de un pago. Los webhooks solo avisan que ALGO
-    cambio - nunca hay que confiar en el cuerpo de la notificacion, siempre se re-consulta
-    aqui (practica recomendada por Mercado Pago)."""
+    """Consulta el estado autoritativo de un pago; los webhooks solo avisan que algo cambio, nunca se confia en su cuerpo."""
     async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
         response = await client.get(f"{PAYMENTS_URL}/{payment_id}", headers=_mp_headers())
 
@@ -118,11 +105,7 @@ async def get_payment(payment_id: str) -> dict:
     return response.json()
 
 async def refund_payment(payment_id: str) -> dict:
-    """Reembolsa un pago ya aprobado - usado por /orders/{id}/cancel cuando el pago de
-    la orden a cancelar ya se habia capturado. Mercado Pago exige X-Idempotency-Key en
-    este endpoint (confirmado en vivo: sin el header responde 400 "Header
-    X-Idempotency-Key can't be null") - se usa el propio payment_id, para que un reintento
-    sobre el mismo pago deduplique en vez de reembolsar dos veces."""
+    """Reembolsa un pago aprobado. MP exige X-Idempotency-Key en este endpoint (400 sin el header) - se usa el propio payment_id para deduplicar reintentos."""
     async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
         response = await client.post(f"{PAYMENTS_URL}/{payment_id}/refunds", headers=_mp_headers(idempotency_key=payment_id))
 
@@ -132,9 +115,7 @@ async def refund_payment(payment_id: str) -> dict:
     return response.json()
 
 async def cancel_payment(payment_id: str) -> dict:
-    """Cancela un pago aun pendiente/en proceso (no capturado) - mas barato que un
-    reembolso, usado por /orders/{id}/cancel cuando el pago de la orden a cancelar
-    sigue pendiente (p. ej. esperando pago en OXXO)."""
+    """Cancela un pago pendiente/en proceso (no capturado) - mas barato que un reembolso."""
     async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
         response = await client.put(f"{PAYMENTS_URL}/{payment_id}", json={"status": "cancelled"}, headers=_mp_headers())
 
@@ -144,21 +125,7 @@ async def cancel_payment(payment_id: str) -> dict:
     return response.json()
 
 async def verify_mercadopago_webhook_signature(request: Request) -> bool:
-    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET. Nombre explicito (no solo
-    `verify_webhook_signature`) porque este codebase tiene un segundo esquema de firma de
-    webhooks, no relacionado: el saliente hacia el frontend en
-    order_notification_service.notify_order_confirmed (headers X-Webhook-*, propio de
-    este backend). No confundir ambos - ver el docstring de ese modulo.
-
-    NOTA IMPORTANTE: el manifest exacto ya no aparece verbatim en la documentacion
-    publica actual de Mercado Pago (empuja a usar su SDK oficial, que es sincrono y por
-    eso no se usa en este proyecto async - ver payment_service module docstring). El
-    formato de abajo (`id:{data.id};request-id:{x-request-id};ts:{ts};`, HMAC-SHA256,
-    comparacion contra el segmento `v1`) esta confirmado por multiples fuentes de la
-    comunidad y por discusiones de los SDKs oficiales de Mercado Pago, pero DEBE
-    verificarse contra una notificacion real (el simulador de webhooks del dashboard de
-    Mercado Pago) antes de confiar en produccion.
-    """
+    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET (esquema distinto al webhook saliente propio de este backend, ver notify_order_confirmed). El formato del manifest esta confirmado por fuentes de la comunidad pero no verificado contra una notificacion real - verificar con el simulador de MP antes de confiar en produccion."""
     x_signature = request.headers.get("x-signature")
     x_request_id = request.headers.get("x-request-id")
     if not x_signature or not x_request_id:

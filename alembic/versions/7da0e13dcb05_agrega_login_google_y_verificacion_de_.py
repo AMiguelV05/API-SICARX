@@ -42,9 +42,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    # Nota: si existen filas con auth_provider='google' (hashed_password IS NULL), este
-    # alter_column fallara al reimponer NOT NULL - esperado, mismo caracter "best-effort"
-    # que otros downgrade() de este repo frente a datos reales ya divergentes.
+    # Falla si hay cuentas Google (hashed_password NULL) - esperado, downgrade best-effort.
     op.alter_column('client_accounts', 'hashed_password', existing_type=sa.String(), nullable=False)
 
     op.drop_column('client_accounts', 'email_verified_at')

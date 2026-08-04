@@ -19,11 +19,7 @@ def _admin_webhook_configured() -> bool:
     return bool(settings.ADMIN_DASHBOARD_BASE_URL and settings.ADMIN_WEBHOOK_SECRET)
 
 async def _post_to_admin(path: str, body: dict, log_context: str) -> None:
-    """Nucleo compartido de firma/envio para los dos webhooks de este modulo - mismo
-    esquema (headers X-Webhook-*, HMAC sobre f"{ts}." + cuerpo crudo) que
-    order_notification_service/order_cancellation_notification_service, pero con su
-    propio destino/secreto (ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET) porque el
-    dashboard admin es un receptor distinto del frontend de la tienda."""
+    """Nucleo compartido de firma/envio de los 2 webhooks admin; mismo esquema que los webhooks al frontend pero con su propio destino/secreto (dashboard admin, no la tienda)."""
     try:
         if not _admin_webhook_configured():
             logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
@@ -52,10 +48,7 @@ async def _post_to_admin(path: str, body: dict, log_context: str) -> None:
         logger.error(f"{log_context}: error inesperado enviando el webhook al dashboard admin: {type(e).__name__}: {e!r}")
 
 async def notify_admin_order_cancelled(order: Order) -> None:
-    """Avisa al futuro dashboard admin que una orden paso a CANCELLED - llamada desde
-    order_cancellation_notification_service.notify_order_cancelled, nunca directamente.
-    Señal puramente informativa (distinta de notify_admin_sicar_sync_failed abajo, que
-    señala que algo necesita intervencion manual)."""
+    """Señal informativa al dashboard admin de que la orden se cancelo; llamar solo desde notify_order_cancelled."""
     client_account = await order.awaitable_attrs.client_account
     body = OrderPublic.model_validate(order).model_dump(by_alias=True, mode="json")
     body["clientEmail"] = client_account.email if client_account else None
@@ -63,10 +56,7 @@ async def notify_admin_order_cancelled(order: Order) -> None:
     await _post_to_admin(ORDER_CANCELLED_WEBHOOK_PATH, body, f"Orden {order.uuid} cancelada")
 
 async def notify_admin_sicar_sync_failed(order: Order, last_error: str) -> None:
-    """Avisa al futuro dashboard admin que app/worker/sicar_sync_worker.py agoto sus
-    reintentos de cancelacion en Sicar X para esta orden - a diferencia de
-    notify_admin_order_cancelled, esta es una señal de "necesita reconciliacion manual
-    en el panel de Sicar X", no una notificacion de rutina."""
+    """Señal de que el worker agoto reintentos con Sicar X - requiere reconciliacion manual, a diferencia de la notificacion de rutina de arriba."""
     body = {
         "orderUuid": order.uuid,
         "sicarOrderId": order.sicar_order_id,

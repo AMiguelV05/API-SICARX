@@ -16,11 +16,7 @@ WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 logger = logging.getLogger(__name__)
 
 async def notify_order_cancelled(order: Order) -> None:
-    """Avisa al frontend (via webhook firmado) y al futuro dashboard admin que un
-    pedido paso a CANCELLED - unico punto que deben llamar los 3 call sites de
-    cancelacion (POST /cancel, DELETE, y la rama rejected/cancelled de
-    finalize_order_payment). Mismo patron que order_notification_service.notify_order_confirmed:
-    no fatal si falla, sin reintento automatico - ver FRONTEND_INTEGRATION.md."""
+    """Unico punto que deben llamar los 3 call sites de cancelacion; notifica frontend+admin. No fatal, sin reintento."""
     await _notify_frontend(order)
     await admin_notification_service.notify_admin_order_cancelled(order)
 

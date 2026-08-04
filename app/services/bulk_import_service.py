@@ -48,9 +48,8 @@ class BulkImportOutcome:
 
 
 def _load_workbook(file_bytes: bytes):
-    """Un archivo invalido/corrupto (no un .xlsx real, o un .zip roto) lanza distintas
-    excepciones segun el caso especifico - se capturan todas como un 400 uniforme, no vale
-    la pena distinguir el tipo exacto de corrupcion para el admin."""
+    """Un archivo invalido/corrupto lanza distintas excepciones segun el caso - todas se
+    capturan como un 400 uniforme."""
     try:
         return load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception as exc:
@@ -59,16 +58,10 @@ def _load_workbook(file_bytes: bytes):
 
 
 def _read_sheet(wb, sheet_name: str, required_columns: tuple[str, ...]) -> tuple[bool, list[tuple[int, dict]]]:
-    """Devuelve (existe_la_hoja, filas). Cada fila es (numero_de_fila_excel, dict de
-    columna->valor crudo) - el numero de fila viene directo de enumerar despues del header
-    (1-indexed, fila 2 = primera fila de datos), asi que los errores reportados abajo
-    apuntan a la fila real sin necesidad de traducir nada.
-
-    Falta de la hoja no es un error (la carga puede traer solo una de las dos). Que la hoja
-    exista pero le falten columnas requeridas SI es un error estructural (422, para todo el
-    archivo) - no tiene sentido generar un error por fila para una hoja con la forma
-    equivocada. El limite de filas se revisa mientras se itera (no confiando en
-    ws.max_row, que en modo read_only puede ser impreciso en archivos editados a mano)."""
+    """Devuelve (existe_la_hoja, filas), fila = (numero_de_fila_excel, dict columna->valor).
+    Falta de la hoja no es error (puede traerse solo una de las dos); hoja presente sin
+    columnas requeridas si lo es (422, archivo completo). Limite de filas se cuenta
+    iterando, no via ws.max_row (impreciso en modo read_only en archivos editados a mano)."""
     if sheet_name not in wb.sheetnames:
         return False, []
     ws = wb[sheet_name]
@@ -105,11 +98,9 @@ def _clean_str(value) -> str:
 
 
 def _split_slugs(value) -> list[str]:
-    """`categorySlug` acepta un solo slug o una lista separada por coma/punto y coma en la
-    misma celda (p. ej. `"herramientas, jardineria"`) - asi un producto con varias
-    categorias no necesita una fila por categoria. Tokens vacios (comas de mas, celda en
-    blanco) se descartan; sin ningun delimitador presente se devuelve una lista de un solo
-    elemento, asi que el formato de una sola categoria por fila sigue funcionando igual."""
+    """`categorySlug` acepta uno o varios slugs separados por coma/punto y coma en la misma
+    celda; sin delimitador se devuelve como lista de un solo elemento (compatible con el
+    formato de una categoria por fila)."""
     raw = _clean_str(value)
     if not raw:
         return []
@@ -117,12 +108,9 @@ def _split_slugs(value) -> list[str]:
 
 
 async def _resolve_products(db: AsyncSession, skus: set[str]) -> dict[str, int]:
-    """sku (en mayusculas, comparacion insensible a mayusculas/minusculas) -> Product.id,
-    solo productos activos (is_deleted=False). Resuelve primero por Product.sku exacto
-    (salvo case) y luego, solo para los skus que quedaron sin resolver, hace un fallback
-    contra additional_skus (JSON, no JSONB - se castea inline). Hoy NINGUN producto tiene
-    additional_skus poblado (confirmado en vivo), asi que este segundo query normalmente
-    devuelve 0 filas y casi nunca se ejecuta con datos reales."""
+    """sku (case-insensitive) -> Product.id, solo productos activos. Resuelve primero por
+    Product.sku exacto y luego, para los que quedan sin resolver, hace fallback contra
+    additional_skus (JSON, casteado a JSONB inline)."""
     if not skus:
         return {}
 
@@ -161,19 +149,11 @@ async def _resolve_categories(db: AsyncSession, slugs: set[str]) -> dict[str, st
 async def _resolve_vehicle_combos(
     db: AsyncSession, combos: set[tuple[str | None, str, str, str | None]]
 ) -> dict[tuple[str | None, str, str, str | None], list[Vehicle]]:
-    """combo = (vehicleType_o_None, make, model, engine_o_None), comparados sin distinguir
-    mayusculas/minusculas (ver CLAUDE.md - la tabla vehicles tiene casing inconsistente entre
-    filas, p. ej. "ITALIKA" vs "Chevrolet") -> TODOS los fitments que coinciden, para
-    CUALQUIER anio (el filtro por anio se aplica despues, fila por fila, en
-    _vehicles_matching_year, porque varias filas del Excel pueden compartir el mismo combo
-    con anios distintos).
-
-    Una sola consulta para TODA la hoja Vehiculos sin importar cuantos combos distintos haya
-    - se arma un OR de condiciones AND (mismo patron and_/or_ que
-    vehicle_service.assign_products_to_model_years, agregado sobre N combos en vez de N
-    anios de un solo make/model), troceado en bloques de MAX_VEHICLE_COMBOS_PER_QUERY solo
-    como salvaguarda - un archivo real referencia un puñado de marcas/modelos distintos, asi
-    que en la practica esto es casi siempre 1 sola consulta."""
+    """combo = (vehicleType|None, make, model, engine|None), comparado case-insensitive ->
+    todos los fitments que coinciden para cualquier anio (el filtro por anio se aplica
+    despues, por fila, en _vehicles_matching_year). Una sola consulta (OR de ANDs) para
+    toda la hoja, troceada en bloques de MAX_VEHICLE_COMBOS_PER_QUERY solo como
+    salvaguarda."""
     if not combos:
         return {}
 
@@ -192,9 +172,7 @@ async def _resolve_vehicle_combos(
         result = await db.execute(select(Vehicle).where(or_(*conditions)))
         all_vehicles.extend(result.scalars().all())
 
-    # Re-agrupa en memoria: la consulta ya trae exactamente lo que cada combo pide, pero al
-    # ser un OR compartido no se sabe de que combo vino cada fila devuelta - reconstruye la
-    # pertenencia por combo aqui (barato, ambas listas son chicas para un archivo real).
+    # Re-agrupa en memoria porque el OR compartido no indica de que combo vino cada fila.
     by_combo: dict[tuple, list[Vehicle]] = {c: [] for c in combos}
     for v in all_vehicles:
         for vt, make, model, engine in combos:
@@ -213,11 +191,8 @@ def _vehicles_matching_year(vehicles: list[Vehicle], year: int) -> list[Vehicle]
 
 
 async def _bulk_insert_pairs(db: AsyncSession, table, pairs: list[dict], conflict_cols: list[str], returning_col) -> int:
-    """Mismo patron pg_insert(...).on_conflict_do_nothing(...).returning(...) que
-    vehicle_service.assign_products_to_model_years, generalizado para product_categories y
-    product_vehicles - ON CONFLICT DO NOTHING hace esto aditivo e idempotente (subir el
-    mismo archivo dos veces no duplica ni falla, simplemente no inserta nada la segunda
-    vez)."""
+    """ON CONFLICT DO NOTHING hace esto aditivo e idempotente - subir el mismo archivo dos
+    veces no duplica ni falla."""
     if not pairs:
         return 0
     stmt = pg_insert(table).values(pairs).on_conflict_do_nothing(index_elements=conflict_cols).returning(returning_col)
@@ -228,9 +203,8 @@ async def _bulk_insert_pairs(db: AsyncSession, table, pairs: list[dict], conflic
 def _process_categories_rows(
     rows: list[tuple[int, dict]], product_map: dict[str, int], category_map: dict[str, str]
 ) -> tuple[list[dict], list[_RowError]]:
-    """Una fila puede traer varios slugs en `categorySlug` (ver `_split_slugs`) - cada slug
-    se resuelve de forma independiente, asi que una fila con 3 slugs donde 1 no existe
-    agrega las 2 categorias validas y reporta un solo error (no bloquea las otras 2)."""
+    """Cada slug de `categorySlug` se resuelve de forma independiente - un slug invalido no
+    bloquea los demas de la misma fila."""
     pairs, errors = [], []
     seen = set()
     for row_num, data in rows:
@@ -304,11 +278,8 @@ def _process_vehicles_rows(
 
 async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkImportOutcome:
     """Orquestador: parsea el .xlsx, resuelve productos/categorias/vehiculos en un numero
-    pequeno y constante de consultas (independiente de cuantas filas tenga el archivo),
-    construye pares (categoria|vehiculo, producto) validos + errores por fila, y hace UN
-    SOLO commit al final con dos INSERT ... ON CONFLICT DO NOTHING - aditivo, idempotente
-    ante reintentos. Las validaciones por fila nunca tocan la base de datos; solo un error
-    inesperado real de base de datos revertiria toda la solicitud."""
+    constante de consultas, y hace un solo commit final (aditivo, idempotente). Las
+    validaciones por fila nunca tocan la base de datos."""
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -365,10 +336,8 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
 
 
 def _write_header(ws, columns: tuple[str, ...], comments: dict[str, str]) -> None:
-    """Escribe la fila 1 en negritas, con un comentario de celda por columna que lo tenga
-    (ver `comments`), y ajusta el ancho de columna a algo legible - reusa exactamente los
-    nombres de columna que `_read_sheet` espera, asi que la plantilla nunca puede
-    desalinearse del lado que la lee."""
+    """Reusa exactamente los nombres de columna que `_read_sheet` espera, para que la
+    plantilla nunca se desalinee del lado que la lee."""
     for idx, name in enumerate(columns, start=1):
         cell = ws.cell(row=1, column=idx, value=name)
         cell.font = Font(bold=True)
@@ -378,14 +347,9 @@ def _write_header(ws, columns: tuple[str, ...], comments: dict[str, str]) -> Non
 
 
 def build_template_workbook() -> bytes:
-    """Plantilla de ejemplo descargable para `POST /admin/bulk-import/products` - mismas
-    hojas/columnas que `_read_sheet` exige (`CATEGORIES_SHEET`/`VEHICLES_SHEET`/
-    `*_REQUIRED_COLUMNS`), asi que nunca puede quedar desalineada del lado que la lee.
-    Filas de ejemplo con datos claramente ficticios (no un producto/categoria/vehiculo real
-    sacado de la base) - no envejece si los datos reales cambian, y si un admin la sube tal
-    cual sin editarla, cada fila simplemente sale como un error por fila (SKU_NOT_FOUND/
-    CATEGORY_SLUG_NOT_FOUND/VEHICLE_NOT_FOUND), no un error fatal - el diseño de exito
-    parcial de import_bulk_assignments ya cubre ese caso."""
+    """Mismas hojas/columnas que `_read_sheet` exige. Filas de ejemplo con datos ficticios -
+    si un admin la sube sin editarla, cada fila sale como error por fila, no fatal (el
+    diseno de exito parcial de import_bulk_assignments ya cubre ese caso)."""
     wb = Workbook()
 
     ws_cat = wb.active

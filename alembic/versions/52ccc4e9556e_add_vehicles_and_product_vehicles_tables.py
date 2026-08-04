@@ -48,9 +48,7 @@ def upgrade() -> None:
     )
     op.create_index('ix_product_vehicles_product_id', 'product_vehicles', ['product_id'], unique=False)
     # ### end Alembic commands ###
-    # NOTE: autogenerate also flagged 'ix_order_idempotency_keys_id' as missing (pre-existing
-    # drift between OrderIdempotencyKey.id's index=True and its original migration, unrelated
-    # to this change) - intentionally left out of this migration to keep it scoped.
+    # ix_order_idempotency_keys_id omitted on purpose: already covered by the PK.
 
 
 def downgrade() -> None:

@@ -72,14 +72,12 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 "stock": 1
             }
 
-            # SISTEMA DE REINTENTOS Y AUTO-LOGIN
             retry_count = 0
             success = False
             items = []
 
             while retry_count < MAX_RETRIES and not success:
                 try:
-                    # Siempre pedimos el token más fresco de la memoria
                     current_token = await sicar_auth.get_token()
                     
                     headers = bearer_json_headers(current_token)
@@ -119,7 +117,6 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     retry_count += 1
                     await asyncio.sleep(2 ** retry_count)
 
-            # Si después de X intentos falló, abortamos este ciclo de sincronización
             if not success:
                 logger.error(f"Abortando sincronizacion. Fallo critico persistente en el offset {offset}.")
                 break 
@@ -128,7 +125,6 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 has_more_products = False
                 break
 
-            # Lógica de Inserción/Actualización en PostgreSQL
             product_values = []
             for p in items:
                 prices_obj = p.get("prices") or {}
@@ -139,8 +135,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         f"{p.get('uuid')}. Precio se guardara como 0.00. Prices disponibles: {list(prices_obj.keys())}"
                     )
 
-                # Decimal(str(...)) evita heredar el error de representacion binaria de
-                # float al guardar en la columna Numeric.
+                # Decimal(str(...)): evita error de representacion binaria de float en la columna Numeric.
                 product_values.append({
                     "sicar_uuid": p.get("uuid"),
                     "sku": p.get("sku", ""),
@@ -174,12 +169,11 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             offset += len(items)
         logger.info(f"Sincronizacion finalizada")
         
-    # Fase de limpieza
     deactivated_count = 0
     if sync_completed_successfully:
         logger.info("Iniciando limpieza de productos eliminados")
         try:
-            # Filtramos por is_deleted == False para no actualizar registros que ya estaban borrados previamente.
+            # is_deleted == False evita re-tocar registros ya borrados previamente.
             stmt = (
                 update(Product)
                 .where(Product.last_sync_id != current_sync_id)
@@ -204,10 +198,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     return total_procesados, deactivated_count, sync_completed_successfully
 
 async def _record_sync_start() -> None:
-    """Upsert de la fila unica (id=1) de SyncStatus - ver GET /v1/admin/sync/catalog-status.
-    Sesion propia y corta, independiente de la sesion larga que sync_sicar_catalog usa
-    para las paginas de upsert de Product, para que un fallo dentro de esta escritura
-    nunca interfiera con la sincronizacion real."""
+    """Sesion propia y corta (ver GET /v1/admin/sync/catalog-status), separada de la
+    sesion larga de sync_sicar_catalog para que un fallo aqui no afecte la sincronizacion real."""
     async with AsyncSessionLocal() as session:
         stmt = insert(SyncStatus).values(id=1, last_run_started_at=datetime.now(timezone.utc))
         stmt = stmt.on_conflict_do_update(
@@ -259,13 +251,10 @@ async def main():
     scheduler = AsyncIOScheduler()
 
     scheduler.add_job(scheduled_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
-    # Drena sicar_sync_outbox (cancelaciones locales pendientes de avisarle a Sicar X) -
-    # cadencia mas corta que el sync de catalogo porque una cancelacion es sensible al
-    # tiempo, no un simple refresco de datos. Ver app/worker/sicar_sync_worker.py.
+    # Drena sicar_sync_outbox; cadencia mas corta que el sync de catalogo por ser sensible al tiempo.
     scheduler.add_job(scheduled_sicar_sync_job, 'interval', minutes=1, max_instances=1, coalesce=True, next_run_time=datetime.now())
     scheduler.start()
-    
-    # Mantiene el hilo principal vivo
+
     while True:
         await asyncio.sleep(1)
 

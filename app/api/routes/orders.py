@@ -32,48 +32,31 @@ async def create_order(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", description="Opcional. Si se repite la misma clave (p. ej. un reintento de red del mismo submit de checkout), se devuelve la orden ya creada en vez de crear una duplicada."),
 ):
     """
-    Contrato semiautomático: el frontend solo envía `products: [{uuid, quantity}]` y
-    `deliveryInfo`; precios, sku, descripción, unidad y totales se calculan en el
-    backend a partir del catálogo local (`order_service.build_order_payload`) — sin
-    ninguna llamada en vivo a Sicar X en esta ruta.
+    El frontend solo envía `products: [{uuid, quantity}]` y `deliveryInfo`; precio, sku,
+    descripción, unidad y totales se calculan aquí desde el catálogo local, sin ninguna
+    llamada en vivo a Sicar X.
 
-    `Idempotency-Key` (opcional): un identificador generado por el frontend (p. ej. un
-    UUID por click en "pagar") que, si se reenvía sin cambios en un reintento, hace que
-    esta llamada devuelva la orden ya creada la primera vez en vez de crear una segunda
-    orden. Sin este header el comportamiento es igual que antes.
+    `Idempotency-Key` (opcional): reenviar la misma clave en un reintento devuelve la
+    orden ya creada en vez de duplicarla.
 
-    Requiere `X-Client-Token`: JWT de la cuenta de cliente local (obtenido de
-    `POST /auth/login` o `/auth/register`) — identifica qué `ClientAccount` queda dueña
-    de la orden para que después pueda verla en `GET /auth/me/orders`. Login es
-    obligatorio para comprar; no existe checkout anónimo. (Ya no requiere ningún otro
-    token — el antiguo `Authorization` con el token de sesión del cliente web en Sicar X,
-    obtenido de `POST /session/init`, fue eliminado junto con esa ruta: la validación de
-    carrito ahora es puramente local, ver CLAUDE.md.)
+    Requiere `X-Client-Token` (JWT de cuenta de cliente local) — login obligatorio, no
+    existe checkout anónimo.
 
-    Esta llamada SOLO reserva el pedido localmente (queda en `TO_PAY`) y prepara el cobro
-    con Mercado Pago — todavía no cobra nada. Devuelve `preferenceId`/`amount` para que
-    el frontend renderice el Payment Brick, y `orderUuid`/`id` para el siguiente paso:
-    `POST /orders/{id}/pay` con el `formData` del `onSubmit` del Brick (tarjeta/OXXO). Si
-    el comprador paga con Mercado Pago Wallet, esa vía nunca llama a este backend — el
-    webhook (`POST /payments/webhook`) es quien confirma el pago en ese caso.
+    Esta llamada SOLO reserva el pedido localmente (`TO_PAY`) y crea la preferencia de
+    Mercado Pago — todavía no cobra nada. Devuelve `preferenceId`/`amount` para el
+    Payment Brick y `orderUuid`/`id` para `POST /orders/{id}/pay` (tarjeta/OXXO); si el
+    comprador paga con Wallet, la confirmación llega vía `POST /payments/webhook`.
 
-    `deliveryInfo.deliveryType` acepta `PICKUP` (recoger en tienda) o `DELIVERYMAN`
-    (entrega a domicilio). Para `DELIVERYMAN`, `deliveryInfo.addressUuid` es obligatorio
-    y debe ser el `uuid` de una dirección ya guardada del cliente autenticado (ver
-    `GET /auth/me/addresses`) — se resuelve aquí mismo (404 si no existe o no pertenece
-    al cliente) y se traduce al formato exacto que espera Sicar X. No se calcula ni se
-    cobra ningún costo de envío en esta llamada (`amount` sigue siendo solo el total de
-    productos, igual que en `PICKUP`) — pendiente de una futura integración.
+    `deliveryInfo.deliveryType`: `PICKUP` o `DELIVERYMAN` (requiere `addressUuid` de una
+    dirección ya guardada del cliente, 404 si no existe o no es suya). No se calcula ni
+    cobra costo de envío en esta llamada.
     """
     branch_id = order_payload.branchId or 151456
     price_list_uuid = order_payload.priceListUuid or settings.SICAR_PRICE_LIST_ID
     content_id = order_payload.contentId or str(uuid4())
 
-    # Suma en Decimal (no float) para lineas duplicadas del mismo producto: sumar floats
-    # directamente (p. ej. 0.1 + 0.2 en un producto a granel) puede arrastrar ruido de
-    # representacion binaria (0.30000000000000004) hacia build_order_payload, el mismo tipo
-    # de deriva que ya causo el rechazo "precio alterado" documentado en CLAUDE.md - ahi el
-    # bug estaba del lado del precio; aqui es el mismo problema del lado de la cantidad.
+    # Suma en Decimal, no float: sumar floats directamente (p. ej. 0.1 + 0.2 en un producto
+    # a granel) puede arrastrar ruido de representacion binaria hacia build_order_payload.
     requested_quantities = {}
     for p in order_payload.products:
         if p.uuid:
@@ -84,18 +67,16 @@ async def create_order(
     if not uuids:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El carrito no contiene productos válidos.")
 
-    # Idempotencia: reclamo en su propia mini-transaccion, independiente del commit
-    # atomico de mas abajo (creacion de la orden). `claim`/`claim_pending` solo se usan
-    # si se recibio el header - sin el, este bloque entero es un no-op.
+    # Reclamo de idempotencia en su propia mini-transaccion, independiente del commit de
+    # mas abajo. Sin el header, este bloque entero es un no-op.
     claim = None
     claim_pending = False
     if idempotency_key:
         claim, is_new = await claim_idempotency_key(db, client.id, idempotency_key)
         if not is_new:
             if claim.order_uuid:
-                # deleted_at.is_(None): una orden borrada (DELETE /orders/{id}) no debe
-                # resucitarse via un reintento de idempotencia - debe caer al camino de
-                # crear una orden nueva, como si la clave no tuviera nada asociado.
+                # deleted_at.is_(None): una orden borrada no debe resucitarse via un
+                # reintento de idempotencia - debe crearse una nueva.
                 result = await db.execute(
                     select(Order).where(Order.uuid == claim.order_uuid, Order.deleted_at.is_(None))
                 )
@@ -123,7 +104,6 @@ async def create_order(
         claim_pending = True
 
     try:
-        # Pre-validación de stock/disponibilidad y datos de precio/impuestos usando el token fresco
         local_products = await validate_cart_items(db, uuids, requested_quantities)
 
         delivery_address_snapshot = None
@@ -158,9 +138,8 @@ async def create_order(
                 "country": "MEX",
                 "reference": address.references,
             }
-            # Foto fija del address book en la forma ClientAddressPublic (uuid/label/lat/lng
-            # incluidos) - distinta del dict arriba, que es la forma que exige Sicar X. Ver
-            # Order.delivery_address_snapshot y ADMIN_INTEGRATION.md ("Guia de envio").
+            # Foto fija del address book en la forma ClientAddressPublic, distinta del
+            # dict de arriba (el formato que exige Sicar X) - ver Order.delivery_address_snapshot.
             delivery_address_snapshot = ClientAddressPublic.model_validate(address).model_dump(mode="json", by_alias=True)
         else:
             delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True)
@@ -176,10 +155,8 @@ async def create_order(
         )
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
 
-        # Descuento local de inventario (protege al catalogo/carrito en linea de vender
-        # de mas) - en un solo lote, no un UPDATE por linea. Sicar X NO se entera de esta
-        # orden todavia: eso solo pasa si un admin la acepta (admin_service.accept_order),
-        # ver CLAUDE.md, "SICAR es solo ERP de inventario".
+        # Descuento local de inventario en un solo lote. Sicar X no se entera de esta orden
+        # hasta que un admin la acepte (admin_service.accept_order).
         deltas = [(item.get("uuid"), -_to_decimal(item.get("quantity", 0))) for item in order_payload_dict["ecOrderDto"]["products"]]
         await apply_stock_deltas(db, deltas)
 
@@ -201,9 +178,7 @@ async def create_order(
             claim.order_uuid = local_order.uuid
             claim_pending = False
 
-        # Único commit: el descuento de stock local, la fila local Order
-        # (create_local_order) y el reclamo de idempotencia (si aplica) se persisten
-        # juntos o se revierten juntos.
+        # Único commit: stock, Order y el reclamo de idempotencia se persisten o revierten juntos.
         await db.commit()
         await db.refresh(local_order)
 
@@ -242,17 +217,13 @@ async def pay_order(
     submit: PaymentSubmit = Body(),
 ):
     """
-    Cobra, via Mercado Pago, el pedido creado por `POST /orders` (`order_id` es el `id`
-    devuelto por esa llamada). Recibe el `formData` tal cual lo entrega el `onSubmit` del
-    Payment Brick (tarjeta u OXXO/otros metodos con submit sincrono — el metodo Wallet no
-    llama a esta ruta, ver `POST /orders`). Requiere `X-Client-Token`; la orden debe
-    pertenecer a la cuenta autenticada (404 si no, mismo patron que `/cancel`).
+    Cobra, via Mercado Pago, el pedido creado por `POST /orders`. Recibe el `formData`
+    del `onSubmit` del Payment Brick (tarjeta/OXXO — Wallet no llama a esta ruta).
+    Requiere `X-Client-Token`; 404 si la orden no pertenece a la cuenta autenticada.
 
-    El monto cobrado SIEMPRE es el `total` ya guardado en la orden — nunca un valor
-    enviado en el body — para no confiar en un precio que pueda venir manipulado desde
-    el cliente. Segun el resultado del cobro, la orden pasa a `PAID` (aprobado,
-    aplicando tambien el pago interno en Sicar X), sigue en `TO_PAY` (pendiente - OXXO,
-    tarjeta en revision) o pasa a `CANCELLED` (rechazado - libera el stock reservado).
+    El monto cobrado SIEMPRE es el `total` ya guardado en la orden, nunca el del body.
+    Segun el resultado, la orden pasa a `PAID`, sigue `TO_PAY` (OXXO/tarjeta pendiente)
+    o pasa a `CANCELLED` (rechazado, libera el stock reservado).
     """
     local_order = await get_owned_order_by_sicar_id(db, client.id, order_id)
 
@@ -292,34 +263,22 @@ async def cancel_order(
     cancel_payload: OrderCancel = Body(),
 ):
     """
-    Cancela un pedido localmente de inmediato (status, stock, notificaciones) y requiere
-    el header `X-Client-Token` (cuenta de cliente local): la orden debe pertenecer al
-    cliente autenticado, o se responde 404 (sin revelar si la orden existe pero es de
-    otra cuenta). `order_id` es el `id` devuelto por `POST /orders`.
+    Cancela un pedido localmente de inmediato (status, stock, notificaciones). Requiere
+    `X-Client-Token`; 404 si la orden no pertenece al cliente autenticado.
 
-    La cancelacion en Sicar X ya NO ocurre en esta llamada: se encola en
-    `sicar_sync_outbox` y la procesa `app/worker/sicar_sync_worker.py` de forma
-    asincrona, con reintentos - asi un Sicar X caido nunca bloquea que un cliente
-    cancele su pedido. `sicarTimestamp` en la respuesta es ahora el momento en que la
-    cancelacion se acepto localmente, no una confirmacion de Sicar X (ver
-    FRONTEND_INTEGRATION.md).
+    La cancelacion en Sicar X ya NO ocurre aqui: se encola en `sicar_sync_outbox` y la
+    procesa el worker de forma asincrona/con reintentos, asi Sicar X caido nunca bloquea
+    la cancelacion. `sicarTimestamp` es el momento local de aceptacion, no de Sicar X.
 
-    Devuelve 409 si la orden ya esta CANCELLED, o si `dispatch_status` ya es
-    "DISPATCHED" (ya fue enviada y no puede cancelarse por este medio) - "COMPLETE"
-    no cuenta para este segundo caso, ya que tambien es el estado terminal de pedidos
-    PICKUP que nunca se enviaron.
+    409 si la orden ya esta CANCELLED, o si `dispatch_status` es "DISPATCHED" (ya
+    enviada) — "COMPLETE" no cuenta, tambien es el estado terminal de pedidos PICKUP.
 
-    Si la orden ya tiene un pago de Mercado Pago asociado, se limpia ese lado
-    (reembolso si ya estaba aprobado, o cancelacion si seguia pendiente/en proceso) -
-    eso si sigue siendo sincrono, Mercado Pago es un sistema aparte con su propio
-    esquema de reintentos/webhooks. Si esta llamada pierde la carrera para cancelar la
-    orden (otra solicitud concurrente ya la marco CANCELLED primero) DESPUES de haber
-    resuelto el pago con Mercado Pago, el nuevo `mp_status` se conserva de todos modos
-    en vez de perderse en un rollback - ver el manejo de `mp_resolved_here` mas abajo.
+    Si hay un pago de Mercado Pago asociado, se reembolsa/cancela de forma sincrona
+    antes de la cancelacion local (`mp_resolved_here` conserva ese resultado aunque
+    esta solicitud pierda la carrera de cancelacion local).
 
-    El stock se restaura a partir de `local_order.items` (lo realmente reservado al
-    crear la orden), no de `cancel_payload.products` — ese campo se sigue aceptando por
-    compatibilidad con el frontend pero ya no se usa para nada, ver FRONTEND_INTEGRATION.md.
+    El stock se restaura desde `local_order.items`, no `cancel_payload.products` (ese
+    campo ya no se usa, ver FRONTEND_INTEGRATION.md).
     """
     cash_register_uuid = cancel_payload.cashRegisterUuid
 
@@ -338,12 +297,9 @@ async def cancel_order(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue enviada y no puede cancelarse.")
 
     # True si esta solicitud ya resolvio (reembolso/cancelacion) el pago de Mercado Pago
-    # - un hecho externo, no reversible - antes de intentar la cancelacion local. Si
-    # `prepare_local_cancellation` termina rechazando esta solicitud (409, otra
-    # solicitud concurrente ya cancelo la orden primero), el except de abajo usa esta
-    # bandera para NO revertir ese cambio de mp_status: el pago ya se resolvio de
-    # verdad, perderlo en un rollback dejaria la contabilidad local desincronizada de
-    # lo que realmente paso en Mercado Pago.
+    # - un hecho externo no reversible. Si prepare_local_cancellation rechaza despues
+    # (409, otra solicitud ya cancelo la orden), el except de abajo usa esta bandera
+    # para NO revertir ese cambio de mp_status en el rollback.
     mp_resolved_here = False
 
     try:
@@ -396,31 +352,19 @@ async def delete_order(
     db: DbDep,
 ):
     """
-    Descarta una orden que quedo reservada en Sicar X (`TO_PAY`) pero nunca se pago. Ya
-    NO borra la fila de `orders` por completo — la marca con `deleted_at` (soft-delete)
-    en su lugar, para que `app/worker/sicar_sync_worker.py` siga teniendo la fila
-    disponible y pueda avisarle a Sicar X de la cancelacion de forma asincrona (mismo
-    mecanismo que `/cancel`, ver `sicar_sync_outbox`). De cara al cliente el contrato no
-    cambia: `deleted_at` se filtra en todas las consultas de historial
-    (`list_client_orders`, `get_client_order`, `get_owned_order_by_sicar_id`,
-    `get_order_by_uuid`), asi que la orden desaparece de `GET /auth/me/orders` de
-    inmediato, exactamente como documenta FRONTEND_INTEGRATION.md - solo que ahora la
-    fila persiste (oculta) en vez de perderse, lo cual es estrictamente mejor: nada que
-    reconciliar se pierde si la sincronizacion con Sicar X llegara a fallar.
+    Descarta una orden reservada (`TO_PAY`) que nunca se pago. Ya NO borra la fila —
+    la marca con `deleted_at` (soft-delete) para que el worker siga pudiendo avisarle a
+    Sicar X de la cancelacion de forma asincrona (mismo mecanismo que `/cancel`). De
+    cara al cliente el contrato no cambia: `deleted_at` se filtra en toda consulta de
+    historial, asi que la orden desaparece de `GET /auth/me/orders` de inmediato.
 
-    Requiere `X-Client-Token`; la orden debe pertenecer al cliente autenticado (404 si
-    no, mismo patron que `/cancel` — y sigue siendo 404, no 409, en una segunda llamada
-    sobre la misma orden ya borrada, porque el filtro de arriba hace que ya no se
-    encuentre: la ruta se mantiene idempotente). Solo aplica a ordenes en `TO_PAY` - 409
-    si ya esta `PAID` o `CANCELLED` (esas si se conservan visibles y no se pueden borrar
-    por aqui).
+    Requiere `X-Client-Token`; 404 si la orden no pertenece al cliente autenticado (y
+    en una segunda llamada sobre la misma orden ya borrada — idempotente). 409 si ya
+    esta `PAID` o `CANCELLED`.
 
-    Antes de encolar la cancelacion: cancela cualquier pago de Mercado Pago que haya
-    quedado pendiente/en proceso (OXXO sin pagar, tarjeta en revision - nunca
-    `approved`, porque eso ya habria puesto la orden en `PAID` y quedo excluido arriba).
-    Si esta llamada pierde la carrera para cancelar la orden (otra solicitud
-    concurrente ya la marco CANCELLED primero) DESPUES de haber cancelado el pago con
-    Mercado Pago, el nuevo `mp_status` se conserva de todos modos - ver `mp_resolved_here`.
+    Antes de encolar la cancelacion, cancela cualquier pago de Mercado Pago pendiente/en
+    proceso (nunca `approved`, eso ya la habria puesto en `PAID`) - ver `mp_resolved_here`
+    para el manejo de la carrera con una cancelacion concurrente.
     """
     local_order = await get_owned_order_by_sicar_id(db, client.id, order_id)
 

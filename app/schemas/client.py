@@ -42,8 +42,7 @@ class ClientAddressBase(CamelModel):
     country: Optional[str] = None
     zip_code: Optional[str] = None
     references: Optional[str] = None
-    # Coordenadas resueltas por el frontend (envia.com Geocodes API u otro geocoder) - este
-    # backend nunca geocodifica, solo las persiste.
+    # Coordenadas resueltas por el frontend (geocoder externo) - este backend nunca geocodifica.
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     is_default: bool = False

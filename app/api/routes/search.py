@@ -11,10 +11,8 @@ router = APIRouter(tags=["Search"], dependencies=[Depends(validate_api_key)])
 @router.post("/search", response_model=SearchResponse, summary="Buscar productos por sku o nombre")
 async def search(db: DbDep, filter_data: SearchFilter = Body()):
     """
-    Busca productos cuyo `sku` o `name` contengan el texto de `q` (sin distinguir
-    mayúsculas/minúsculas). Sirve desde la base de datos local, igual que `POST /products`.
-    Admite los mismos filtros `department_uuid`/`category_uuid` que `POST /products`, y
-    `in_stock` para mostrar solo productos con stock > 0.
+    Busca productos cuyo `sku` o `name` contengan `q` (case-insensitive), desde la base
+    de datos local. Admite los mismos filtros que `POST /products`.
     """
     try:
         result = await search_products(

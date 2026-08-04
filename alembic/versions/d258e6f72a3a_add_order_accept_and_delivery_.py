@@ -31,11 +31,7 @@ def upgrade() -> None:
     sa.Column('last_error', sa.String(), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
-    # NOTA: autogenerate tambien detecto 'ix_order_idempotency_keys_id' como faltante (drift
-    # preexistente y no relacionado - OrderIdempotencyKey.id ya tiene index=True en el modelo
-    # pero la migracion original que creo la tabla nunca genero ese indice). Se omite
-    # deliberadamente aqui para que esta migracion se quede enfocada en accept/delivery/
-    # sync_status - si se quiere corregir ese drift, que sea su propia migracion aparte.
+    # ix_order_idempotency_keys_id omitido a proposito: ya cubierto por la PK.
     op.add_column('orders', sa.Column('accepted_at', sa.DateTime(timezone=True), nullable=True))
     op.add_column('orders', sa.Column('accepted_by', sa.String(), nullable=True))
     op.add_column('orders', sa.Column('delivery_company', sa.String(), nullable=True))

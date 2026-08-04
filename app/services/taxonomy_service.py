@@ -13,9 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class CategoryTreeNode:
-    """Nodo en memoria del arbol de categorias - no es el modelo ORM (evita
-    mutar `Category.children`, que SQLAlchemy ya usa para su propia relacion
-    perezosa)."""
+    """Nodo en memoria del arbol - no es el modelo ORM (evita mutar `Category.children`, usado por la relacion perezosa de SQLAlchemy)."""
 
     __slots__ = ("uuid", "name", "slug", "children")
 
@@ -27,17 +25,7 @@ class CategoryTreeNode:
 
 
 async def get_category_tree(db: AsyncSession) -> list[CategoryTreeNode]:
-    """Arbol completo de categorias, siempre desde Postgres - ya no hay
-    sincronizacion perezosa con Sicar X (ver CLAUDE.md, "Taxonomia": esta
-    tabla es administrada por humanos, no un cache de Sicar X). La tabla es
-    chica (decenas/cientos de filas incluso con 500k productos, es taxonomia
-    no dato por producto) asi que se trae completa en una sola consulta y el
-    arbol se arma en Python agrupando por `parent_uuid`, en vez de una consulta
-    recursiva - mas simple y mas que suficiente a este tamano. Se ordena por
-    `name` (insensible a mayusculas) en la consulta - como el arbol se arma
-    iterando estas filas una sola vez, un orden global por nombre alcanza para
-    que tanto `roots` como los `children` de cada nodo salgan alfabetizados
-    (toda subsecuencia de una secuencia ordenada esta ordenada)."""
+    """Arbol completo desde Postgres, sin sync con Sicar X (tabla administrada por humanos, ver CLAUDE.md). Tabla chica - se trae completa y se arma en Python agrupando por `parent_uuid`. Ordenado por `name` en la consulta, lo que alfabetiza tanto roots como children."""
     result = await db.execute(
         select(Category.uuid, Category.name, Category.slug, Category.parent_uuid).order_by(func.lower(Category.name))
     )
@@ -55,12 +43,7 @@ async def get_category_tree(db: AsyncSession) -> list[CategoryTreeNode]:
 
 
 async def get_descendant_uuids(db: AsyncSession, category_uuid: str) -> list[str]:
-    """`{category_uuid} unido a todos sus descendientes`, via `WITH RECURSIVE`
-    - usado para que filtrar por un nodo padre (p. ej. "Motocicleta") tambien
-    devuelva productos etiquetados solo en un hijo (p. ej. "Encendido"). Una
-    CTE recursiva es la herramienta correcta aqui - una tabla de cierre
-    transitivo o nested sets serian optimizacion prematura para un arbol de
-    este tamano (ver CLAUDE.md)."""
+    """category_uuid + todos sus descendientes via WITH RECURSIVE - filtrar por un nodo padre tambien devuelve productos etiquetados en un hijo."""
     query = text("""
         WITH RECURSIVE descendants AS (
             SELECT uuid FROM categories WHERE uuid = :category_uuid
@@ -75,9 +58,7 @@ async def get_descendant_uuids(db: AsyncSession, category_uuid: str) -> list[str
 
 
 async def get_categories_for_product(db: AsyncSession, product_uuid: str) -> list[Category]:
-    """Direccion inversa de `list_category_products` - dado un producto, que categorias
-    tiene asignadas DIRECTAMENTE (sin incluir ancestros). Pensada para una pantalla admin
-    de "editar tags de este producto" que necesita precargar la seleccion actual."""
+    """Direccion inversa de `list_category_products`: categorias asignadas DIRECTAMENTE a un producto (sin ancestros)."""
     product = await db.scalar(select(Product).where(Product.sicar_uuid == product_uuid, Product.is_deleted == False))
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
@@ -91,24 +72,17 @@ async def get_categories_for_product(db: AsyncSession, product_uuid: str) -> lis
     return list(result.scalars().all())
 
 
-# --- Admin: CRUD del arbol + asignacion de productos (/v1/admin/categories/*) ---
-# A diferencia de get_category_tree/get_descendant_uuids arriba (solo lectura, usadas
-# por el storefront), lo de abajo muta `categories`/`product_categories` y solo lo
-# llama app/api/routes/admin_categories.py (gateado por validate_admin_key).
+# Desde aqui: muta categories/product_categories, solo llamado por admin_categories.py (validate_admin_key).
 
 def _slugify(name: str) -> str:
-    """Espeja (no importa - las migraciones son historia congelada, no una dependencia
-    en runtime) la logica de slugify ya escrita para la migracion 5cbd5e4aa1be: ascii,
-    minusculas, guiones, sin acentos."""
+    """Espeja la logica de slugify de la migracion 5cbd5e4aa1be (no la importa - las migraciones son historia congelada)."""
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
     return slug or "categoria"
 
 
 async def _unique_slug(db: AsyncSession, name: str, *, exclude_uuid: str | None = None) -> str:
-    """A diferencia del helper de la migracion (que desambiguaba contra un set en
-    memoria de una sola pasada), esto consulta los slugs reales actuales de la tabla -
-    corre en cada create/rename, no en una migracion de una sola vez."""
+    """A diferencia del helper de la migracion, consulta los slugs reales de la tabla en cada create/rename."""
     base = _slugify(name)
     query = select(Category.slug).where(Category.slug.like(f"{base}%"))
     if exclude_uuid:
@@ -144,10 +118,7 @@ async def create_category(db: AsyncSession, name: str, parent_uuid: str | None) 
 
 
 async def update_category(db: AsyncSession, category_uuid: str, data: dict) -> Category:
-    """`data` viene de `CategoryUpdateRequest.model_dump(exclude_unset=True)` en la ruta -
-    solo los campos que el admin realmente mando estan presentes aqui, asi que
-    "parent_uuid" en data con valor None significa "mover a raiz", y "parent_uuid"
-    ausente de data significa "no tocar el padre"."""
+    """`data` es exclude_unset=True: "parent_uuid": None significa mover a raiz; ausente significa no tocar el padre."""
     category = await db.get(Category, category_uuid)
     if category is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categoria no encontrada.")
@@ -198,9 +169,7 @@ async def delete_category(db: AsyncSession, category_uuid: str) -> None:
 
 
 async def replace_category_products(db: AsyncSession, category_uuid: str, product_uuids: list[str]) -> list[str]:
-    """Reemplaza el conjunto COMPLETO de productos asignados a `category_uuid` en una
-    sola transaccion (borra todo lo existente, inserta el nuevo conjunto resuelto) -
-    no es un add/remove incremental."""
+    """Reemplaza el conjunto COMPLETO de productos asignados (no add/remove incremental)."""
     category = await db.get(Category, category_uuid)
     if category is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categoria no encontrada.")
@@ -229,10 +198,7 @@ async def replace_category_products(db: AsyncSession, category_uuid: str, produc
 
 
 async def list_category_products(db: AsyncSession, category_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:
-    """Solo productos asignados DIRECTAMENTE a `category_uuid` - a diferencia del filtro
-    `taxonomy_uuid` de catalog_service.py, deliberadamente no incluye descendientes (esto
-    es para poblar la UI de edicion de un nodo especifico, no para navegacion/filtros del
-    storefront)."""
+    """Solo productos asignados DIRECTAMENTE (sin descendientes, a diferencia del filtro taxonomy_uuid) - para la UI de edicion, no para el storefront."""
     category = await db.get(Category, category_uuid)
     if category is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categoria no encontrada.")

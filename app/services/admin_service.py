@@ -23,11 +23,7 @@ logger = logging.getLogger(__name__)
 
 OUTBOX_STATUSES = ("PENDING", "IN_PROGRESS", "SUCCEEDED", "FAILED")
 
-# Transiciones legales para POST /admin/orders/{uuid}/advance-status - dispatch_status
-# actual -> conjunto de targets permitidos (adelante y un paso de reversion, ver
-# ADMIN_INTEGRATION.md). PENDING_ACCEPTANCE deliberadamente ausente: salir de ahi es
-# trabajo exclusivo de /accept (Sicar X nunca acepta PENDING_ACCEPTANCE como target de
-# PUT /external/v1/dispatch, asi que no hay nada que revertir hacia ese estado).
+# Transiciones legales para /advance-status (adelante + un paso de reversion). PENDING_ACCEPTANCE ausente: salir de ahi es trabajo exclusivo de /accept.
 _LEGAL_DISPATCH_TRANSITIONS: dict[str, set[str]] = {
     "PENDING": {"PREPARING"},
     "PREPARING": {"PENDING", "COMPLETE"},
@@ -60,11 +56,8 @@ async def get_health(db: AsyncSession) -> AdminHealthResponse:
 
 
 async def get_catalog_sync_status(db: AsyncSession) -> SyncStatusResponse:
-    """Lee la fila unica (id=1) escrita por sync_task.py al iniciar/terminar cada pasada
-    de sincronizacion. Si el worker nunca ha corrido en este ambiente (base de datos
-    recien migrada), la fila todavia no existe - se responde con todos los campos en
-    None en vez de un 404, ya que "el worker nunca ha corrido" es un estado valido a
-    reportar, no un error de la ruta."""
+    """Fila unica (id=1) escrita por sync_task.py; si el worker nunca corrio, responde con
+    todos los campos en None en vez de 404."""
     row = await db.get(SyncStatus, 1)
     if row is None:
         return SyncStatusResponse()
@@ -106,9 +99,7 @@ async def _to_admin_order_public(order: Order) -> AdminOrderPublic:
     public = AdminOrderPublic.model_validate(order)
     public.client_email = client_email
     public.client_name = client_account.name if client_account else None
-    # order.delivery_address_snapshot no coincide de nombre con AdminOrderPublic.delivery_address
-    # (ver Order.delivery_address_snapshot), asi que model_validate(order) no lo llena solo -
-    # se mapea aqui a mano, igual que client_email/client_name arriba.
+    # delivery_address_snapshot no coincide de nombre con AdminOrderPublic.delivery_address - se mapea a mano.
     if order.delivery_address_snapshot:
         public.delivery_address = ClientAddressPublic.model_validate(order.delivery_address_snapshot)
     return public
@@ -125,14 +116,11 @@ async def list_orders_admin(
     limit: int,
     offset: int,
 ) -> tuple[int, list[AdminOrderPublic]]:
-    """A diferencia de todo lookup existente en order_history_service.py, este NO esta
-    acotado a un client_account_id especifico - es busqueda admin sobre todas las
-    cuentas. client_email hace join contra ClientAccount solo cuando se pide (evita el
-    join en la consulta comun sin ese filtro)."""
+    """A diferencia del resto de order_history_service.py, no esta acotado a un cliente -
+    busqueda admin sobre todas las cuentas."""
     from app.models.client import ClientAccount  # import perezoso: evita ciclo import-time con order.py
 
-    # selectinload evita el N+1: sin esto, _to_admin_order_public dispara una consulta
-    # extra por fila (hasta 200 por pagina) al acceder a order.awaitable_attrs.client_account.
+    # selectinload evita N+1 en _to_admin_order_public (order.awaitable_attrs.client_account).
     query = select(Order).options(selectinload(Order.client_account))
     count_query = select(func.count()).select_from(Order)
 
@@ -170,17 +158,11 @@ async def get_order_admin(db: AsyncSession, order_uuid: str, *, include_deleted:
 
 
 async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | None) -> Order:
-    """Marca la orden como aceptada y avanza dispatch_status a PENDING localmente de
-    inmediato, y encola una fila de sicar_sync_outbox con action="ACCEPT" para que el
-    worker aplique el UNICO aviso que este backend le hace a Sicar X en todo el ciclo de
-    vida de una orden: el descuento de inventario (ver CLAUDE.md, "SICAR es solo ERP de
-    inventario"; sicar_stock_service.apply_order_stock_delta). Mismo principio "Postgres
-    local autoritativo de inmediato" que ya usa generate_shipping_label para DISPATCHED:
-    el dashboard admin es quien decide el estado, Sicar X solo se entera despues.
-
-    Requiere `order.status == "PAID"` - aceptar (y por lo tanto descontar inventario real
-    en Sicar X) una orden que todavia no se ha cobrado de verdad no tiene sentido, y antes
-    no habia ningun chequeo de status aqui."""
+    """Marca aceptada y avanza dispatch_status a PENDING localmente de inmediato; encola
+    SicarSyncOutbox(action="ACCEPT") para que el worker descuente inventario real en
+    Sicar X - el unico aviso que este backend le hace a Sicar X en todo el ciclo de vida
+    de una orden (ver CLAUDE.md, "SICAR es solo ERP de inventario"). Requiere
+    `status == "PAID"`: no tiene sentido descontar inventario de una orden sin cobrar."""
     order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
@@ -214,20 +196,12 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
 
 
 async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, target_status: str) -> Order:
-    """Avanza (o revierte un paso) dispatch_status localmente de inmediato - puramente
-    local, ya no le avisa nada a Sicar X (ver CLAUDE.md, "SICAR es solo ERP de
-    inventario": el unico aviso a Sicar X en todo el ciclo de vida de una orden es el
-    descuento/reversión de inventario en accept_order/prepare_local_cancellation, nunca
-    el dispatch_status en si). Cubre PENDING<->PREPARING<->COMPLETE<->DISPATCHED (ver
-    _LEGAL_DISPATCH_TRANSITIONS); PENDING_ACCEPTANCE->PENDING sigue siendo trabajo
-    exclusivo de accept_order.
-
-    COMPLETE->DISPATCHED solo aplica a ordenes DELIVERYMAN (para PICKUP, COMPLETE ya es
-    el estado terminal - "Listo para recoger" es solo la etiqueta que el dashboard le da
-    a COMPLETE, no un estado propio). DISPATCHED->COMPLETE (revertir) se bloquea si la
-    orden ya tiene shipping_label real de envia.com generado - ese hecho (guia con costo
-    ya pagado) no es reversible desde aqui, a diferencia de un DISPATCHED alcanzado
-    manualmente por esta misma funcion."""
+    """Avanza/revierte dispatch_status localmente de inmediato - puramente local, ya no le
+    avisa nada a Sicar X (el unico aviso real es el inventario en
+    accept_order/prepare_local_cancellation). COMPLETE->DISPATCHED solo aplica a
+    DELIVERYMAN (PICKUP ya es terminal en COMPLETE); DISPATCHED->COMPLETE se bloquea si
+    ya existe un shipping_label real de envia.com (guia con costo ya pagado, no
+    reversible)."""
     order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
@@ -281,9 +255,8 @@ async def assign_delivery(db: AsyncSession, order_uuid: str, delivery_company: s
 
 
 async def _get_order_ready_for_shipping(db: AsyncSession, order_uuid: str) -> Order:
-    """Lookup + validaciones compartidas por quote_shipping/generate_shipping_label -
-    ver ADMIN_INTEGRATION.md, seccion "Guia de envio con envia.com". No confiar en que el
-    frontend ya valido deliveryType/dispatchStatus antes de llamar aqui."""
+    """Lookup + validaciones compartidas por quote_shipping/generate_shipping_label - no
+    asume que el frontend ya valido deliveryType/dispatchStatus."""
     order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
@@ -304,10 +277,8 @@ async def _get_order_ready_for_shipping(db: AsyncSession, order_uuid: str) -> Or
 
 
 async def quote_shipping(db: AsyncSession, order_uuid: str, data: ShippingQuoteRequest) -> list[ShippingQuoteOption]:
-    """No persiste nada - se puede llamar repetidamente mientras el admin ajusta
-    peso/medidas antes de generar la guia real (ver quote_shipping vs
-    generate_shipping_label en ADMIN_INTEGRATION.md). `data.origin` (opcional) permite
-    overridear cualquier subconjunto de campos del origen - ver ShippingOriginOverride."""
+    """No persiste - se puede llamar repetidamente mientras el admin ajusta peso/medidas.
+    `data.origin` (opcional) overridea campos del origen - ver ShippingOriginOverride."""
     order = await _get_order_ready_for_shipping(db, order_uuid)
     origin_overrides = data.origin.model_dump(exclude_none=True) if data.origin else None
     options = await shipping_service.get_shipping_quote(order, data.weight, data.length, data.width, data.height, origin_overrides)
@@ -315,11 +286,8 @@ async def quote_shipping(db: AsyncSession, order_uuid: str, data: ShippingQuoteR
 
 
 async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: ShippingGenerateRequest) -> Order:
-    """Genera una guia real (con costo) via envia.com y, si tiene exito, persiste el
-    resultado y avanza dispatch_status a DISPATCHED de inmediato - puramente local,
-    Sicar X no se entera de esto (ver CLAUDE.md, "SICAR es solo ERP de inventario": el
-    unico aviso a Sicar X en todo el ciclo de vida de una orden es el descuento/reversión
-    de inventario en accept_order/prepare_local_cancellation, nunca el dispatch_status)."""
+    """Genera una guia real via envia.com y, si tiene exito, persiste el resultado y avanza
+    dispatch_status a DISPATCHED de inmediato - puramente local, Sicar X no se entera."""
     order = await _get_order_ready_for_shipping(db, order_uuid)
     if order.shipping_label:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya tiene una guía de envío generada.")

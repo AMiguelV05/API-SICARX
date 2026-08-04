@@ -3,7 +3,6 @@ from datetime import datetime
 from pydantic import Field
 from app.schemas.base import CamelModel
 
-# Filtros de entrada
 class LocalCatalogFilter(CamelModel):
     limit: int = Field(default=60, ge=1, le=200, description="Cantidad de productos por página (1-200)")
     offset: int = Field(default=0, ge=0, description="Paginación (inicio)")
@@ -17,7 +16,6 @@ class LocalCatalogFilter(CamelModel):
         default=None, description="Orden de los resultados: price_asc, price_desc o name_asc"
     )
 
-# Modelo de salida
 class ProductBasic(CamelModel):
     sicar_uuid: str
     sku: str
@@ -27,12 +25,10 @@ class ProductBasic(CamelModel):
     price: float
     stock: float
 
-# Respuesta completa con paginación
 class LocalCatalogResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
 
-# Detalle completo de producto (GET /products/{uuid})
 class ProductDetail(CamelModel):
     id: int
     sicar_uuid: str

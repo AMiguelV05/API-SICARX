@@ -14,7 +14,6 @@ ACCEPT_JSON = "application/json, text/plain, */*"
 
 
 def storefront_headers(token: str, content_type: str = None, branch_id=None) -> dict:
-    """Encabezados para llamadas autenticadas contra el storefront"""
     headers = {
         "Accept": ACCEPT_JSON,
         "Authorization": token,

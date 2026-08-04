@@ -1,40 +1,28 @@
 """One-off script to seed `vehicles` from Gonher's public vehicle-fitment reference API
-(catalogo.grupogonher.com) - a broad make/model/year/engine catalog used only as a
-generic reference list for the admin's vehicle picker, NOT linked to any real product
-here (see CLAUDE.md, "Compatibilidad de vehiculos" - Gonher's own part numbers have
-near-zero overlap with this store's SICAR catalog, confirmed before this script was
-written). NOT imported by the app - run manually, once:
+(catalogo.grupogonher.com) - a generic make/model/year/engine reference for the admin's
+vehicle picker, NOT linked to any real product (near-zero SKU overlap with this store's
+SICAR catalog). NOT imported by the app - run manually, once:
 
     python import_gonher_vehicles.py
 
-Only seeds `vehicles`. Never touches `product_vehicles` - assigning real products to a
-vehicle stays a human/admin task via PUT /v1/admin/vehicles/{uuid}/products.
+Only seeds `vehicles`, never `product_vehicles` (that stays a human/admin task via
+PUT /v1/admin/vehicles/{uuid}/products).
 
-Scope: only Gonher's "Automotriz" (tipo 1) and "Motocicletas" (tipo 3) types are
-imported - "Camiones, Tractocamiones y Fuera de Carretera" (tipo 2, ~449 makes) is
-almost entirely heavy industrial equipment (pavers, mixers, reefer units) with zero
-overlap with this store's catalog, confirmed by inspection before writing this script.
+Scope: only Gonher's "Automotriz" (tipo 1) and "Motocicletas" (tipo 3) - "Camiones..."
+(tipo 2) is almost entirely heavy industrial equipment, irrelevant to this catalog.
 
-Approach: Gonher's cascading dropdown endpoints (Modelos/GetAniosByArmadora(Tipo),
-GetModelosByTipoArmadoraAnio, Motores/GetMotoresByModeloAnio) don't actually narrow by
-make (the year list is the same generic 1948-2026 range regardless of make/tipo) - fully
-crawling them for ~149 relevant makes would mean tens of thousands of requests against a
-third party's production server for no better data than what a single call to
-Articulos/GetTagsVehiculos already returns (93,993 flat "<year> <make> <model...>
-<engine>" strings, all types combined). This script fetches that single endpoint plus
-Armadoras/GetArmadorasByTipo/{1,3} (the two known-make lists, used both to scope the
-import and to split each flat tag string into make/model/engine) and parses the tags
-locally.
+Approach: Gonher's cascading dropdown endpoints don't actually narrow by make (same
+generic 1948-2026 year range regardless), so this fetches the one bulk endpoint
+(Articulos/GetTagsVehiculos, ~94k flat "<year> <make> <model...> <engine>" strings) plus
+the two make lists (Armadoras/GetArmadorasByTipo/{1,3}), and parses tags locally instead
+of crawling tens of thousands of dropdown requests for no better data.
 
-This is a HEURISTIC parse of a third party's free-text data, not guaranteed 100% clean -
-expect to spot-check a sample of imported rows afterward, not treat this as gospel. Two
-engine formats were found in the data: car-style ("L4 1.6L", cylinder-config + displacement
-with an L suffix, sometimes followed by a trailing modifier like "Turbo"/"Hibrido") and
-moto/ATV-style (a bare integer cc count with no suffix, e.g. "249"). Five makes appear in
-BOTH the Automotriz and Motocicletas lists (Honda, Bmw, Triumph, Peugeot, Suzuki - real
-brands that make both cars and bikes) - for those, which engine format matched is used as
-the tie-break (car-style -> AUTOMOTIVE, bare-cc -> MOTORCYCLE), since in this dataset the
-two vehicle types consistently use different engine formats.
+HEURISTIC parse of third-party free-text data, not guaranteed 100% clean - spot-check a
+sample after running. Two engine formats appear: car-style ("L4 1.6L", cylinder-config +
+displacement with an L suffix, optional trailing modifier like "Turbo") and moto/ATV-style
+(a bare integer cc count, e.g. "249"). Five makes appear in BOTH lists (Honda, Bmw,
+Triumph, Peugeot, Suzuki) - for those, the matched engine format breaks the tie
+(car-style -> AUTOMOTIVE, bare-cc -> MOTORCYCLE).
 """
 import asyncio
 import logging
@@ -103,8 +91,7 @@ def _parse_tag(tag: str, make_tokens: list[tuple[str, list[str]]], ambiguous_mak
     engine: str | None = None
     engine_format: str | None = None
     model_tokens = remaining
-    # formato "carro": config de cilindros + desplazamiento con sufijo L, buscando desde
-    # el final (a veces hay un modificador extra despues, p. ej. "L4 1.6L Turbo").
+    # formato "carro": cilindros + desplazamiento con sufijo L, buscado desde el final.
     for i in range(len(remaining) - 2, -1, -1):
         if CYLINDER_RE.match(remaining[i]) and DISPLACEMENT_RE.match(remaining[i + 1]):
             engine = " ".join([remaining[i], remaining[i + 1]] + remaining[i + 2:])
@@ -159,9 +146,7 @@ async def main() -> None:
         to_insert = [row for row in parsed if row not in existing]
         logger.info(f"{len(parsed) - len(to_insert)} ya existian en `vehicles`, {len(to_insert)} filas nuevas por insertar.")
 
-        # Insert masivo en lotes, no create_vehicle fila por fila (esa funcion existe
-        # para /v1/admin/vehicles, un commit+refresh por fila seria ~40k transacciones
-        # para un import de este tamano).
+        # Insert masivo en lotes, no create_vehicle fila por fila (~40k transacciones si no).
         now = datetime.now(timezone.utc)
         batch_size = 1000
         inserted = 0

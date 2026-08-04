@@ -81,11 +81,9 @@ async def delete_cart(db: DbDep, ctx: CartContextDep, response: Response):
 @router.post("/merge", response_model=CartResponse, summary="Fusionar un carrito anonimo a la cuenta autenticada")
 async def merge_cart_endpoint(client: CurrentClientDep, db: DbDep, response: Response, data: CartMergeRequest = Body()):
     """
-    Fusiona un carrito anonimo (identificado por `cartToken`, el `uuid` que devolvio un PUT
-    anterior sin sesion) al carrito de la cuenta ya autenticada (`Authorization`, igual que
-    `/v1/auth/me/addresses`). Si la cuenta no tenia carrito, simplemente reclama el anonimo;
-    si ya tenia uno, las cantidades de productos en comun se suman. `404` si `cartToken` no
-    corresponde a un carrito anonimo existente.
+    Fusiona un carrito anonimo (`cartToken`) al de la cuenta autenticada: si esta no
+    tenia carrito lo reclama, si ya tenia uno se suman cantidades por producto. `404` si
+    `cartToken` no corresponde a un carrito anonimo existente.
     """
     result = await merge_cart(db, client, data.cartToken)
     clear_cart_cookie(response)

@@ -54,9 +54,7 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_client_addresses_client_account_id'), 'client_addresses', ['client_account_id'], unique=False)
     op.create_index(op.f('ix_client_addresses_id'), 'client_addresses', ['id'], unique=False)
-    # NOTA: autogenerate detecta los indices GIN de pg_trgm (ix_products_name_trgm /
-    # ix_products_sku_trgm) como "removidos" porque no estan declarados en el modelo
-    # Product (se crearon con SQL crudo en 224799e4444b) — falso positivo, no tocarlos.
+    # Drop de ix_products_*_trgm omitido: falso positivo (SQL crudo en 224799e4444b).
     # ### end Alembic commands ###
 
 

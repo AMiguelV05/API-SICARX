@@ -37,9 +37,8 @@ async def create_vehicle(db: AsyncSession, vehicle_type: str, make: str, model: 
 
 
 async def update_vehicle(db: AsyncSession, vehicle_uuid: str, data: dict) -> Vehicle:
-    """`data` viene de `VehicleUpdateRequest.model_dump(exclude_unset=True)` en la ruta -
-    mismo patron que `taxonomy_service.update_category`. El rango de anios se valida
-    contra los valores EFECTIVOS"""
+    """`data` = VehicleUpdateRequest.model_dump(exclude_unset=True). El rango de anios se
+    valida contra los valores EFECTIVOS (ya mezclados con lo existente)."""
     vehicle = await db.get(Vehicle, vehicle_uuid)
     if vehicle is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehiculo no encontrado.")
@@ -86,9 +85,8 @@ async def list_vehicles(
     limit: int,
     offset: int,
 ) -> tuple[int, list[Vehicle]]:
-    """Busqueda/listado para el admin - a diferencia de categories, no hay ningun otro
-    endpoint (publico o no) donde el admin pueda ver que vehiculos ya existen antes de
-    asignarles productos, asi que este endpoint es el unico punto de entrada para eso."""
+    """Unico punto donde el admin puede ver que vehiculos ya existen antes de asignarles
+    productos (a diferencia de categories, no hay otro endpoint para esto)."""
     stmt = select(Vehicle)
     if vehicle_type:
         stmt = stmt.where(Vehicle.vehicle_type == vehicle_type)
@@ -103,9 +101,8 @@ async def list_vehicles(
 
 
 async def replace_vehicle_products(db: AsyncSession, vehicle_uuid: str, product_uuids: list[str]) -> list[str]:
-    """Reemplaza el conjunto COMPLETO de productos asignados a `vehicle_uuid` en una sola
-    transaccion - mismo patron (y misma limitacion: no es add/remove incremental) que
-    taxonomy_service.replace_category_products."""
+    """Reemplaza el conjunto COMPLETO de productos del vehiculo (no incremental) - mismo
+    patron que taxonomy_service.replace_category_products."""
     vehicle = await db.get(Vehicle, vehicle_uuid)
     if vehicle is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehiculo no encontrado.")
@@ -148,9 +145,8 @@ async def list_vehicle_products(db: AsyncSession, vehicle_uuid: str, limit: int,
 
 
 async def get_vehicles_for_product(db: AsyncSession, product_uuid: str) -> list[Vehicle]:
-    """Direccion inversa de `list_vehicle_products` - dado un producto, que vehiculos tiene
-    asignados. Mismo proposito que `taxonomy_service.get_categories_for_product`: precargar
-    una pantalla admin de "editar tags de este producto"."""
+    """Direccion inversa de `list_vehicle_products` - precarga la pantalla admin de "editar
+    tags de este producto"."""
     product = await db.scalar(select(Product).where(Product.sicar_uuid == product_uuid, Product.is_deleted == False))
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
@@ -165,12 +161,9 @@ async def get_vehicles_for_product(db: AsyncSession, product_uuid: str) -> list[
 
 
 async def get_distinct_models_for_years(db: AsyncSession, *, make: str, years: list[int], vehicle_type: str | None = None) -> list[str]:
-    """Modelos de `make` disponibles para TODOS los anios en `years` (interseccion, no
-    union) - pensado para la pantalla admin de asignacion masiva: el admin selecciona
-    varios anios y solo debe poder elegir un modelo que exista en cada uno de ellos, no
-    solo en alguno. Mismo patron de `generate_series` que `get_distinct_years`, pero
-    agrupado por modelo y filtrado con `HAVING COUNT(DISTINCT y) = :num_years` para exigir
-    cobertura completa en vez de solo alguna."""
+    """Modelos de `make` presentes en TODOS los `years` (interseccion, no union) - para la
+    asignacion masiva. Mismo patron `generate_series` que `get_distinct_years`, agrupado
+    con `HAVING COUNT(DISTINCT y) = :num_years` para exigir cobertura completa."""
     distinct_years = sorted(set(years))
     current_year = datetime.now(timezone.utc).year
     query = text("""
@@ -203,17 +196,12 @@ async def assign_products_to_model_years(
     engine: str | None = None,
     product_uuids: list[str],
 ) -> tuple[list[str], list[str], int]:
-    """Asignacion masiva ADITIVA (a diferencia de `replace_vehicle_products`, no reemplaza
-    lo ya asignado a cada fitment) - agrega `product_uuids` a TODOS los fitments de
-    `make`/`model` cuyo rango de anios toque alguno de `years`, sin que el admin tenga que
-    conocer/elegir cada uuid de vehiculo individualmente (p. ej. una pastilla de freno que
-    aplica al Civic 2012-2015 sin importar el motor). `engine` es opcional - si se omite,
-    aplica a todas las variantes de motor de ese make/model/anios.
+    """Asignacion ADITIVA (no reemplaza, a diferencia de `replace_vehicle_products`) -
+    agrega `product_uuids` a todos los fitments de `make`/`model` cuyo rango de anios
+    toque `years`; `engine` opcional aplica a todas las variantes si se omite.
 
-    Devuelve (vehicle_uuids resueltos, product_uuids resueltos, cantidad de vinculos
-    (vehiculo, producto) nuevos realmente insertados) - pares que ya existian de una
-    asignacion previa se ignoran via `ON CONFLICT DO NOTHING` sobre la PK compuesta de
-    `product_vehicles`, no cuentan como error ni se duplican (idempotente ante reintentos)."""
+    Devuelve (vehicle_uuids, product_uuids, vinculos nuevos insertados) - pares ya
+    existentes se ignoran via `ON CONFLICT DO NOTHING` (idempotente ante reintentos)."""
     unique_product_uuids = sorted(set(product_uuids))
     result = await db.execute(
         select(Product.id, Product.sicar_uuid).where(Product.sicar_uuid.in_(unique_product_uuids), Product.is_deleted == False)
@@ -255,10 +243,7 @@ async def assign_products_to_model_years(
     return vehicle_uuids, unique_product_uuids, inserted_count
 
 
-# --- Publico (/v1/vehicles/*) - facets en cascada para un selector de vehiculo -------------
-# A diferencia de `list_vehicles` (admin, busqueda libre con ILIKE), estas funciones asumen
-# que cada valor recibido ya viene de un paso previo de la cascada (una llamada anterior a
-# alguna de estas mismas funciones), asi que usan igualdad exacta, no substring.
+# --- Publico (/v1/vehicles/*): facets en cascada - a diferencia de list_vehicles (admin, ILIKE), asume que cada valor ya viene de un paso previo, por eso usa igualdad exacta -----
 
 async def get_distinct_makes(db: AsyncSession, *, vehicle_type: str | None = None) -> list[str]:
     stmt = select(Vehicle.make).distinct()
@@ -269,11 +254,9 @@ async def get_distinct_makes(db: AsyncSession, *, vehicle_type: str | None = Non
 
 
 async def get_distinct_years(db: AsyncSession, *, make: str, vehicle_type: str | None = None) -> list[int]:
-    """`year_start`/`year_end` son un rango, no una columna de anio individual - expandir
-    cada fila con `generate_series` (raw SQL, mismo patron que
-    `taxonomy_service.get_descendant_uuids` para una consulta incomoda en el ORM) es mas
-    simple que intentar expresar la union de rangos con SQLAlchemy Core. `year_end IS NULL`
-    (todavia en produccion) se trata como vigente hasta el anio calendario actual."""
+    """`year_start`/`year_end` es un rango; se expande con `generate_series` (raw SQL,
+    mismo patron que `taxonomy_service.get_descendant_uuids`). `year_end IS NULL` se trata
+    como vigente hasta el anio actual."""
     current_year = datetime.now(timezone.utc).year
     query = text("""
         SELECT DISTINCT y AS year
@@ -287,8 +270,8 @@ async def get_distinct_years(db: AsyncSession, *, make: str, vehicle_type: str |
 
 
 async def get_distinct_models(db: AsyncSession, *, make: str, year: int, vehicle_type: str | None = None) -> list[str]:
-    """Segundo paso de la cascada (ahora anio antes que modelo, ver CLAUDE.md) - filtra por
-    contencion de rango (`year_start`/`year_end`), igual que `get_distinct_engines`."""
+    """Segundo paso de la cascada (anio antes que modelo, ver CLAUDE.md) - filtra por
+    contencion de rango, igual que `get_distinct_engines`."""
     stmt = select(Vehicle.model).distinct().where(
         Vehicle.make == make,
         Vehicle.year_start <= year,
@@ -325,9 +308,8 @@ async def list_matching_vehicles(
     limit: int,
     offset: int,
 ) -> tuple[int, list[Vehicle]]:
-    """Paso final de la cascada publica: resuelve la seleccion del shopper a uno (o unos
-    pocos) fitment(s) reales, cada uno con su `uuid` listo para usarse como `vehicleUuid` en
-    `POST /products`/`POST /search`."""
+    """Paso final de la cascada publica: resuelve la seleccion a fitment(s) reales, cada
+    uno con su `uuid` listo para `vehicleUuid` en `POST /products`/`POST /search`."""
     stmt = select(Vehicle)
     if vehicle_type:
         stmt = stmt.where(Vehicle.vehicle_type == vehicle_type)

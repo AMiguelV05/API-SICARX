@@ -16,14 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _notify(order: Order, event: str, status_message: str) -> None:
-    """Nucleo compartido de los 3 eventos de este modulo - misma firma/envio (HMAC sobre
-    f"{ts}." + cuerpo crudo, headers X-Webhook-*) que order_notification_service/
-    order_cancellation_notification_service, reusa FRONTEND_WEBHOOK_SECRET (mismo
-    receptor, el frontend de la tienda). No fatal si falla, sin reintento automatico -
-    mismo patron que el resto de estos servicios. A diferencia de order-confirmed/
-    order-cancelled (dos dimensiones distintas, cada una con su propio path), estos 3
-    eventos son la misma dimension (dispatch_status) cambiando, asi que comparten un
-    unico path con un discriminador `event`."""
+    """Nucleo compartido de los 3 eventos; comparten un unico path con discriminador `event` porque son la misma dimension (dispatch_status), a diferencia de order-confirmed/cancelled. No fatal, sin reintento."""
     try:
         client_account = await order.awaitable_attrs.client_account
         contact_email = ((order.delivery_info or {}).get("contactInfo") or {}).get("email")
@@ -66,15 +59,10 @@ async def notify_order_accepted(order: Order) -> None:
 
 
 async def notify_order_ready_for_pickup(order: Order) -> None:
-    """Solo debe llamarse para ordenes PICKUP que llegan a dispatch_status COMPLETE - ver
-    admin_service.advance_order_dispatch_status. Deliberadamente NO se llama para
-    DELIVERYMAN en COMPLETE (etapa interna, sin accion del cliente todavia)."""
+    """Solo para ordenes PICKUP en COMPLETE; NO se llama para DELIVERYMAN en COMPLETE (etapa interna, sin accion del cliente)."""
     await _notify(order, "order-ready-pickup", "Tu pedido está listo para recoger")
 
 
 async def notify_order_dispatched(order: Order) -> None:
-    """Para ordenes DELIVERYMAN que llegan a DISPATCHED, sin importar si fue via una guia
-    real de envia.com (admin_service.generate_shipping_label) o un avance manual
-    (admin_service.advance_order_dispatch_status) - el cliente recibe el mismo mensaje
-    en ambos casos."""
+    """Para DELIVERYMAN en DISPATCHED, sea via guia real de envia.com o avance manual - mismo mensaje en ambos casos."""
     await _notify(order, "order-dispatched", "Tu pedido está listo y ha sido enviado")

@@ -11,7 +11,6 @@ router = APIRouter(prefix="/auth/me/addresses", tags=["Client Addresses"], depen
 
 @router.get("", response_model=List[ClientAddressPublic], summary="Listar direcciones guardadas del cliente")
 async def list_addresses(client: CurrentClientDep):
-    """Devuelve las direcciones guardadas de la cuenta autenticada."""
     return await client.awaitable_attrs.addresses
 
 @router.post("", response_model=ClientAddressPublic, status_code=status.HTTP_201_CREATED, summary="Agregar una dirección")

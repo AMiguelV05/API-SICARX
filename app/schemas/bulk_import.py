@@ -2,12 +2,7 @@ from __future__ import annotations
 from typing import List, Literal, Optional
 from app.schemas.base import CamelModel
 
-# Admin (/v1/admin/bulk-import/*, ver CLAUDE.md "Compatibilidad de vehiculos"/"Admin API") -
-# carga masiva ADITIVA de product_categories/product_vehicles desde un .xlsx, en vez de una
-# asignacion a la vez via PUT .../{uuid}/products o POST /admin/vehicles/assign-by-model.
-# A diferencia de ambos, resuelve productos por sku (+ additional_skus como fallback), no
-# por sicar_uuid - el admin llenando el Excel no conoce (ni deberia necesitar conocer) los
-# uuids internos.
+# Carga masiva ADITIVA desde .xlsx; resuelve productos por sku (+ additional_skus), no por sicar_uuid - el admin no conoce los uuids internos.
 
 SheetName = Literal["Categorias", "Vehiculos"]
 

@@ -20,32 +20,14 @@ MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
 
 async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, local_products: dict | None = None, delivery_address_snapshot: dict | None = None) -> Order:
-    """Persiste localmente la orden recien creada - status siempre "TO_PAY" en este punto
-    (ver order_history_service.finalize_order_payment, que es quien la transiciona a
-    PAID/CANCELLED segun el resultado del pago). Es la unica fuente de historial de
-    ordenes - Sicar X no expone un endpoint para listar ordenes por cliente, y ademas ya
-    no llega a saber de esta orden en absoluto hasta que sea aceptada (ver CLAUDE.md,
-    "SICAR es solo ERP de inventario").
+    """Persiste la orden localmente (status siempre "TO_PAY" en este punto; ver
+    finalize_order_payment). `sicar_order_id` se genera aqui con `uuid.uuid4()` - ya no
+    viene de una respuesta real de Sicar X, checkout no le avisa nada todavia.
+    `local_products` solo se usa para agregar `imageUrl` a cada item guardado.
 
-    `sicar_order_id` (columna NOT NULL/unica, tambien el identificador publico que el
-    frontend usa en las URLs de /pay y /cancel) ya NO viene de una respuesta real de
-    Sicar X - checkout no le avisa nada a Sicar X todavia - asi que se genera aqui mismo
-    con `uuid.uuid4()`. `serie_folio` se queda en None para siempre: no hay ningun
-    documento de Sicar X del que pueda salir.
-
-    `local_products` (sicar_uuid -> Product, el mismo dict ya cargado en routes/orders.py
-    para build_order_payload) se usa solo para agregar `imageUrl` a cada item guardado
-    aqui - una copia de `eco_order["products"]`, no el mismo objeto que devuelve
-    build_order_payload.
-
-    `delivery_address_snapshot` (None para PICKUP) es la foto fija ClientAddressPublic
-    tomada en routes/orders.py justo despues de resolver la direccion via
-    address_service.get_owned_address - ver Order.delivery_address_snapshot.
-
-    NO hace commit — solo `flush()` (para que `order.id`/`order.uuid` queden disponibles
-    para el llamador, p.ej. payment_service.create_preference). El llamador
-    (routes/orders.py::create_order) hace el único commit, junto con el descuento de
-    stock local ya preparado, para que ambos se persistan o se reviertan juntos."""
+    NO hace commit, solo `flush()` (para que `order.id`/`order.uuid` esten disponibles al
+    llamador) - `routes/orders.py::create_order` hace el unico commit junto con el
+    descuento de stock, para que ambos se persistan o reviertan juntos."""
     eco_order = order_payload_dict["ecOrderDto"]
     local_products = local_products or {}
 
@@ -60,8 +42,7 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
         client_account_id=client_account_id,
         sicar_order_id=str(uuid.uuid4()),
         status="TO_PAY",
-        # Toda orden REMOTE/PICKUP nueva entra al tablero de despacho en este estado -
-        # el equivalente local, ya que Sicar X no llega a saber de la orden todavia.
+        # Estado inicial local del tablero de despacho - Sicar X todavia no sabe de la orden.
         dispatch_status="PENDING_ACCEPTANCE",
         branch_id=order_payload_dict.get("branchId"),
         total=Decimal(str(eco_order.get("total"))),
@@ -101,14 +82,9 @@ async def get_client_order(db: AsyncSession, client_account_id: int, order_uuid:
     return order
 
 async def get_owned_order_by_sicar_id(db: AsyncSession, client_account_id: int, sicar_order_id: str) -> Order:
-    """Usada por POST /cancel para verificar que la orden a cancelar pertenece al
-    cliente autenticado antes de proceder - 404 en vez de 403 para no filtrar la
-    existencia de ordenes de otros clientes (mismo patron que address_service).
-
-    Filtra `deleted_at.is_(None)`: una orden ya borrada via DELETE /orders/{id} debe
-    resolver como "no encontrada" - sin esto, un segundo DELETE o un /cancel posterior
-    sobre la misma orden encontraria la fila (soft-deleted) y reabriria un camino que
-    con el borrado duro de antes era imposible (ver Riesgo R2 del plan)."""
+    """Verifica que la orden pertenezca al cliente autenticado antes de cancelar - 404 en
+    vez de 403 para no filtrar existencia (mismo patron que address_service). Filtra
+    `deleted_at` para que una orden ya borrada no reabra un DELETE/cancel duplicado."""
     order = await db.scalar(
         select(Order).where(
             Order.sicar_order_id == sicar_order_id,
@@ -121,52 +97,31 @@ async def get_owned_order_by_sicar_id(db: AsyncSession, client_account_id: int, 
     return order
 
 async def get_order_by_uuid(db: AsyncSession, order_uuid: str) -> Order | None:
-    """Sin filtro de cliente - usada por el webhook de Mercado Pago
-    (`POST /payments/webhook`), que no tiene identidad de cliente (lo llama Mercado
-    Pago, no el frontend). `order_uuid` es el `external_reference` que se manda a
-    Mercado Pago en `create_preference`/`create_payment`.
-
-    Filtra `deleted_at.is_(None)` por la misma razon que get_owned_order_by_sicar_id:
-    una orden borrada por el cliente (DELETE /orders/{id}) no debe poder ser
-    resucitada/mutada por una notificacion de pago tardia (p. ej. una ficha OXXO
-    pagada despues de "eliminar" la reserva) - ver Riesgo R2 del plan."""
+    """Sin filtro de cliente - la usa el webhook de Mercado Pago (sin identidad de
+    cliente); `order_uuid` es el `external_reference` mandado a Mercado Pago. Filtra
+    `deleted_at` para que un pago tardio no resucite/mute una orden ya borrada por el
+    cliente."""
     return await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
 
 async def prepare_local_cancellation(
     db: AsyncSession, order: Order, *, cash_register_uuid: str | None = None, require_status: str | None = None,
 ) -> Order:
-    """Deja una orden lista para cancelarse LOCALMENTE, sin tocar Sicar X todavia:
-    relockea la fila, restaura stock, marca CANCELLED y, SOLO si la orden ya habia sido
-    aceptada (`accepted_at is not None`), encola una fila en sicar_sync_outbox para que
-    app/worker/sicar_sync_worker.py le avise a Sicar X de forma asincrona, con
-    reintentos. Si nunca fue aceptada, Sicar X nunca supo de esta orden en absoluto (ver
-    admin_service.accept_order y CLAUDE.md, "SICAR es solo ERP de inventario") - no hay
-    nada que revertir ahi, así que no se encola ninguna fila. Es el unico punto que
-    llaman las 3 rutas de cancelacion (POST /cancel, DELETE, y la rama rejected/cancelled
-    de finalize_order_payment mas abajo) - no duplicar esta logica en ninguna de ellas.
+    """Cancela LOCALMENTE sin tocar Sicar X todavia: relockea la fila, restaura stock,
+    marca CANCELLED y, solo si la orden ya habia sido aceptada (`accepted_at is not
+    None`), encola una fila en sicar_sync_outbox para que el worker avise a Sicar X de
+    forma asincrona con reintentos (si nunca fue aceptada, Sicar X nunca supo de esta
+    orden). Unico punto llamado por las 3 rutas de cancelacion (POST /cancel, DELETE,
+    rama rejected/cancelled de finalize_order_payment) - no duplicar esta logica.
 
-    Relockea con SELECT...FOR UPDATE y re-chequea el status DENTRO del lock (no antes):
-    al quitar la llamada sincrona a Sicar X de la ruta de cancelacion, se perdio el
-    mutex accidental que esa llamada representaba (hoy, dos cancelaciones concurrentes
-    sobre la misma orden se resuelven porque Sicar X rechaza la segunda antes de que
-    llegue a restaurar stock). Sin este lock, dos intentos concurrentes (doble click, o
-    /cancel corriendo contra un webhook de Mercado Pago tardio) podrian pasar ambos un
-    chequeo "todavia no esta CANCELLED" sin lock y restaurar stock por duplicado.
-    Re-entrante y no-op seguro para finalize_order_payment, que ya sostiene este mismo
-    lock cuando llama aqui.
+    SELECT...FOR UPDATE + re-chequeo de status DENTRO del lock es el unico mutex real
+    ahora que no hay llamada sincrona a Sicar X que serialice cancelaciones concurrentes -
+    sin el, dos intentos concurrentes (doble click, /cancel vs. webhook tardio) podrian
+    restaurar stock por duplicado. Re-entrante para finalize_order_payment, que ya
+    sostiene este mismo lock. `require_status` deja que DELETE lo exija dentro del lock
+    (evita perder una carrera contra /pay). `cash_register_uuid` se captura aqui porque el
+    worker ya no tiene acceso al request original.
 
-    `require_status` permite que DELETE (solo valido sobre TO_PAY) lo exija DENTRO del
-    lock, no solo en un chequeo previo a el - sin esto, un /pay que gane la carrera
-    contra un DELETE podria dejar la orden en PAID y que DELETE la cancelara de todos
-    modos.
-
-    `cash_register_uuid` se captura aqui (en la fila de outbox) porque, una vez que la
-    llamada real a Sicar X se difiere al worker, ya no hay acceso a la caja registradora
-    que el cliente pidio en el request original (OrderCancel.cashRegisterUuid) - sin
-    esto se perderia silenciosamente. Si no se especifica, usa la caja por default.
-
-    NO hace commit - mismo patron que el resto de este archivo, el llamador es
-    responsable de un unico commit."""
+    NO hace commit - el llamador es responsable de un unico commit."""
     locked_result = await db.execute(
         select(Order)
         .where(Order.id == order.id)
@@ -199,42 +154,20 @@ async def prepare_local_cancellation(
     return order
 
 async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dict) -> Order:
-    """Aplica el resultado de un pago de Mercado Pago a una orden local - punto unico
-    compartido por `POST /orders/{id}/pay` (submit sincrono desde el Payment Brick) y el
-    webhook (`POST /payments/webhook`, unico camino para el metodo Wallet, que nunca
-    toca nuestro backend en el submit - ver payment_service.py). No duplicar esta logica
-    en ambos lugares.
+    """Aplica el resultado de un pago de Mercado Pago a la orden local - punto unico
+    compartido por `/orders/{id}/pay` (submit sincrono) y el webhook (unico camino para
+    Wallet); no duplicar esta logica. `mp_payment` es la respuesta re-consultada de
+    Mercado Pago, nunca el cuerpo crudo de una notificacion de webhook.
 
-    `mp_payment` es la respuesta ya re-consultada de Mercado Pago (nunca el cuerpo crudo
-    de una notificacion de webhook, que no es autoritativo).
+    `SELECT ... FOR UPDATE` al inicio serializa el pago sincrono y el webhook cuando
+    llegan casi al mismo tiempo para la misma orden, para no notificar duplicado.
+    Notifica al frontend (`notify_order_confirmed`) solo en la transicion real TO_PAY ->
+    PAID, nunca en reintentos del webhook - es el unico punto donde los tres caminos de
+    pago convergen (ver CLAUDE.md, "Payments with Mercado Pago").
 
-    Al transicionar de TO_PAY a PAID (nunca en reintentos del webhook sobre una orden ya
-    PAID), tambien notifica al frontend via un webhook firmado
-    (order_notification_service.notify_order_confirmed) para que el frontend envie el
-    correo de confirmacion con su propio template de react-email y su propia cuenta de
-    Resend - este es el unico punto donde los tres caminos de pago (tarjeta/OXXO
-    sincrono, y Wallet/OXXO tardio via webhook) convergen, asi que es el unico lugar
-    donde el trigger puede vivir de forma confiable; el frontend no puede dispararlo por
-    su cuenta (ni por polling) porque el metodo Wallet nunca le llega una respuesta
-    sincrona ni garantiza que el navegador siga abierto (ver CLAUDE.md, "Payments with
-    Mercado Pago").
-
-    El pago sincrono (`/orders/{id}/pay`) y el webhook de Mercado Pago pueden llegar casi
-    al mismo tiempo para la misma orden (el webhook tambien sirve de respaldo para
-    tarjeta/OXXO, no solo Wallet) - cada uno con su propia sesion de DB. Por eso lo
-    primero que hace esta funcion es re-leer la fila con `SELECT ... FOR UPDATE`: eso
-    serializa a ambos llamadores contra el bloqueo de fila de Postgres, para que el
-    segundo en llegar vea el estado ya actualizado por el primero (status == PAID) en
-    vez de aplicar `notify_order_confirmed` por duplicado.
-
-    Nota sobre atomicidad: el camino PAID ya no hace ninguna llamada HTTP a Sicar X aqui
-    (antes llamaba a `pay_order_in_sicar` antes del commit - eliminado junto con el resto
-    de la creacion de documentos en Sicar X, ver CLAUDE.md, "SICAR es solo ERP de
-    inventario"). El unico aviso a Sicar X en todo el ciclo de vida de una orden ocurre
-    al aceptarla (`admin_service.accept_order`) o cancelarla despues de aceptada, ambos
-    ya asincronos/con reintentos via `sicar_sync_outbox` - asi que, igual que el camino
-    CANCELLED, si el commit de esta funcion falla no hay nada que reconciliar del lado de
-    Sicar X."""
+    Ya no hace ninguna llamada HTTP a Sicar X aqui - el unico aviso a Sicar X en el ciclo
+    de vida de una orden ocurre al aceptarla o cancelarla, ambos asincronos via
+    `sicar_sync_outbox` (ver CLAUDE.md, "SICAR es solo ERP de inventario")."""
     locked_result = await db.execute(
         select(Order)
         .where(Order.id == order.id)
@@ -260,18 +193,11 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             became_paid = True
         order.status = "PAID"
     elif mp_status in MP_PENDING_STATUSES:
-        # Solo aplica si la orden sigue en TO_PAY: un pedido puede tener mas de un intento
-        # de pago (p. ej. un ticket OXXO pendiente mientras el cliente tambien prueba una
-        # tarjeta) - una notificacion "pending"/"in_process" tardia de un intento distinto
-        # al que realmente termino aprobando/cancelando la orden NO debe regresarla a
-        # TO_PAY. Ver CLAUDE.md / hallazgo de auditoria sobre este mismo bug.
+        # Solo aplica si sigue TO_PAY - una notificacion pending/in_process tardia de OTRO intento de pago no debe regresar una orden ya resuelta a TO_PAY.
         if order.status == "TO_PAY":
             order.status = "TO_PAY"
     elif mp_status in MP_FAILED_STATUSES:
-        # Misma razon que arriba: solo cancelar si la orden sigue en TO_PAY. Sin este
-        # guard, una notificacion rechazada/cancelada de un intento de pago distinto
-        # (p. ej. un ticket OXXO que expira) podia cancelar una orden que otro intento ya
-        # habia dejado PAID, restaurando stock sobre un cobro ya aplicado.
+        # Idem: solo cancela si sigue TO_PAY - evita que un intento de pago fallido cancele una orden que otro intento ya dejo PAID.
         if order.status == "TO_PAY":
             became_cancelled = True
             order = await prepare_local_cancellation(db, order)

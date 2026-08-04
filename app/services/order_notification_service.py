@@ -15,17 +15,7 @@ WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 logger = logging.getLogger(__name__)
 
 async def notify_order_confirmed(order: Order) -> None:
-    """Avisa al frontend (via webhook firmado) que un pedido paso a PAID, para que el
-    frontend envie el correo de confirmacion con su propio template de react-email y su
-    propia cuenta de Resend - ver FRONTEND_INTEGRATION.md para el contrato completo. No
-    fatal si falla - mismo patron que create_preference en payment_service.py: una
-    notificacion que no llega no debe bloquear ni revertir el pago ya aplicado en
-    finalize_order_payment (unico llamador). A diferencia de create_preference, no hay
-    reintento automatico si esto falla - ver CLAUDE.md.
-
-    Esta firma (headers X-Webhook-*) es un esquema propio de este backend, sin relacion
-    con el esquema de Mercado Pago (x-signature/x-request-id, ver
-    payment_service.verify_mercadopago_webhook_signature) - no confundir ambos."""
+    """Avisa al frontend que la orden paso a PAID (el frontend envia el correo de confirmacion con su propio Resend). No fatal ni con reintento - no debe bloquear un pago ya aplicado."""
     try:
         client_account = await order.awaitable_attrs.client_account
         contact_email = ((order.delivery_info or {}).get("contactInfo") or {}).get("email")

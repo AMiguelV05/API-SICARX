@@ -8,8 +8,6 @@ logger = logging.getLogger(__name__)
 GRAPHQL_URL = "https://api.sicarx.com/graph/v1/"
 
 async def fetch_full_details_from_sicar(uuid: str) -> dict:
-    """Extrae detalles completos de Sicar X usando el token de administrador (B2B)."""
-
     if not is_safe_sicar_id(uuid):
         logger.error(f"Identificador invalido recibido para consulta de detalles: {uuid!r}")
         return {}
@@ -33,7 +31,6 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
         }}
     }}"""
 
-    # Sub-función para empaquetar la petición HTTP
     async def attempt_fetch(token: str):
         headers = graphql_bearer_headers(token)
         async with httpx.AsyncClient(timeout=30.0) as client:

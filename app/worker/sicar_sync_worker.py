@@ -6,11 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
 from app.models.order import Order, SicarSyncOutbox
-# Order.client_account = relationship("ClientAccount", ...) es una referencia por string:
-# necesita que la clase ClientAccount este importada en este proceso antes de que
-# SQLAlchemy configure el mapper de Order, o falla con "failed to locate a name
-# ('ClientAccount')". El proceso api lo obtiene gratis via sus rutas de auth/addresses;
-# el worker no importa nada de app.models.client, asi que se agrega aqui explicitamente.
+# Necesario para que SQLAlchemy resuelva Order.client_account (relationship por string) -
+# sin este import falla con "failed to locate a name ('ClientAccount')".
 from app.models.client import ClientAccount  # noqa: F401
 from app.services.sicar_stock_service import apply_order_stock_delta
 from app.services import admin_notification_service
@@ -22,14 +19,9 @@ MAX_ROWS_PER_TICK = 25
 STALE_LEASE_MINUTES = 5
 
 async def _claim_next_row(session: AsyncSession) -> SicarSyncOutbox | None:
-    """Reclama una fila en una unica sentencia atomica (UPDATE ... WHERE id = (SELECT
-    ... FOR UPDATE SKIP LOCKED) ... RETURNING) y hace commit de inmediato - el lock de
-    Postgres se sostiene por milisegundos, nunca durante la llamada HTTP a Sicar X que
-    viene despues en _process_claimed_row (mantener una fila bloqueada durante una
-    llamada de red de duracion desconocida es exactamente el anti-patron que este
-    diseño evita). La rama IN_PROGRESS-y-vieja es un rescate de "lease": si el worker
-    se cae a medio procesar (p. ej. un reinicio de contenedor), la fila no queda
-    huerfana para siempre - vuelve a ser reclamable pasados STALE_LEASE_MINUTES."""
+    """Claim atomico (UPDATE ... SELECT ... FOR UPDATE SKIP LOCKED ... RETURNING), commit
+    inmediato - el lock nunca se sostiene durante la llamada HTTP a Sicar X posterior.
+    Filas IN_PROGRESS abandonadas (worker caido) vuelven a ser reclamables tras STALE_LEASE_MINUTES."""
     now = datetime.now(timezone.utc)
     stale_before = now - timedelta(minutes=STALE_LEASE_MINUTES)
 
@@ -57,20 +49,14 @@ async def _claim_next_row(session: AsyncSession) -> SicarSyncOutbox | None:
     return row
 
 async def _process_claimed_row(row_id: int) -> None:
-    """Carga la fila reclamada y su orden en una sesion nueva, llama a Sicar X (sin
-    ningun lock de Postgres sostenido durante esa llamada) y registra el resultado en
-    un unico commit al final - el nuevo status/attempts de la fila de outbox se persiste
-    sin necesitar un rollback intermedio (una excepcion de la llamada HTTP no deja nada
-    pendiente sucio en la sesion - solo mutaciones de atributos en memoria, validas de
-    commitear)."""
+    """Sesion nueva por fila: llama a Sicar X sin lock de Postgres sostenido y persiste
+    el resultado (status/attempts) en un solo commit al final."""
     async with AsyncSessionLocal() as session:
         row = await session.get(SicarSyncOutbox, row_id)
         if row is None or row.status != "IN_PROGRESS":
             return
 
-        # Deliberadamente SIN filtro de deleted_at: el worker debe poder seguir
-        # avisandole a Sicar X de ordenes ya borradas (soft-delete) por el cliente via
-        # DELETE /orders/{id}.
+        # Sin filtro de deleted_at: debe poder avisarle a Sicar X de ordenes ya soft-deleted.
         order = await session.get(Order, row.order_id)
         if order is None:
             logger.error(f"sicar_sync_outbox {row.id} referencia una orden inexistente (order_id={row.order_id}) - marcando FAILED.")
@@ -81,16 +67,10 @@ async def _process_claimed_row(row_id: int) -> None:
 
         try:
             if row.action == "ACCEPT":
-                # Unico punto en que este backend le avisa algo a Sicar X sobre una
-                # orden: el descuento de inventario (ver admin_service.accept_order,
-                # CLAUDE.md "SICAR es solo ERP de inventario"). Ya no crea/paga/cancela
-                # ningun documento ahi, ni avisa cambios de dispatch_status.
+                # Unico punto donde este backend le avisa algo a Sicar X: descuento de inventario.
                 await apply_order_stock_delta(order.items, order.branch_id, sign=-1)
             elif row.action == "CANCEL":
-                # Reversion del descuento anterior - solo se encola si la orden ya habia
-                # sido aceptada (ver order_history_service.prepare_local_cancellation);
-                # si nunca se acepto, Sicar X nunca supo de esta orden y no hay fila que
-                # procesar en absoluto.
+                # Reversion del descuento; solo se encola si la orden ya habia sido aceptada.
                 await apply_order_stock_delta(order.items, order.branch_id, sign=1)
             else:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
@@ -117,10 +97,8 @@ async def _process_claimed_row(row_id: int) -> None:
                 await admin_notification_service.notify_admin_sicar_sync_failed(order, row.last_error)
 
 async def sync_pending_cancellations() -> None:
-    """Drena sicar_sync_outbox hasta MAX_ROWS_PER_TICK filas o hasta que ya no quede
-    ninguna reclamable, la que ocurra primero. Cada fila usa sus propias transacciones
-    cortas (ver _claim_next_row/_process_claimed_row) en vez de una sola larga que
-    abarque toda la corrida."""
+    """Drena hasta MAX_ROWS_PER_TICK filas de sicar_sync_outbox, cada una en su propia
+    transaccion corta en vez de una sola larga que abarque toda la corrida."""
     for _ in range(MAX_ROWS_PER_TICK):
         async with AsyncSessionLocal() as session:
             row = await _claim_next_row(session)

@@ -12,21 +12,15 @@ class ClientAccount(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     phone = Column(String, nullable=True)
-    # Nullable: las cuentas via Google (auth_provider="google") no tienen contraseña local -
-    # ver app/services/google_auth_service.py y CLAUDE.md.
+    # Nullable: cuentas via Google no tienen password local.
     hashed_password = Column(String, nullable=True)
 
-    # "local" | "google". String plano (sin enum de BD), mismo patron que Order.status/
-    # deliveryType en este codebase - la vocabulario se restringe en la capa de aplicacion.
+    # "local" | "google" - string plano, vocabulario restringido en la capa de aplicacion (igual que Order.status).
     auth_provider = Column(String, nullable=False, default="local")
-    # `sub` de Google (identificador estable de la cuenta de Google) - solo poblado para
-    # auth_provider="google". Unico: un mismo sub no puede mapear a mas de una cuenta local.
+    # sub de Google, solo poblado para auth_provider="google"; unico por cuenta.
     google_sub = Column(String, unique=True, index=True, nullable=True)
 
-    # Verificacion de correo "suave" hoy: no bloquea login ni checkout, solo se expone en
-    # ClientPublic para que el frontend decida que hacer con ella (p. ej. un banner). Las
-    # cuentas de Google entran ya verificadas (Google ya confirmo el correo); las locales
-    # entran sin verificar y reciben un webhook de verificacion - ver client_service.py.
+    # Verificacion "suave": no bloquea login/checkout, solo se expone en ClientPublic (p. ej. banner). Google entra ya verificado.
     is_verified = Column(Boolean, nullable=False, default=False)
     email_verified_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -34,22 +28,17 @@ class ClientAccount(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 
-    # lazy="select" (default) a proposito: no todas las rutas que resuelven un ClientAccount
-    # necesitan las direcciones (p. ej. POST/PATCH/DELETE de una direccion individual). Donde
-    # sí se necesitan (respuestas ClientPublic), se cargan explícitamente con
-    # `await client.awaitable_attrs.addresses` (AsyncAttrs, ver app/core/database.py).
+    # lazy="select" a proposito (no todas las rutas necesitan direcciones); donde si, se cargan con awaitable_attrs.addresses.
     addresses = relationship(
         "ClientAddress", back_populates="client_account", cascade="all, delete-orphan"
     )
-    # Sin cascade de borrado (a diferencia de addresses): las ordenes son registros
-    # financieros que deben sobrevivir aunque la cuenta cambie.
+    # Sin cascade de borrado (a diferencia de addresses): una orden es registro financiero, debe sobrevivir.
     orders = relationship("Order", back_populates="client_account")
 
 class ClientAddress(Base):
     __tablename__ = "client_addresses"
     __table_args__ = (
-        # Garantiza a nivel de BD que como maximo una direccion por cliente sea la default,
-        # en vez de confiar solo en la logica de la app (evita condiciones de carrera).
+        # Garantiza a nivel de BD un maximo de una direccion default por cliente (evita condiciones de carrera).
         Index(
             "ix_client_addresses_one_default",
             "client_account_id",
@@ -64,7 +53,7 @@ class ClientAddress(Base):
         Integer, ForeignKey("client_accounts.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
-    label = Column(String, nullable=True)  # "Casa", "Oficina", etc.
+    label = Column(String, nullable=True)
     street = Column(String, nullable=False)
     ext_number = Column(String, nullable=True)
     int_number = Column(String, nullable=True)
@@ -74,9 +63,8 @@ class ClientAddress(Base):
     state = Column(String, nullable=True)
     country = Column(String, nullable=True)
     zip_code = Column(String, nullable=True)
-    references = Column(String, nullable=True)  # Referencias para ubicar el domicilio
-    # Coordenadas resueltas por el frontend (envia.com Geocodes API u otro geocoder) - este
-    # backend nunca geocodifica, solo persiste lo que ya le llega resuelto.
+    references = Column(String, nullable=True)
+    # Coordenadas resueltas por el frontend (geocoder externo) - este backend nunca geocodifica.
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     is_default = Column(Boolean, default=False)

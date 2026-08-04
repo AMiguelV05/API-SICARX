@@ -12,15 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _read_current_stock(product_uuid: str, branch_id: int | None) -> Decimal:
-    """GET /stock/v1/stock/{uuid}/all - confirmado en vivo (agent-browser contra el
-    panel de Sicar X, boton "Ajustar inventario" de un producto) como la lectura que
-    respalda ese mismo dialogo. Se llama justo antes de cada PATCH en vez de confiar en
-    el cache local de Postgres (que puede estar desfasado) - mismo comportamiento que el
-    propio dialogo de Sicar X, que vuelve a leer cada vez que se abre en vez de reusar un
-    valor viejo. Si el producto tiene mas de un almacen, se toma la fila cuyo warehouseId
-    coincide con branch_id (confirmado en vivo que branchId/warehouseId son el mismo
-    valor para esta cuenta); con un solo almacen (el caso de esta cuenta hoy) se usa esa
-    fila directamente."""
+    """GET /stock/v1/stock/{uuid}/all - se lee justo antes de cada PATCH, sin confiar en el cache local de Postgres. Con varios almacenes, se usa la fila cuyo warehouseId coincide con branch_id."""
     async def attempt(admin_token: str):
         headers = admin_app_headers(admin_token)
         async with httpx.AsyncClient(timeout=STOCK_TIMEOUT) as client:
@@ -46,12 +38,7 @@ async def _read_current_stock(product_uuid: str, branch_id: int | None) -> Decim
 
 
 async def _patch_stock(product_uuid: str, current_stock: Decimal, new_stock: Decimal) -> None:
-    """PATCH /stock/v1/stock/{uuid} - mismo endpoint/forma de payload confirmados en vivo
-    (interceptado con `network route ... --abort` antes de enviarlo, para no aplicar
-    ningun cambio real durante la investigacion): {"currentStock", "newStock",
-    "available"}. `available` siempre igual a `newStock` - confirmado que asi lo manda el
-    propio dialogo "Ajustar inventario" de Sicar X para esta cuenta (un solo almacen, sin
-    reservas separadas)."""
+    """PATCH /stock/v1/stock/{uuid} con {"currentStock", "newStock", "available"} - `available` siempre igual a `newStock` (sin reservas separadas para esta cuenta)."""
     async def attempt(admin_token: str):
         headers = admin_app_headers(admin_token)
         payload = {
@@ -72,25 +59,7 @@ async def _patch_stock(product_uuid: str, current_stock: Decimal, new_stock: Dec
 
 
 async def apply_order_stock_delta(order_items: list[dict], branch_id: int | None, *, sign: int) -> None:
-    """Aplica en Sicar X el efecto de inventario de una orden completa, linea por linea:
-    sign=-1 al aceptar (la venta ya se confirmo, se descuenta), sign=+1 al cancelar una
-    orden que ya habia sido aceptada (se revierte el descuento). Es la UNICA forma en que
-    este backend le avisa algo a Sicar X sobre una orden - no crea, paga ni cancela ningun
-    documento/orden ahi, solo ajusta existencias (ver CLAUDE.md, "SICAR es solo ERP de
-    inventario"). Llamada exclusivamente desde sicar_sync_worker.py (acciones ACCEPT/
-    CANCEL), nunca desde una ruta de la API ni dentro de una transaccion/lock de Postgres -
-    cada linea hace su propio GET+PATCH, fuera de cualquier lock, igual que el resto de
-    las llamadas HTTP salientes de este modulo.
-
-    Riesgo conocido, no resuelto aqui (ver el plan de este cambio, seccion "Design
-    constraints"): si una orden tiene varias lineas y esta funcion falla a medio camino
-    (linea 2 de 3, por ejemplo), el reintento del outbox (sicar_sync_worker.py, backoff
-    exponencial) vuelve a procesar TODAS las lineas desde cero, incluida la que ya se
-    aplico con exito - un GET+PATCH extra sobre esa linea no es idempotente (podria
-    descontar dos veces). Aceptable por ahora dado que la mayoria de ordenes de esta
-    tienda tienen pocas lineas y una falla a medio camino es rara; si se vuelve un
-    problema real, la solucion es trackear que lineas de la orden ya se sincronizaron
-    (p. ej. una columna nueva) en vez de reprocesar la lista completa en cada intento."""
+    """sign=-1 al aceptar, sign=+1 al cancelar; unica via por la que este backend le avisa algo a Sicar X sobre una orden (solo inventario, ver CLAUDE.md). Riesgo conocido: un reintento tras falla parcial reprocesa TODAS las lineas, incluida la ya aplicada (no idempotente)."""
     for item in order_items or []:
         product_uuid = item.get("uuid")
         try:

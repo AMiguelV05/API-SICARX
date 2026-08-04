@@ -6,11 +6,7 @@ from app.schemas.base import CamelModel
 from app.schemas.products import ProductBasic
 
 class CategoryNode(CamelModel):
-    """Nodo del arbol de categorias - recursivo (`children` es una lista del
-    mismo tipo). Reemplaza a DepartmentWithCategories/CategoryBasic: ya no hay
-    una distincion especial "departamento" vs "categoria", solo nodos con
-    profundidad arbitraria (ver CLAUDE.md, "Taxonomia"). Cambio de forma de
-    respuesta respecto a la version anterior - requiere actualizar el frontend."""
+    """Nodo recursivo del arbol de categorias; reemplaza Department/Category (ya no hay distincion) - cambio de forma respecto a la version anterior, requiere actualizar el frontend."""
     uuid: str
     name: str
     slug: str
@@ -19,9 +15,7 @@ class CategoryNode(CamelModel):
 class TaxonomyResponse(CamelModel):
     categories: List[CategoryNode]
 
-# Admin (/v1/admin/categories/*, ver CLAUDE.md "Admin API") - CRUD del arbol de
-# categorias y asignacion de productos. Distinto de CategoryNode/TaxonomyResponse
-# arriba (esas son de solo lectura para GET /taxonomy, publicas).
+# Admin (/v1/admin/categories/*): CRUD del arbol y asignacion de productos, distinto de CategoryNode/TaxonomyResponse (solo lectura, GET /taxonomy).
 
 class CategoryAdminPublic(CamelModel):
     uuid: str
@@ -35,10 +29,7 @@ class CategoryCreateRequest(CamelModel):
     parent_uuid: Optional[str] = Field(default=None, description="Nodo padre - omitir o null para crear un nodo raiz")
 
 class CategoryUpdateRequest(CamelModel):
-    """Actualizacion parcial - el servicio distingue "campo omitido" de "campo mandado
-    en null" via `exclude_unset=True` (mismo patron que ClientAddressUpdate en
-    address_service.py), asi que `{"parentUuid": null}` explicito mueve el nodo a raiz
-    sin necesidad de un valor centinela aparte."""
+    """Actualizacion parcial (exclude_unset=True): {"parentUuid": null} explicito mueve el nodo a raiz."""
     name: Optional[str] = Field(default=None, min_length=1)
     parent_uuid: Optional[str] = Field(default=None, description="Nuevo padre; null mueve el nodo a raiz")
 

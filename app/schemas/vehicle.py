@@ -5,10 +5,7 @@ from pydantic import Field
 from app.schemas.base import CamelModel
 from app.schemas.products import ProductBasic
 
-# Admin (/v1/admin/vehicles/*, ver CLAUDE.md "Compatibilidad de vehiculos") - CRUD de
-# fitments (make/model/year-range/engine) y asignacion de productos. El surface publico de
-# solo lectura (facets en cascada + resolucion a uuid) vive en app/api/routes/vehicles.py -
-# ver CLAUDE.md para el contrato completo.
+# Admin (/v1/admin/vehicles/*): CRUD de fitments y asignacion de productos; el surface publico de solo lectura vive en routes/vehicles.py.
 
 VehicleType = Literal["AUTOMOTIVE", "MOTORCYCLE"]
 
@@ -31,9 +28,7 @@ class VehicleCreateRequest(CamelModel):
     engine: Optional[str] = Field(default=None, description="Texto libre, p. ej. \"L4 1.6L\"")
 
 class VehicleUpdateRequest(CamelModel):
-    """Actualizacion parcial (`exclude_unset=True`, mismo patron que
-    CategoryUpdateRequest/ClientAddressUpdate) - `yearEnd` mandado explicitamente en
-    null mueve el fitment a "todavia vigente", ausente del body lo deja sin tocar."""
+    """Actualizacion parcial (exclude_unset=True): yearEnd explicito en null marca "todavia vigente"."""
     vehicle_type: Optional[VehicleType] = None
     make: Optional[str] = Field(default=None, min_length=1)
     model: Optional[str] = Field(default=None, min_length=1)
@@ -57,11 +52,7 @@ class VehicleProductsResponse(CamelModel):
     docs: List[ProductBasic]
 
 class AssignProductsToModelRequest(CamelModel):
-    """Asignacion masiva ADITIVA de productos a un modelo a traves de varios anios (ver
-    `vehicle_service.assign_products_to_model_years`) - distinto de
-    `ReplaceVehicleProductsRequest`, que reemplaza el conjunto completo de UN solo
-    vehiculo. `years` primero se resuelve contra `GET .../models-for-years` para saber que
-    `model` existe en todos esos anios antes de mandar esta asignacion."""
+    """Asignacion masiva ADITIVA a un modelo en varios anios - distinto de ReplaceVehicleProductsRequest (reemplaza un solo vehiculo)."""
     vehicle_type: Optional[VehicleType] = None
     make: str = Field(min_length=1)
     model: str = Field(min_length=1)
@@ -78,10 +69,7 @@ class AssignProductsToModelResponse(CamelModel):
     product_uuids: List[str]
     assigned_count: int = Field(description="Vinculos (vehiculo, producto) nuevos realmente creados - pares ya existentes de una asignacion previa no se recuentan aqui")
 
-# Publico (/v1/vehicles/*) - facets en cascada para un selector de vehiculo tipo
-# auto-refacciones (tipo -> marca -> modelo -> anio -> motor). Sin total/paginacion: son
-# listas de valores distintos, acotadas por naturaleza (un puñado de marcas/modelos/anios/
-# motores por seleccion), no una coleccion paginada.
+# Publico (/v1/vehicles/*): facets en cascada tipo->marca->modelo->anio->motor. Sin paginacion: listas de valores acotadas por naturaleza.
 
 class VehicleMakesResponse(CamelModel):
     docs: List[str]

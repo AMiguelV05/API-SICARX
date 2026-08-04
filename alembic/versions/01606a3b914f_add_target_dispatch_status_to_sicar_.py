@@ -20,9 +20,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # ix_order_idempotency_keys_id fue excluido a proposito: es drift preexistente sin
-    # relacion con este cambio (autogenerate lo detecto de forma independiente), no algo
-    # que esta migracion deba tocar.
+    # ix_order_idempotency_keys_id omitido a proposito: ya cubierto por la PK.
     op.add_column('sicar_sync_outbox', sa.Column('target_dispatch_status', sa.String(), nullable=True))
 
 

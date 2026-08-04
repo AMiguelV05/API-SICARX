@@ -1,10 +1,7 @@
 from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Table, Index
 from app.core.database import Base
 
-# Tabla N:M producto<->vehiculo (compatibilidad de vehiculos, PIM propio - ver CLAUDE.md
-# "Compatibilidad de vehiculos"). Mismo patron que product_categories (app/models/taxonomy.py):
-# empieza vacia, no hay migracion que la puebla con asignaciones reales - el script de
-# import_gonher_vehicles.py solo siembra `vehicles`, nunca esta tabla.
+# N:M producto<->vehiculo (compatibilidad, PIM propio) - mismo patron que product_categories; empieza vacia.
 product_vehicles = Table(
     "product_vehicles",
     Base.metadata,
@@ -14,15 +11,8 @@ product_vehicles = Table(
 )
 
 class Vehicle(Base):
-    """Una fila = una combinacion make/model/year-range/engine ("fitment"), no un arbol -
-    a diferencia de Category (auto-referenciada), aqui make/model/year/engine es plano,
-    sin jerarquia real que representar (ver CLAUDE.md, "Compatibilidad de vehiculos").
-    `uuid` generado localmente (uuid4()), mismo patron que Order.uuid/Category.uuid.
-
-    Administrada por humanos via /v1/admin/vehicles/* - no hay sincronizacion automatica
-    con ninguna fuente externa. Puede sembrarse desde un catalogo de referencia externo
-    (ver import_gonher_vehicles.py) pero eso es un import manual de una sola vez, no un
-    job recurrente."""
+    """Fitment plano (make/model/year-range/engine), no arbol como Category. Administrado
+    por humanos via /v1/admin/vehicles/*, sin sincronizacion automatica."""
     __tablename__ = "vehicles"
     __table_args__ = (
         Index("ix_vehicles_type_make_model", "vehicle_type", "make", "model"),

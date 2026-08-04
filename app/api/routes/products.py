@@ -31,7 +31,6 @@ async def get_product_details(uuid: str, db: DbDep):
     if not product:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
 
-    # Lógica de expiración
     needs_update = (
         product.details_updated_at is None or
         datetime.now(timezone.utc) - product.details_updated_at > timedelta(days=1)
@@ -40,10 +39,8 @@ async def get_product_details(uuid: str, db: DbDep):
     if needs_update:
         logger.info(f"Datos obsoletos para {uuid}. Descargando de GraphQL...")
 
-        # Llamada al servicio que maneja el auto-login
         full_data = await fetch_full_details_from_sicar(product.sicar_uuid)
 
-        # Actualizamos el modelo en PostgreSQL
         if full_data:
             product.additional_skus = full_data.get("skus")
             product.description_details = full_data.get("details")
@@ -66,7 +63,6 @@ async def get_catalog(db: DbDep, filter_data: LocalCatalogFilter = Body()):
     Retorna solo la información básica necesaria para las tarjetas de producto.
     """
     try:
-        # Convertimos el modelo de Pydantic a diccionario
         result = await get_local_catalog(db, filter_data.model_dump())
         return result
     except Exception as e:

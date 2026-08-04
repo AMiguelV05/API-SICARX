@@ -24,11 +24,10 @@ async def _build_auth_response(
     db: AsyncSession, client: ClientAccount, cart_token: Optional[str], response: Response
 ) -> ClientAuthResponse:
     """
-    Compartido por /auth/register y /auth/login: emite el token de sesion y, si vino un
-    cartToken de un carrito anonimo, lo fusiona a la cuenta en la misma llamada (tolerante -
-    un token ausente/invalido no falla el login/registro, ver try_merge_cart_token). El
-    carrito resultante (fusionado o no) se devuelve inline para que el frontend no necesite
-    un GET /cart aparte para hidratar su UI tras iniciar sesion.
+    Compartido por /auth/register, /auth/login y /auth/google: emite el token de sesion
+    y, si vino `cartToken`, fusiona ese carrito anonimo a la cuenta (tolerante - un token
+    ausente/invalido no falla el login, ver try_merge_cart_token). El carrito resultante
+    se devuelve inline para evitar un GET /cart aparte tras iniciar sesion.
     """
     token = create_client_token(client.uuid)
     merged_cart = await try_merge_cart_token(db, client, cart_token)
@@ -44,12 +43,9 @@ async def _build_auth_response(
 @limiter.limit("5/minute")
 async def register(request: Request, response: Response, db: DbDep, data: ClientRegister = Body()):
     """
-    Crea una cuenta de cliente local (nombre, correo, teléfono opcional, contraseña).
-    El correo debe ser único. Devuelve un token de sesión, igual que `/auth/login`,
-    para iniciar sesión automáticamente tras registrarse. Si se envía `cartToken` (el
-    de un carrito anónimo previo), se fusiona a la cuenta en la misma llamada y el
-    carrito resultante viene incluido en la respuesta. Limitado a 5 intentos por
-    minuto por IP para dificultar el registro masivo/spam de cuentas.
+    Crea una cuenta de cliente local; el correo debe ser único (`409` si ya existe).
+    Devuelve un token de sesión, igual que `/auth/login`, para iniciar sesión
+    automáticamente tras registrarse. Limitado a 5 intentos por minuto por IP.
     """
     client = await register_client(db, data)
     return await _build_auth_response(db, client, data.cart_token, response)
@@ -58,12 +54,9 @@ async def register(request: Request, response: Response, db: DbDep, data: Client
 @limiter.limit("5/minute")
 async def login(request: Request, response: Response, db: DbDep, data: ClientLogin = Body()):
     """
-    Valida correo y contraseña contra las cuentas de cliente locales y devuelve
-    un token de sesión (JWT propio de esta API, distinto del token de sesión de Sicar X).
-    Si se envía `cartToken` (el de un carrito anónimo previo), se fusiona a la cuenta en
-    la misma llamada y el carrito resultante viene incluido en la respuesta - un token
-    ausente o que ya no resuelve simplemente se ignora, nunca hace fallar el login.
-    Limitado a 5 intentos por minuto por IP para dificultar fuerza bruta.
+    Valida correo y contraseña contra las cuentas de cliente locales y devuelve un
+    token de sesión (JWT propio, distinto del de Sicar X). `401` en credenciales
+    inválidas. Limitado a 5 intentos por minuto por IP.
     """
     client = await authenticate_client(db, data)
     return await _build_auth_response(db, client, data.cart_token, response)
@@ -72,15 +65,12 @@ async def login(request: Request, response: Response, db: DbDep, data: ClientLog
 @limiter.limit("10/minute")
 async def google_login(request: Request, response: Response, db: DbDep, data: GoogleLogin = Body()):
     """
-    Verifica un ID token de Google Identity Services (obtenido del lado del frontend) y
-    resuelve la cuenta local correspondiente — la crea si es la primera vez que ese
-    usuario de Google inicia sesión. Devuelve la misma forma que `/auth/login`. Si el
-    correo de la cuenta de Google ya está registrado localmente con contraseña, responde
-    `409` en vez de fusionar las cuentas automáticamente (evita que la contraseña de
-    quien haya registrado ese correo primero quede vigente sobre una cuenta que el dueño
-    real ahora cree asegurada por Google) — inicia sesión con tu contraseña en ese caso.
-    Las cuentas creadas por esta vía entran ya verificadas (Google ya confirmó el correo),
-    sin necesidad del flujo de `/auth/verify-email`.
+    Verifica un ID token de Google (obtenido en el frontend) y resuelve la cuenta local
+    — la crea si es la primera vez. Devuelve la misma forma que `/auth/login`. Si el
+    correo ya tiene cuenta local con contraseña, responde `409` en vez de fusionar
+    automáticamente (evita que la contraseña de quien registró ese correo primero siga
+    vigente sobre lo que su dueño real ahora cree asegurado por Google) — usar la
+    contraseña en ese caso. Cuentas creadas así ya quedan verificadas.
     """
     identity = await verify_google_id_token(data.id_token)
     client = await get_or_create_google_client(db, identity)
@@ -90,11 +80,9 @@ async def google_login(request: Request, response: Response, db: DbDep, data: Go
 @limiter.limit("10/minute")
 async def verify_email(request: Request, db: DbDep, data: VerifyEmailRequest = Body()):
     """
-    Confirma el token enviado por correo tras `/auth/register` (o reenviado por
-    `/auth/resend-verification`) y marca la cuenta como verificada. No requiere sesión
-    activa — el token en sí prueba propiedad del correo, y el usuario puede estar en un
-    dispositivo/navegador distinto al que usó para registrarse. Verificación "suave": hoy
-    no bloquea login ni checkout, solo se refleja en `isVerified` de `ClientPublic`.
+    Confirma el token enviado por correo tras `/auth/register` y marca la cuenta como
+    verificada. No requiere sesión activa — el token en sí prueba propiedad del correo.
+    Verificación "suave": no bloquea login ni checkout, solo se refleja en `isVerified`.
     """
     return await verify_client_email(db, data.token)
 
@@ -102,20 +90,14 @@ async def verify_email(request: Request, db: DbDep, data: VerifyEmailRequest = B
 @limiter.limit("5/minute")
 async def resend_verification(request: Request, client: CurrentClientDep, db: DbDep):
     """
-    Reenvía el correo de verificación a la cuenta autenticada (requiere `Authorization`
-    con el token de sesión de la cuenta) — deliberadamente no acepta un correo suelto sin
-    sesión, para no habilitar enumeración de cuentas registradas. `400` si la cuenta ya
-    está verificada. Limitado a 5 por minuto por IP.
+    Reenvía el correo de verificación a la cuenta autenticada — deliberadamente no
+    acepta un correo suelto sin sesión, para no habilitar enumeración de cuentas. `400`
+    si ya está verificada.
     """
     await resend_verification_email(db, client)
 
 @router.get("/auth/me", response_model=ClientPublic, summary="Obtener datos de la cuenta del cliente")
 async def get_me(client: CurrentClientDep):
-    """
-    Devuelve nombre, correo y teléfono de la cuenta del cliente autenticado — pensado
-    para poblar una pantalla de "Mi cuenta". Requiere el token de `/auth/register` o
-    `/auth/login` en el header `Authorization` (distinto del token de sesión de Sicar X).
-    """
     await client.awaitable_attrs.addresses  # necesario para serializar ClientPublic.addresses
     return client
 
@@ -123,11 +105,9 @@ async def get_me(client: CurrentClientDep):
 @limiter.limit("10/minute")
 async def update_me(request: Request, client: CurrentClientDep, db: DbDep, data: ClientUpdate = Body()):
     """
-    Actualiza nombre, teléfono y/o contraseña de la cuenta autenticada. Todos los campos
-    son opcionales — solo se cambia lo que se envía. Para cambiar la contraseña hay que
-    enviar `current_password` (la actual) junto con `new_password`; si `current_password`
-    no coincide, responde `401`. Limitado a 10 llamadas por minuto por IP (cubre también
-    intentos repetidos de adivinar `current_password`).
+    Actualiza nombre, teléfono y/o contraseña de la cuenta autenticada — todos los
+    campos son opcionales. Cambiar la contraseña requiere `current_password` junto con
+    `new_password`; `401` si no coincide. Limitado a 10 llamadas por minuto por IP.
     """
     updated = await update_client(db, client, data)
     return updated
