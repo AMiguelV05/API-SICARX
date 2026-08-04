@@ -1,17 +1,20 @@
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from io import BytesIO
 from openpyxl import Workbook, load_workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Font
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, or_, and_, cast
+from sqlalchemy import select, func, or_, and_, cast, update, bindparam
 from sqlalchemy.dialects.postgresql import insert as pg_insert, JSONB, array as pg_array
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.product import Product
 from app.models.taxonomy import Category, product_categories
 from app.models.vehicle import Vehicle, product_vehicles
+from app.models.attribute import Attribute, VariantGroup
+from app.services.attribute_service import coerce_and_validate_value
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +24,12 @@ MAX_VEHICLE_COMBOS_PER_QUERY = 300  # troceo defensivo, ver _resolve_vehicle_com
 
 CATEGORIES_SHEET = "Categorias"
 VEHICLES_SHEET = "Vehiculos"
+ATTRIBUTES_SHEET = "Atributos"
+VARIANTS_SHEET = "Variantes"
 CATEGORIES_REQUIRED_COLUMNS = ("sku", "categorySlug")
 VEHICLES_REQUIRED_COLUMNS = ("sku", "make", "model", "year")  # vehicleType/engine son opcionales
+ATTRIBUTES_REQUIRED_COLUMNS = ("sku", "attributeSlug", "value")
+VARIANTS_REQUIRED_COLUMNS = ("sku", "variantGroupSlug")
 
 
 @dataclass
@@ -45,6 +52,8 @@ class _SheetOutcome:
 class BulkImportOutcome:
     categories: _SheetOutcome
     vehicles: _SheetOutcome
+    attributes: _SheetOutcome
+    variants: _SheetOutcome
 
 
 def _load_workbook(file_bytes: bytes):
@@ -144,6 +153,33 @@ async def _resolve_categories(db: AsyncSession, slugs: set[str]) -> dict[str, st
         return {}
     result = await db.execute(select(Category.uuid, Category.slug).where(Category.slug.in_(slugs)))
     return {row.slug: row.uuid for row in result.all()}
+
+
+async def _resolve_attributes(db: AsyncSession, slugs: set[str]) -> dict[str, Attribute]:
+    """slug -> Attribute (objeto completo, no solo uuid - se necesita data_type/
+    allowed_values para validar cada valor), un solo IN (...) (tabla chica)."""
+    if not slugs:
+        return {}
+    result = await db.execute(select(Attribute).where(Attribute.slug.in_(slugs)))
+    return {a.slug: a for a in result.scalars().all()}
+
+
+async def _resolve_variant_groups(db: AsyncSession, slugs: set[str]) -> dict[str, str]:
+    """slug del NOMBRE del grupo, slugificado igual que categorias/atributos, -> VariantGroup.uuid.
+    `VariantGroup` no tiene columna `slug` propia (no se expone por URL como categories/
+    attributes) - se compara contra una version slugificada de `name` en Python, tabla chica."""
+    if not slugs:
+        return {}
+    result = await db.execute(select(VariantGroup.uuid, VariantGroup.name))
+    return {_slugify_ascii(name): uuid for uuid, name in result.all() if _slugify_ascii(name) in slugs}
+
+
+def _slugify_ascii(name: str) -> str:
+    """Mismo slugify que taxonomy_service._slugify/attribute_service._slugify, duplicado
+    aqui (sin fallback especifico) solo para comparar `variantGroupSlug` contra `name` -
+    VariantGroup no persiste su propio slug."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
 
 
 async def _resolve_vehicle_combos(
@@ -276,10 +312,131 @@ def _process_vehicles_rows(
     return pairs, errors
 
 
+def _coerce_cell_value(attribute: Attribute, raw):
+    """Celdas de Excel no vienen tipadas como JSON - normaliza el valor crudo al tipo
+    Python que `attribute_service.coerce_and_validate_value` espera antes de validarlo.
+    Lanza ValueError (capturado por el caller, se reporta como VALUE_TYPE_MISMATCH)."""
+    if raw is None:
+        return None
+    if attribute.data_type == "BOOLEAN":
+        if isinstance(raw, bool):
+            return raw
+        text = _clean_str(raw).lower()
+        if text in ("true", "1", "si", "sí", "verdadero", "x"):
+            return True
+        if text in ("false", "0", "no", "falso", ""):
+            return False
+        raise ValueError(f"valor booleano no reconocido: {raw!r}")
+    if attribute.data_type == "NUMBER":
+        if isinstance(raw, bool):
+            raise ValueError(f"valor numerico invalido: {raw!r}")
+        if isinstance(raw, (int, float)):
+            return raw
+        try:
+            return float(_clean_str(raw))
+        except ValueError:
+            raise ValueError(f"valor numerico invalido: {raw!r}")
+    return _clean_str(raw)  # TEXT / ENUM
+
+
+def _process_attributes_rows(
+    rows: list[tuple[int, dict]], product_map: dict[str, int], attribute_map: dict[str, Attribute]
+) -> tuple[dict[int, dict[str, object]], list[_RowError]]:
+    """Devuelve product_id -> {slug: value} (varias filas del mismo sku se acumulan en el
+    mismo dict; sku+attributeSlug repetido dentro del archivo, la ultima fila gana). No es
+    ON CONFLICT DO NOTHING como Categorias/Vehiculos: esto lleva un valor real, un
+    reintento con un valor corregido SI debe aplicarse - ver _apply_attribute_updates."""
+    updates: dict[int, dict[str, object]] = {}
+    errors: list[_RowError] = []
+    for row_num, data in rows:
+        sku = _clean_str(data.get("sku"))
+        attribute_slug = _clean_str(data.get("attributeSlug"))
+        if not sku or not attribute_slug:
+            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: falta sku o attributeSlug.", sku or None))
+            continue
+        product_id = product_map.get(sku.upper())
+        if product_id is None:
+            errors.append(_RowError(row_num, "SKU_NOT_FOUND", f"SKU no encontrado: {sku}.", sku))
+            continue
+        attribute = attribute_map.get(attribute_slug)
+        if attribute is None:
+            errors.append(_RowError(row_num, "ATTRIBUTE_SLUG_NOT_FOUND", f"Atributo con slug no encontrado: {attribute_slug}.", sku))
+            continue
+        try:
+            coerced = _coerce_cell_value(attribute, data.get("value"))
+            value = coerce_and_validate_value(attribute, coerced)
+        except ValueError as exc:
+            errors.append(_RowError(row_num, "VALUE_TYPE_MISMATCH", str(exc), sku))
+            continue
+        updates.setdefault(product_id, {})[attribute.slug] = value
+    return updates, errors
+
+
+def _process_variantes_rows(
+    rows: list[tuple[int, dict]], product_map: dict[str, int], variant_group_map: dict[str, str]
+) -> tuple[dict[int, str], list[_RowError]]:
+    """Devuelve product_id -> VariantGroup.uuid. REEMPLAZO (no aditivo, a diferencia de
+    Categorias/Vehiculos): variant_group_uuid es un solo valor por producto, no un tag -
+    sku repetido en el archivo, la ultima fila gana."""
+    updates: dict[int, str] = {}
+    errors: list[_RowError] = []
+    for row_num, data in rows:
+        sku = _clean_str(data.get("sku"))
+        variant_group_slug = _clean_str(data.get("variantGroupSlug"))
+        if not sku or not variant_group_slug:
+            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: falta sku o variantGroupSlug.", sku or None))
+            continue
+        product_id = product_map.get(sku.upper())
+        if product_id is None:
+            errors.append(_RowError(row_num, "SKU_NOT_FOUND", f"SKU no encontrado: {sku}.", sku))
+            continue
+        variant_group_uuid = variant_group_map.get(variant_group_slug)
+        if variant_group_uuid is None:
+            errors.append(_RowError(row_num, "VARIANT_GROUP_SLUG_NOT_FOUND", f"Grupo de variantes con slug no encontrado: {variant_group_slug}.", sku))
+            continue
+        updates[product_id] = variant_group_uuid
+    return updates, errors
+
+
+async def _apply_attribute_updates(db: AsyncSession, updates: dict[int, dict[str, object]]) -> int:
+    """Merge (no reemplazo) por producto: lee Product.attributes actual y lo combina con
+    las claves nuevas antes de escribir, para que una corrida no borre atributos que otra
+    hoja/corrida anterior ya habia guardado. Devuelve pares (producto, atributo)
+    realmente escritos (cuenta TODAS las claves aplicadas, no solo las nuevas - un valor
+    corregido para una clave existente tambien cuenta)."""
+    if not updates:
+        return 0
+    product_ids = list(updates.keys())
+    result = await db.execute(select(Product.id, Product.attributes).where(Product.id.in_(product_ids)))
+    current = {row.id: (row.attributes or {}) for row in result.all()}
+
+    rows_to_update = []
+    written = 0
+    for product_id, new_values in updates.items():
+        merged = {**current.get(product_id, {}), **new_values}
+        rows_to_update.append({"pid": product_id, "attrs": merged})
+        written += len(new_values)
+
+    stmt = update(Product).where(Product.id == bindparam("pid")).values(attributes=bindparam("attrs", type_=JSONB))
+    await db.execute(stmt, rows_to_update)
+    return written
+
+
+async def _apply_variant_group_updates(db: AsyncSession, updates: dict[int, str]) -> int:
+    if not updates:
+        return 0
+    stmt = update(Product).where(Product.id == bindparam("pid")).values(variant_group_uuid=bindparam("vgu"))
+    await db.execute(stmt, [{"pid": pid, "vgu": vgu} for pid, vgu in updates.items()])
+    return len(updates)
+
+
 async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkImportOutcome:
-    """Orquestador: parsea el .xlsx, resuelve productos/categorias/vehiculos en un numero
-    constante de consultas, y hace un solo commit final (aditivo, idempotente). Las
-    validaciones por fila nunca tocan la base de datos."""
+    """Orquestador: parsea el .xlsx, resuelve productos/categorias/vehiculos/atributos/
+    grupos de variantes en un numero constante de consultas, y hace un solo commit final.
+    Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos hace merge
+    (no pisa claves de una corrida anterior) y Variantes REEMPLAZA (variant_group_uuid es
+    un solo valor por producto, no un tag) - ver los docstrings de cada _process_*_rows.
+    Las validaciones por fila nunca tocan la base de datos."""
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -290,17 +447,23 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
     try:
         cat_found, cat_rows = _read_sheet(wb, CATEGORIES_SHEET, CATEGORIES_REQUIRED_COLUMNS)
         veh_found, veh_rows = _read_sheet(wb, VEHICLES_SHEET, VEHICLES_REQUIRED_COLUMNS)
+        attr_found, attr_rows = _read_sheet(wb, ATTRIBUTES_SHEET, ATTRIBUTES_REQUIRED_COLUMNS)
+        var_found, var_rows = _read_sheet(wb, VARIANTS_SHEET, VARIANTS_REQUIRED_COLUMNS)
     finally:
         wb.close()
 
-    if not cat_found and not veh_found:
+    if not cat_found and not veh_found and not attr_found and not var_found:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"El archivo no contiene ninguna hoja '{CATEGORIES_SHEET}' ni '{VEHICLES_SHEET}'.",
+            detail=f"El archivo no contiene ninguna hoja '{CATEGORIES_SHEET}', '{VEHICLES_SHEET}', '{ATTRIBUTES_SHEET}' ni '{VARIANTS_SHEET}'.",
         )
 
-    all_skus = {_clean_str(r.get("sku")) for _, r in cat_rows if _clean_str(r.get("sku"))} | \
-               {_clean_str(r.get("sku")) for _, r in veh_rows if _clean_str(r.get("sku"))}
+    all_skus = (
+        {_clean_str(r.get("sku")) for _, r in cat_rows if _clean_str(r.get("sku"))}
+        | {_clean_str(r.get("sku")) for _, r in veh_rows if _clean_str(r.get("sku"))}
+        | {_clean_str(r.get("sku")) for _, r in attr_rows if _clean_str(r.get("sku"))}
+        | {_clean_str(r.get("sku")) for _, r in var_rows if _clean_str(r.get("sku"))}
+    )
     product_map = await _resolve_products(db, all_skus)
 
     category_slugs: set[str] = set()
@@ -318,20 +481,34 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
             vehicle_combos.add((vt, make, model, eng))
     combo_map = await _resolve_vehicle_combos(db, vehicle_combos)
 
+    attribute_slugs = {_clean_str(r.get("attributeSlug")) for _, r in attr_rows if _clean_str(r.get("attributeSlug"))}
+    attribute_map = await _resolve_attributes(db, attribute_slugs)
+
+    variant_group_slugs = {_slugify_ascii(_clean_str(r.get("variantGroupSlug"))) for _, r in var_rows if _clean_str(r.get("variantGroupSlug"))}
+    variant_group_map = await _resolve_variant_groups(db, variant_group_slugs)
+
     cat_pairs, cat_errors = _process_categories_rows(cat_rows, product_map, category_map)
     veh_pairs, veh_errors = _process_vehicles_rows(veh_rows, product_map, combo_map)
+    attr_updates, attr_errors = _process_attributes_rows(attr_rows, product_map, attribute_map)
+    var_updates, var_errors = _process_variantes_rows(var_rows, product_map, variant_group_map)
 
     cat_assigned = await _bulk_insert_pairs(db, product_categories, cat_pairs, ["category_uuid", "product_id"], product_categories.c.category_uuid)
     veh_assigned = await _bulk_insert_pairs(db, product_vehicles, veh_pairs, ["vehicle_uuid", "product_id"], product_vehicles.c.vehicle_uuid)
+    attr_assigned = await _apply_attribute_updates(db, attr_updates)
+    var_assigned = await _apply_variant_group_updates(db, var_updates)
     await db.commit()
 
     logger.info(
         f"Bulk import via /admin: Categorias={len(cat_rows)} filas/{cat_assigned} nuevos/{len(cat_errors)} errores, "
-        f"Vehiculos={len(veh_rows)} filas/{veh_assigned} nuevos/{len(veh_errors)} errores."
+        f"Vehiculos={len(veh_rows)} filas/{veh_assigned} nuevos/{len(veh_errors)} errores, "
+        f"Atributos={len(attr_rows)} filas/{attr_assigned} escritos/{len(attr_errors)} errores, "
+        f"Variantes={len(var_rows)} filas/{var_assigned} productos/{len(var_errors)} errores."
     )
     return BulkImportOutcome(
         categories=_SheetOutcome(cat_found, len(cat_rows), cat_assigned, cat_errors),
         vehicles=_SheetOutcome(veh_found, len(veh_rows), veh_assigned, veh_errors),
+        attributes=_SheetOutcome(attr_found, len(attr_rows), attr_assigned, attr_errors),
+        variants=_SheetOutcome(var_found, len(var_rows), var_assigned, var_errors),
     )
 
 
@@ -372,6 +549,21 @@ def build_template_workbook() -> bytes:
     # Orden de columnas: sku, make, model, year, vehicleType, engine (ver veh_columns arriba)
     ws_veh.append(["SKU-EJEMPLO-2", "Marca-Ejemplo", "Modelo-Ejemplo", 2020, None, None])
     ws_veh.append(["SKU-EJEMPLO-2", "Marca-Ejemplo", "Modelo-Ejemplo", 2020, "AUTOMOTIVE", "L4 1.6L"])
+
+    ws_attr = wb.create_sheet(ATTRIBUTES_SHEET)
+    _write_header(ws_attr, ATTRIBUTES_REQUIRED_COLUMNS, {
+        "attributeSlug": "Slug (no nombre ni uuid) de un atributo ya existente - ver GET /admin/attributes. Una fila por (sku, atributo); para varios atributos del mismo producto, repite el sku en varias filas.",
+        "value": "Formato segun el dataType del atributo: TEXT/ENUM = texto tal cual (ENUM debe ser uno de sus allowedValues); NUMBER = numero; BOOLEAN = TRUE/FALSE (tambien acepta si/no, 1/0). A diferencia de Categorias/Vehiculos, MERGE - un valor corregido en una corrida posterior SI se aplica, no se ignora.",
+    })
+    ws_attr.append(["SKU-EJEMPLO-1", "atributo-ejemplo-color", "Rojo"])
+    ws_attr.append(["SKU-EJEMPLO-1", "atributo-ejemplo-voltaje", 12])
+
+    ws_var = wb.create_sheet(VARIANTS_SHEET)
+    _write_header(ws_var, VARIANTS_REQUIRED_COLUMNS, {
+        "variantGroupSlug": "Slug derivado del NOMBRE de un grupo de variantes ya existente - ver GET /admin/variant-groups (VariantGroup no tiene slug propio, se deriva de su name igual que categorias/atributos). A diferencia de Categorias/Vehiculos, REEMPLAZA: variantGroupUuid es un solo valor por producto, no un tag.",
+    })
+    ws_var.append(["SKU-EJEMPLO-1", "grupo-de-variantes-ejemplo"])
+    ws_var.append(["SKU-EJEMPLO-3", "grupo-de-variantes-ejemplo"])
 
     buffer = BytesIO()
     wb.save(buffer)

@@ -42,14 +42,16 @@ async def admin_bulk_import_template():
 @router.post(
     "/products",
     response_model=BulkImportProductsResponse,
-    summary="Asignacion masiva ADITIVA de categorias/vehiculos a productos desde un .xlsx (hojas 'Categorias'/'Vehiculos')",
+    summary="Asignacion masiva de categorias/vehiculos/atributos/grupos de variantes a productos desde un .xlsx",
 )
 async def admin_bulk_import_products(db: DbDep, file: UploadFile = File(...)):
-    """Importacion masiva ADITIVA de `product_categories`/`product_vehicles` desde un
-    .xlsx (hojas opcionales 'Categorias'/'Vehiculos'), resolviendo productos por `sku`
-    (+ `additional_skus` como fallback). Exito parcial: filas invalidas se omiten y se
-    reportan individualmente, solo problemas a nivel de archivo completo rechazan todo.
-    Re-subir el mismo archivo es un no-op seguro (`ON CONFLICT DO NOTHING`)."""
+    """Importacion masiva desde un .xlsx (hojas opcionales 'Categorias'/'Vehiculos'/
+    'Atributos'/'Variantes'), resolviendo productos por `sku` (+ `additional_skus` como
+    fallback). Exito parcial: filas invalidas se omiten y se reportan individualmente,
+    solo problemas a nivel de archivo completo rechazan todo. Semantica de re-subida
+    distinta por hoja: Categorias/Vehiculos son ADITIVOS (`ON CONFLICT DO NOTHING`,
+    no-op seguro); Atributos hace MERGE (un valor corregido SI se aplica); Variantes
+    REEMPLAZA (`variantGroupUuid` es un solo valor por producto, no un tag)."""
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Se espera un archivo .xlsx.")
 
@@ -58,4 +60,6 @@ async def admin_bulk_import_products(db: DbDep, file: UploadFile = File(...)):
     return BulkImportProductsResponse(
         categories=_sheet_result(outcome.categories, "Categorias"),
         vehicles=_sheet_result(outcome.vehicles, "Vehiculos"),
+        attributes=_sheet_result(outcome.attributes, "Atributos"),
+        variants=_sheet_result(outcome.variants, "Variantes"),
     )

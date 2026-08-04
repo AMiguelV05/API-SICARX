@@ -882,6 +882,270 @@ Respuesta `200` (lista simple, sin paginar):
 `[]` si el producto existe pero no tiene ningún vehículo asignado. `404` si el
 `productUuid` no corresponde a un producto real y no eliminado.
 
+### Atributos de producto y grupos de variantes
+
+**Independiente de Categorías/Vehículos de arriba** — no hay ningún "tipo de producto" ni
+clasificación intermedia que gatee qué atributos aplican a qué producto (se evaluó y se
+descartó explícitamente, ver `CLAUDE.md`). Cualquier atributo del catálogo se puede asignar
+directo a cualquier producto. Dos ideas nuevas, con su propia forma en Postgres:
+
+- **Atributos** (`attributes`) — catálogo de *definiciones* (nombre, tipo de dato, unidad).
+  Los **valores** reales de cada producto viven en una sola columna JSONB
+  (`Product.attributes`, clave = `slug` del atributo) — no hay una tabla "un valor por fila".
+- **Presets de atributos** (`attribute-presets`) — bundles nombrados y reusables de atributos
+  (p. ej. "Llantas") puramente como atajo de captura para un lote de productos similares.
+  **Nunca son obligatorios ni se validan contra un producto** — aplicar un preset solo
+  pre-llena claves vacías, no impone ni exige nada después.
+- **Grupos de variantes** (`variant-groups`) — vincula explícitamente SKUs *distintos* de
+  Sicar X (cada uno con su propio precio/stock/documento) que son la misma pieza en
+  presentaciones distintas (p. ej. color) — ver `GET /v1/products/{uuid}` en
+  `FRONTEND_INTEGRATION.md` para cómo el storefront los consume.
+
+Todo empieza vacío hoy — ningún atributo/preset/grupo existe todavía, y ningún producto tiene
+`attributes`/`variantGroupUuid` asignado (89,763 productos activos sin clasificar al momento de
+construir esto). Es trabajo de contenido, no algo que este backend intente adivinar solo.
+
+#### `POST /v1/admin/attributes` — crear una definición de atributo
+
+```http
+POST /v1/admin/attributes
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "name": "Color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null }
+```
+
+`dataType` es `"TEXT"` / `"NUMBER"` / `"BOOLEAN"` / `"ENUM"`. `allowedValues` es **requerido
+(mínimo 2 valores) cuando `dataType` es `"ENUM"`**, ignorado en cualquier otro caso — `422` si
+falta o trae menos de 2. `unit` es opcional, texto libre de display (p. ej. `"V"`, `"mm"`,
+`"L"`). El `slug` **no se manda**, siempre se deriva de `name` (mismo criterio de
+categorías/vehículos: minúsculas, sin acentos, guiones, sufijo `-2`/`-3`... si ya existe).
+
+Respuesta `201`:
+```json
+{ "uuid": "8bdb99f9-9c96-4c37-a32c-1f000f38569b", "name": "Color", "slug": "color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null, "updatedAt": "2026-08-04T17:00:00Z" }
+```
+
+#### `GET /v1/admin/attributes` — buscar/listar atributos
+
+```http
+GET /v1/admin/attributes?search=color&dataType=ENUM&limit=50&offset=0
+X-Admin-Key: <admin-key>
+```
+
+`search` es `ILIKE` parcial contra `name`, `dataType` es igualdad exacta — ambos opcionales y
+combinables. Paginado igual que el resto (`limit` 1-200, default 50; `offset`).
+
+Respuesta `200` — mismo shape que `POST`, dentro de `docs`, ordenado por `name`:
+```json
+{ "total": 1, "docs": [ { "uuid": "8bdb99f9-...", "name": "Color", "slug": "color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null, "updatedAt": "2026-08-04T17:00:00Z" } ] }
+```
+
+#### `PATCH /v1/admin/attributes/{uuid}` — actualización parcial
+
+```http
+PATCH /v1/admin/attributes/8bdb99f9-.../
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "unit": "cm" }
+```
+
+Solo los campos incluidos en el body se tocan. Renombrar (`name`, recalcula `slug`) o cambiar
+`dataType` mientras el atributo **ya tiene valores guardados en algún producto** responde
+`409` — ambos cambios romperían esos valores existentes (la clave JSONB dejaría de coincidir,
+o el tipo guardado dejaría de tener sentido). Quita los valores existentes primero
+(`PUT /v1/admin/products/{uuid}/attributes` de abajo) o crea un atributo nuevo en su lugar.
+`422` si el `allowedValues`/`dataType` resultante (mezclando body + lo ya guardado) deja un
+`ENUM` con menos de 2 valores permitidos.
+
+#### `DELETE /v1/admin/attributes/{uuid}` — eliminar
+
+```http
+DELETE /v1/admin/attributes/8bdb99f9-.../
+X-Admin-Key: <admin-key>
+```
+
+`204` sin cuerpo si tiene éxito. Borrado real. `409` si algún producto todavía tiene esta clave
+en `attributes`, o si el atributo sigue asignado a algún preset — quítalo de ambos primero.
+
+#### `POST /v1/admin/attribute-presets` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
+
+Mismo patrón CRUD que atributos (`{ "name": "Llantas" }` al crear, `slug` derivado
+automáticamente, `search` en el listado). A diferencia de atributos/grupos de variantes,
+**`DELETE` nunca se bloquea** — un preset no gatea ni valida nada de un producto, borrarlo solo
+quita el atajo de captura, nunca afecta valores ya guardados.
+
+```json
+{ "uuid": "c1c2c3c4-...", "name": "Llantas", "slug": "llantas", "updatedAt": "2026-08-04T17:00:00Z" }
+```
+
+#### `PUT /v1/admin/attribute-presets/{uuid}/attributes` — reemplazar los atributos de un preset
+
+```http
+PUT /v1/admin/attribute-presets/c1c2c3c4-.../attributes
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{
+  "items": [
+    { "attributeUuid": "8bdb99f9-...", "isRequired": true, "displayOrder": 1 },
+    { "attributeUuid": "2380964d-...", "isRequired": false, "displayOrder": 2 }
+  ]
+}
+```
+
+**Reemplazo completo, no incremental** (mismo criterio que `PUT .../categories/{uuid}/products`)
+— una lista vacía quita todos. `isRequired` es **solo asesorio para la UI del preset**, nunca se
+valida contra lo que un producto realmente tenga guardado. `404` si algún `attributeUuid` no
+resuelve (nombra cuáles). Respuesta `200` con el conjunto ya aplicado:
+
+```json
+{ "presetUuid": "c1c2c3c4-...", "docs": [ { "attributeUuid": "8bdb99f9-...", "isRequired": true, "displayOrder": 1, "attribute": { "uuid": "8bdb99f9-...", "name": "Color", "slug": "color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null, "updatedAt": "..." } } ] }
+```
+
+`GET /v1/admin/attribute-presets/{uuid}/attributes` devuelve el mismo shape (sin cuerpo de
+request) — pensado para precargar la UI de edición antes de un `PUT`.
+
+#### `POST /v1/admin/attribute-presets/{uuid}/apply` — aplicar preset a un lote de productos
+
+```http
+POST /v1/admin/attribute-presets/c1c2c3c4-.../apply
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
+```
+
+**Esto es un scaffold, no una asignación de valores.** Agrega las claves de atributos del
+preset a cada producto con valor `null` — **solo para las claves que el producto todavía no
+tiene**, un valor ya guardado (de este preset o de cualquier otra vía) nunca se sobreescribe.
+Pensado para "estos productos van a necesitar `color`/`talla`" sin tener que abrir cada uno y
+elegir manualmente qué atributos aplican; llenar los valores reales es un paso aparte
+(`PUT /v1/admin/products/{uuid}/attributes` uno por uno, o la hoja `Atributos` del `.xlsx`
+más abajo). `404` si algún `productUuid` no resuelve, `422` si el preset no tiene ningún
+atributo asignado todavía.
+
+Respuesta `200`:
+```json
+{ "presetUuid": "c1c2c3c4-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"], "scaffoldedCount": 4 }
+```
+`scaffoldedCount` son pares (producto, atributo) realmente agregados — un producto que ya
+tenía alguna de las claves del preset cuenta menos que `productUuids.length × atributos del preset`.
+
+#### `GET /v1/admin/products/{productUuid}/attributes` — ver los atributos guardados de un producto
+
+```http
+GET /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/attributes
+X-Admin-Key: <admin-key>
+```
+
+Respuesta `200`:
+```json
+{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "docs": [ { "attributeUuid": "8bdb99f9-...", "name": "Color", "slug": "color", "dataType": "ENUM", "unit": null, "value": "Rojo" } ] }
+```
+`docs: []` si el producto existe pero no tiene ningún atributo guardado todavía (no es un
+error). `404` si `productUuid` no corresponde a un producto real y no eliminado. Mismo shape
+que expone `GET /v1/products/{uuid}` al storefront (ver `FRONTEND_INTEGRATION.md`), solo que
+sin filtrar por `isActive`.
+
+#### `PUT /v1/admin/products/{productUuid}/attributes` — reemplazar los atributos guardados de un producto
+
+```http
+PUT /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/attributes
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{
+  "values": [
+    { "attributeUuid": "8bdb99f9-...", "value": "Rojo" },
+    { "attributeUuid": "2380964d-...", "value": 12.5 }
+  ]
+}
+```
+
+**Reemplazo completo, no incremental** — el conjunto de atributos guardados del producto queda
+exactamente igual a `values` (una lista vacía borra todos). `value` es un solo campo
+polimórfico en el wire (`string`/`number`/`boolean`/`null`) — se valida server-side contra el
+`dataType`/`allowedValues` del `attributeUuid` referenciado **antes de escribir nada** (si
+cualquier valor falla, no se guarda ninguno):
+
+- `404` si algún `attributeUuid` no resuelve contra el catálogo (nombra cuáles).
+- `422` si algún `value` no coincide con el `dataType` del atributo (p. ej. texto para un
+  `NUMBER`), o si un `ENUM` recibe un valor fuera de `allowedValues` (nombra el atributo y,
+  para `ENUM`, la lista de valores válidos).
+
+Respuesta `200` — mismo shape que `GET` de arriba, con el conjunto ya aplicado.
+
+#### `PATCH /v1/admin/products/{productUuid}/variant-group` — asignar/quitar el grupo de variantes de un producto
+
+```http
+PATCH /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/variant-group
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "variantGroupUuid": "b52bf1c5-873a-45f6-b341-930106d669ed" }
+```
+
+Convenience de un solo producto — para asignar/reasignar varios a la vez de golpe, usa
+`PUT /v1/admin/variant-groups/{uuid}/products` de abajo. `variantGroupUuid: null` quita al
+producto de cualquier grupo. `404` si el producto o el `variantGroupUuid` dado no existen.
+
+Respuesta `200`:
+```json
+{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "variantGroupUuid": "b52bf1c5-873a-45f6-b341-930106d669ed" }
+```
+
+#### `POST /v1/admin/variant-groups` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
+
+Mismo patrón CRUD que atributos/presets:
+
+```http
+POST /v1/admin/variant-groups
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "name": "Portarollo acero inoxidable", "variantAttributeSlug": "color" }
+```
+
+`variantAttributeSlug` es **opcional y texto libre** (no se valida contra `attributes.slug`) —
+solo indica al storefront qué atributo distingue a los miembros del grupo para pintar el
+selector correcto (ver `GET /v1/products/{uuid}` en `FRONTEND_INTEGRATION.md`); se puede dejar
+`null` si el grupo no tiene un atributo distintivo claro. Respuesta `201`:
+
+```json
+{ "uuid": "b52bf1c5-...", "name": "Portarollo acero inoxidable", "variantAttributeSlug": "color", "updatedAt": "2026-08-04T17:00:00Z" }
+```
+
+`GET` acepta `search` (`ILIKE` parcial contra `name`) + paginación. `PATCH` es parcial
+(`exclude_unset`, mismo criterio que el resto). `DELETE` responde `409` si algún producto
+todavía apunta a este grupo (`GET .../products` de abajo para revisarlos) — quítalos primero.
+
+#### `PUT /v1/admin/variant-groups/{uuid}/products` — reemplazar los miembros de un grupo de variantes
+
+```http
+PUT /v1/admin/variant-groups/b52bf1c5-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
+```
+
+**Reemplazo completo, no incremental** — a diferencia de categorías/vehículos (N:M vía tabla
+pivote), `variantGroupUuid` es una columna directa en `Product`, así que "reemplazar" reasigna
+esa columna: limpia el grupo de cualquier producto que ya no esté en la lista y lo asigna a
+los que sí. `productUuids` son `sicarUuid`, igual que en todos los demás endpoints de esta
+API. `404` si el grupo no existe o si algún `productUuid` no resuelve (nombrando cuáles).
+
+Respuesta `200`:
+```json
+{ "variantGroupUuid": "b52bf1c5-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
+```
+
+`GET /v1/admin/variant-groups/{uuid}/products` (paginado, mismo shape que el equivalente de
+categorías/vehículos) lista los miembros actuales — pensado para poblar la UI de edición antes
+de un `PUT`.
+
 ### Importación masiva por Excel
 
 #### `GET /v1/admin/bulk-import/template` — descargar una plantilla de ejemplo
@@ -894,21 +1158,24 @@ X-Admin-Key: <admin-key>
 Respuesta `200`: el archivo `.xlsx` en sí (`Content-Type:
 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, no JSON), con
 `Content-Disposition: attachment; filename=plantilla_importacion_masiva.xlsx` — un botón
-"Descargar plantilla" en el dashboard puede apuntar directo aquí. Trae las mismas dos
+"Descargar plantilla" en el dashboard puede apuntar directo aquí. Trae las mismas cuatro
 hojas/columnas que `POST .../products` espera (nunca puede desalinearse: ambos lados
 comparten las mismas constantes en `bulk_import_service.py`), con encabezados en negritas,
 comentarios de celda explicando las columnas menos obvias (`categorySlug`, `make`/`model`
 insensibles a mayúsculas, `year` como año único no rango, `engine`/`vehicleType`
-opcionales), y una o dos filas de ejemplo con datos **claramente ficticios** (`sku`
+opcionales, formato de `value` según `dataType`, `variantGroupSlug` derivado del `name` del
+grupo), y una o dos filas de ejemplo con datos **claramente ficticios** (`sku`
 `"SKU-EJEMPLO-1"`, marca `"Marca-Ejemplo"`, etc.) — hay que reemplazarlas o borrarlas
 antes de subir datos reales; si se sube tal cual sin editar, cada fila de ejemplo
 simplemente sale como un error por fila (nada coincide con datos ficticios), no un fallo
 del archivo completo.
 
-`POST /v1/admin/bulk-import/products` — asigna categorías y/o compatibilidad de
-vehículos a muchos productos de una sola vez desde un archivo `.xlsx`, en vez de una
-asignación a la vez vía los endpoints de arriba. Pensado para poblar `product_categories`/
-`product_vehicles` sobre el catálogo real (hoy ambas siguen vacías — ver CLAUDE.md).
+`POST /v1/admin/bulk-import/products` — asigna categorías, compatibilidad de vehículos,
+valores de atributos y/o grupos de variantes a muchos productos de una sola vez desde un
+archivo `.xlsx`, en vez de una asignación a la vez vía los endpoints de arriba. Pensado
+para poblar `product_categories`/`product_vehicles`/`Product.attributes`/
+`Product.variantGroupUuid` sobre el catálogo real (hoy todas siguen vacías/sin clasificar
+— ver CLAUDE.md).
 
 ```http
 POST /v1/admin/bulk-import/products
@@ -918,15 +1185,22 @@ Content-Type: multipart/form-data
 file: <archivo .xlsx>
 ```
 
-El archivo puede traer una o ambas de estas hojas (por nombre exacto, sin importar en qué
-orden estén dentro del archivo); si falta una, se trata como "0 filas" para esa hoja, no
-como error:
+El archivo puede traer cualquier subconjunto de estas cuatro hojas (por nombre exacto, sin
+importar en qué orden estén dentro del archivo); si falta alguna, se trata como "0 filas"
+para esa hoja, no como error:
 
 - **`Categorias`** — columnas `sku`, `categorySlug`.
 - **`Vehiculos`** — columnas `sku`, `make`, `model`, `year`, y opcionalmente `vehicleType`
   (`AUTOMOTIVE`/`MOTORCYCLE`) y `engine`.
+- **`Atributos`** — columnas `sku`, `attributeSlug`, `value`. `value` según el `dataType` del
+  atributo: `TEXT`/`ENUM` texto tal cual (`ENUM` debe ser uno de sus `allowedValues`),
+  `NUMBER` numérico, `BOOLEAN` acepta `TRUE`/`FALSE` (también `si`/`no`, `1`/`0`).
+- **`Variantes`** — columnas `sku`, `variantGroupSlug`. `variantGroupSlug` se deriva del
+  `name` del grupo (mismo slugify que categorías/atributos — `VariantGroup` no tiene una
+  columna `slug` propia, ver `GET /v1/admin/variant-groups` arriba para los nombres
+  existentes).
 
-Cada fila de `Vehiculos` es una sola asignación (formato largo). En `Categorias`, la
+Cada fila de `Vehiculos`/`Atributos`/`Variantes` es una sola asignación (formato largo). En `Categorias`, la
 celda `categorySlug` puede traer **un solo slug o varios separados por coma o punto y
 coma** (p. ej. `"herramientas, jardineria"`) para asignar varias categorías al mismo
 producto sin repetir la fila — cada slug de la lista se resuelve por separado, así que
@@ -945,18 +1219,29 @@ se resuelve contra los fitments ya existentes cuyo rango contenga ese año, exac
 igual que `POST /admin/vehicles/assign-by-model` de arriba. Si `engine` se omite, la fila
 aplica a **todas** las variantes de motor de esa marca/modelo/año.
 
-**Aditivo, no reemplazo** — igual que `assign-by-model`: los vínculos ya existentes de un
-producto (de esta u otra carga) nunca se eliminan, solo se agregan los nuevos. Subir el
-mismo archivo dos veces es seguro — la segunda vez `assignedCount` da `0` en ambas hojas
-sin duplicar nada ni fallar (`ON CONFLICT DO NOTHING` sobre las mismas PKs compuestas que
-usa `assign-by-model`).
+**Semántica de re-subida distinta por hoja — no asumas que las cuatro se comportan igual:**
 
-**Éxito parcial, no todo-o-nada** — una fila inválida (SKU inexistente, slug de categoría
-inexistente, ningún vehículo coincide) no bloquea el resto del archivo: se omite esa fila
-(o, en `Categorias` con varios slugs en una celda, solo el slug que falló) y se reporta en
-`errors`, el resto se aplica igual. Solo un problema a nivel de archivo completo (no es un
-`.xlsx` real, faltan ambas hojas, o una hoja presente le falta una columna requerida)
-rechaza la solicitud entera.
+- **`Categorias`/`Vehiculos` son ADITIVAS** (igual que `assign-by-model`): los vínculos ya
+  existentes de un producto (de esta u otra carga) nunca se eliminan, solo se agregan los
+  nuevos. Subir el mismo archivo dos veces es seguro — la segunda vez `assignedCount` da `0`
+  en ambas hojas sin duplicar nada ni fallar (`ON CONFLICT DO NOTHING` sobre las mismas PKs
+  compuestas que usa `assign-by-model`).
+- **`Atributos` hace MERGE** — a diferencia de las dos de arriba, un valor **corregido** en una
+  corrida posterior SÍ se aplica (no se ignora como un vínculo ya existente); solo se
+  preservan las claves que esta hoja no menciona, de una carga anterior o de
+  `PUT /v1/admin/products/{uuid}/attributes`. Subir el mismo archivo dos veces sigue siendo
+  seguro (mismo valor → sin cambio real), pero no es "ignorar si ya existe" como
+  `Categorias`/`Vehiculos`.
+- **`Variantes` REEMPLAZA** — `variantGroupUuid` es un solo valor por producto (columna
+  directa, no un tag vía tabla pivote), así que no existe "aditivo" aquí: la fila más
+  reciente para un `sku` dado gana, y esa carga sobreescribe lo que el producto ya tuviera.
+
+**Éxito parcial, no todo-o-nada** — una fila inválida (SKU inexistente, slug de categoría/
+atributo/grupo inexistente, valor con tipo incorrecto, ningún vehículo coincide) no bloquea
+el resto del archivo: se omite esa fila (o, en `Categorias` con varios slugs en una celda,
+solo el slug que falló) y se reporta en `errors`, el resto se aplica igual. Solo un problema
+a nivel de archivo completo (no es un `.xlsx` real, falta cualquiera de las cuatro hojas, o
+una hoja presente le falta una columna requerida) rechaza la solicitud entera.
 
 Respuesta `200`:
 ```json
@@ -976,23 +1261,42 @@ Respuesta `200`:
     "errors": [
       { "sheet": "Vehiculos", "row": 12, "reasonCode": "VEHICLE_NOT_FOUND", "reason": "No se encontro ningun vehiculo para Honda Civic 1990.", "sku": "PR2057" }
     ]
+  },
+  "attributes": {
+    "found": true,
+    "processedRows": 80,
+    "assignedCount": 78,
+    "errors": [
+      { "sheet": "Atributos", "row": 9, "reasonCode": "VALUE_TYPE_MISMATCH", "reason": "'voltaje' espera un numero (NUMBER).", "sku": "PR2057" }
+    ]
+  },
+  "variants": {
+    "found": false,
+    "processedRows": 0,
+    "assignedCount": 0,
+    "errors": []
   }
 }
 ```
-`found: false` en cualquiera de las dos (en vez de `errors` vacío) significa que esa hoja
-no venía en el archivo, distinto de "venía pero con 0 filas de datos". `assignedCount`
-son vínculos **nuevos** realmente insertados — no cuenta pares que ya existían de una
-carga anterior, así que puede ser menor a `processedRows` incluso sin ningún error (fila
-válida mandada dos veces, o vínculo ya creado por otra vía como `assign-by-model`).
+`found: false` en cualquiera de las cuatro (en vez de `errors: []`) significa que esa hoja no
+venía en el archivo, distinto de "venía pero con 0 filas de datos". `assignedCount` significa
+algo ligeramente distinto por hoja: en `categories`/`vehicles` son vínculos **nuevos**
+realmente insertados (no cuenta pares que ya existían); en `attributes` son pares
+(producto, atributo) **escritos** en total (incluye valores corregidos sobre una clave que ya
+existía, no solo claves nuevas); en `variants` es la cantidad de **productos** cuyo
+`variantGroupUuid` se aplicó. En cualquier caso puede ser menor a `processedRows` incluso sin
+ningún error (fila válida mandada dos veces, incluye la fila de ejemplo de la plantilla, etc.).
 
 Errores de fila (`errors[].reasonCode`): `MISSING_FIELDS` (celda requerida vacía),
 `SKU_NOT_FOUND`, `CATEGORY_SLUG_NOT_FOUND`, `INVALID_YEAR` (`year` no es un entero),
 `VEHICLE_NOT_FOUND` (ningún fitment coincide con marca/modelo/año/motor — también cubre
-un `vehicleType` mal escrito, que da el mismo resultado observable que no coincidir).
+un `vehicleType` mal escrito, que da el mismo resultado observable que no coincidir),
+`ATTRIBUTE_SLUG_NOT_FOUND`, `VALUE_TYPE_MISMATCH` (`value` no coincide con el `dataType` del
+atributo, o no está entre sus `allowedValues` si es `ENUM`), `VARIANT_GROUP_SLUG_NOT_FOUND`.
 
 Errores de archivo completo (rechazan toda la solicitud, no generan `errors` por fila):
-- `400` si el archivo no es un `.xlsx` válido, o pesa más de 15 MB.
-- `400` si no contiene ninguna hoja `Categorias` ni `Vehiculos`.
+- `400` si el archivo no es un `.xlsx` válido, o pesa más de 4 MB.
+- `400` si no contiene ninguna hoja `Categorias`, `Vehiculos`, `Atributos` ni `Variantes`.
 - `400` si alguna hoja excede 20,000 filas de datos.
 - `422` si una hoja presente no tiene todas sus columnas requeridas (nombra la hoja y las
   columnas que faltan).
@@ -1026,3 +1330,11 @@ Errores de archivo completo (rechazan toda la solicitud, no generan `errors` por
   relacionarse con un endpoint de `FRONTEND_INTEGRATION.md` (p. ej. el shape de un pedido), son
   API's distintas con su propio ciclo de cambios; no asumas que un cambio en una se refleja
   automáticamente en la otra.
+- **Atributos/presets/grupos de variantes son PIM propio, independiente de Categorías y
+  Vehículos** — no hay ninguna clasificación intermedia ("tipo de producto") que gatee qué
+  atributos aplican a qué producto; cualquier atributo se puede asignar a cualquier producto
+  directamente. Los tres catálogos (`attributes`, `attribute-presets`, `variant-groups`) están
+  vacíos hoy — clasificar el catálogo real es trabajo de contenido del dashboard, no algo que
+  este backend intente adivinar. `GET /v1/products/{uuid}` en `FRONTEND_INTEGRATION.md` es la
+  única ruta del storefront donde `attributes`/`variantGroup` aparecen — ni `POST /v1/products`
+  ni `POST /v1/search` los exponen.

@@ -635,7 +635,9 @@ Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `s
   "isDeleted": false,
   "lastSyncId": "a1b2c3d4",
   "detailsUpdatedAt": "2026-07-27T10:15:00Z",
-  "deletedAt": null
+  "deletedAt": null,
+  "attributes": [],
+  "variantGroup": null
 }
 ```
 
@@ -651,6 +653,50 @@ responder. `unitShortName` (p. ej. `"PZA"`/`"MTR"`) es el nombre legible de la u
 resuelto a partir de `salesUnitUuid` — puede venir `null` si nunca se resolvió (fallback a
 `"PZA"` en el checkout, ver `POST /v1/orders`); antes solo se resolvía efímeramente en cada
 llamada a `/v1/orders`, ahora queda persistido aquí en el primer refresco de detalle.
+
+**`attributes`/`variantGroup` (nuevo) — PIM propio, no viene de Sicar X.** Administrados desde
+el panel admin (ver `ADMIN_INTEGRATION.md`, sección "Atributos de producto y grupos de
+variantes") — esta es la única ruta del storefront que los expone; `POST /v1/products` y
+`POST /v1/search` no los traen (payload de listado sin cambios, no hace falta actualizar esas
+integraciones). Ambos empiezan vacíos/`null` para cualquier producto todavía sin clasificar, lo
+cual es el caso de la inmensa mayoría del catálogo hoy — nunca un error.
+
+`attributes` es un arreglo (`[]` si el producto no tiene ninguno guardado):
+
+```json
+"attributes": [
+  { "attributeUuid": "8bdb99f9-9c96-4c37-a32c-1f000f38569b", "name": "Color", "slug": "color", "dataType": "ENUM", "unit": null, "value": "Rojo" },
+  { "attributeUuid": "2380964d-7a04-4413-bee7-f5e9c56d7f56", "name": "Voltaje", "slug": "voltaje", "dataType": "NUMBER", "unit": "V", "value": 12.5 }
+]
+```
+
+`dataType` (`"TEXT"`/`"NUMBER"`/`"BOOLEAN"`/`"ENUM"`) determina el tipo de `value` en JSON
+(string/number/boolean respectivamente); `unit` es una unidad de display opcional (p. ej.
+`"V"`, `"mm"`), `null` si no aplica.
+
+`variantGroup` es `null` si el producto no pertenece a ningún grupo, o:
+
+```json
+"variantGroup": {
+  "uuid": "b52bf1c5-873a-45f6-b341-930106d669ed",
+  "name": "Portarollo acero inoxidable",
+  "variantAttributeSlug": "color",
+  "siblings": [
+    { "uuid": "7Bqz2PPydY2HpTaM0sFuUANM8vo", "sku": "PR2058", "name": "PORTAROLLO ROJO", "imageUrl": null, "price": 8.62, "stock": 4.0, "value": "Azul" }
+  ]
+}
+```
+
+Un grupo de variantes vincula SKUs **distintos** en Sicar X (cada uno con su propio `sicarUuid`/
+precio/stock) que son en realidad la misma pieza en presentaciones distintas (p. ej. color).
+`siblings` son los demás productos del mismo grupo (nunca incluye al producto que estás
+viendo) — cada uno con su propio `uuid`, usable directo en un segundo
+`GET /v1/products/{uuid}` si el shopper cambia de variante, y `value` es el valor de
+`variantAttributeSlug` para ESE sibling (p. ej. su color), pensado para pintar un selector de
+variante (swatches, botones de talla) sin una llamada aparte por cada opción.
+`variantAttributeSlug` puede venir `null` si el grupo no tiene un atributo distintivo
+configurado — en ese caso no hay un valor estándar para etiquetar cada opción del selector,
+usa `siblings[].name`/`sku` en su lugar.
 
 ### `GET /v1/taxonomy` — árbol de categorías (para filtros)
 

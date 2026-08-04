@@ -7,8 +7,9 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail
 from app.services.catalog_service import get_local_catalog
+from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/products", tags=["Products Catalog and Details"], dependencies=[Depends(validate_api_key)])
@@ -54,7 +55,43 @@ async def get_product_details(uuid: str, db: DbDep):
             await db.refresh(product)
             logger.info(f"Producto {uuid} actualizado con exito en la base de datos local.")
 
-    return product
+    # PIM propio (no sincronizado desde Sicar X) - lectura pura de Postgres, sin interaccion
+    # con el bloque de lazy-refresh de arriba. attributes: [] / variantGroup: null si el
+    # producto no tiene nada guardado - nunca un error.
+    attribute_docs = await attribute_service.get_attributes_for_product(db, product)
+    variant_group = await attribute_service.get_variant_group_detail(db, product)
+
+    # No se usa ProductDetail.model_validate(product) directo: Product.attributes (JSONB
+    # crudo, {"slug": valor}) y ProductDetail.attributes (List[AttributeValuePublic])
+    # comparten nombre pero tipos incompatibles - Pydantic fallaria validando el dict crudo
+    # antes de poder sobreescribirlo. Se listan los campos propios de Product explicitamente
+    # y los dos nuevos (attributes/variantGroup) se calculan aparte.
+    detail = ProductDetail(
+        id=product.id,
+        sicar_uuid=product.sicar_uuid,
+        sku=product.sku,
+        additional_skus=product.additional_skus,
+        name=product.name,
+        description_details=product.description_details,
+        image_url=product.image_url,
+        tags=product.tags,
+        additional_images=product.additional_images,
+        sales_unit_uuid=product.sales_unit_uuid,
+        unit_short_name=product.unit_short_name,
+        department_uuid=product.department_uuid,
+        category_uuid=product.category_uuid,
+        price=product.price,
+        stock=product.stock,
+        is_bulk=product.is_bulk,
+        is_active=product.is_active,
+        is_deleted=product.is_deleted,
+        last_sync_id=product.last_sync_id,
+        details_updated_at=product.details_updated_at,
+        deleted_at=product.deleted_at,
+        attributes=[AttributeValuePublic.model_validate(d) for d in attribute_docs],
+        variant_group=VariantGroupDetail.model_validate(variant_group) if variant_group else None,
+    )
+    return detail
 
 @router.post("", response_model=LocalCatalogResponse, summary="Obtener catálogo local")
 async def get_catalog(db: DbDep, filter_data: LocalCatalogFilter = Body()):

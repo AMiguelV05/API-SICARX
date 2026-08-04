@@ -1,5 +1,5 @@
 from decimal import Decimal
-from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, Index
+from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from app.core.database import Base
 
@@ -8,6 +8,7 @@ class Product(Base):
     __table_args__ = (
         # jsonb_path_ops: solo se necesita el operador de contencion (@>), da un indice 2-3x mas chico que el default.
         Index("ix_products_tags_gin", "tags", postgresql_using="gin", postgresql_ops={"tags": "jsonb_path_ops"}),
+        Index("ix_products_attributes_gin", "attributes", postgresql_using="gin", postgresql_ops={"attributes": "jsonb_path_ops"}),
         # Declarados aqui (no solo en la migracion que los creo) para que autogenerate no proponga su drop como falso positivo - ver 806cd48b3b2a.
         Index("ix_products_sku_trgm", "sku", postgresql_using="gin", postgresql_ops={"sku": "gin_trgm_ops"}),
         Index("ix_products_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
@@ -30,6 +31,10 @@ class Product(Base):
 
     department_uuid = Column(String, index=True, nullable=True)
     category_uuid = Column(String, index=True, nullable=True)
+
+    # PIM propio (no sincronizado desde Sicar X) - valores EAV libres por producto, clave=Attribute.slug.
+    attributes = Column(JSONB, nullable=True)
+    variant_group_uuid = Column(String, ForeignKey("variant_groups.uuid"), nullable=True, index=True)
 
     price = Column(Numeric(10, 2), nullable=False)
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
