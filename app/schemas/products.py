@@ -44,8 +44,8 @@ class LocalCatalogFilter(CamelModel):
     vehicle_uuid: Optional[str] = Field(default=None, description="UUID de un fitment de vehiculo (GET /v1/vehicles) - filtra a productos compatibles con ese vehiculo.")
     tag: Optional[str] = None
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
-    sort_by: Optional[Literal["price_asc", "price_desc", "name_asc"]] = Field(
-        default=None, description="Orden de los resultados: price_asc, price_desc o name_asc"
+    sort_by: Optional[Literal["price_asc", "price_desc", "name_asc", "relevance"]] = Field(
+        default=None, description="Orden de los resultados: price_asc, price_desc, name_asc o relevance (mas vendidos primero)"
     )
 
 class ProductBasic(CamelModel):
@@ -56,9 +56,13 @@ class ProductBasic(CamelModel):
     image_url: Optional[str]
     price: float
     stock: float
+    sales_count: float
 
 class LocalCatalogResponse(CamelModel):
     total: int
+    docs: List[ProductBasic]
+
+class BestSellersResponse(CamelModel):
     docs: List[ProductBasic]
 
 class ProductDetail(CamelModel):

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import Field
 from app.schemas.base import CamelModel
 from app.schemas.products import ProductBasic
@@ -12,6 +12,9 @@ class SearchFilter(CamelModel):
     taxonomy_uuid: Optional[str] = Field(default=None, description="UUID de un nodo del arbol de categorias propio (PIM, GET /taxonomy) - distinto de category_uuid (clasificacion cruda de Sicar X). Incluye productos etiquetados en descendientes del nodo.")
     vehicle_uuid: Optional[str] = Field(default=None, description="UUID de un fitment de vehiculo (GET /v1/vehicles) - filtra a productos compatibles con ese vehiculo.")
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
+    sort_by: Optional[Literal["relevance", "price_asc", "price_desc", "name_asc"]] = Field(
+        default="relevance", description="Orden de los resultados: relevance (default, coincidencia de texto + popularidad), price_asc, price_desc o name_asc"
+    )
 
 class SearchResponse(CamelModel):
     total: int

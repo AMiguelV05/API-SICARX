@@ -1,5 +1,6 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Body, status
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, status
 from sqlalchemy.future import select
 from datetime import datetime, timedelta, timezone
 from app.core.database import DbDep
@@ -7,12 +8,37 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail
-from app.services.catalog_service import get_local_catalog
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse
+from app.services.catalog_service import get_local_catalog, get_best_selling_products
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/products", tags=["Products Catalog and Details"], dependencies=[Depends(validate_api_key)])
+
+# Declarado antes de GET /{uuid} - de lo contrario "best-sellers" se interpretaria como un uuid.
+@router.get("/best-sellers", response_model=BestSellersResponse, summary="Productos mas vendidos")
+async def get_best_sellers(
+    db: DbDep,
+    limit: int = Query(default=10, ge=1, le=50, description="Cantidad de productos a devolver (1-50)"),
+    department_uuid: Optional[str] = Query(default=None, alias="departmentUuid"),
+    category_uuid: Optional[str] = Query(default=None, alias="categoryUuid"),
+    taxonomy_uuid: Optional[str] = Query(default=None, alias="taxonomyUuid"),
+    vehicle_uuid: Optional[str] = Query(default=None, alias="vehicleUuid"),
+    in_stock: bool = Query(default=False, alias="inStock"),
+):
+    """
+    Productos mas vendidos (Product.sales_count > 0), pensado para una seccion de la
+    pagina principal. Sin paginacion - es un feed acotado de top-N, no un browse.
+    """
+    docs = await get_best_selling_products(
+        db, limit,
+        department_uuid=department_uuid,
+        category_uuid=category_uuid,
+        taxonomy_uuid=taxonomy_uuid,
+        vehicle_uuid=vehicle_uuid,
+        in_stock=in_stock,
+    )
+    return BestSellersResponse(docs=docs)
 
 @router.get("/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
 async def get_product_details(uuid: str, db: DbDep):

@@ -10,7 +10,7 @@ from app.models.order import Order, SicarSyncOutbox
 from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_service import _to_decimal
-from app.services.product_stock_service import apply_stock_deltas
+from app.services.product_stock_service import apply_stock_deltas, apply_sales_count_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +138,13 @@ async def prepare_local_cancellation(
             detail="Esta orden ya no está en el estado esperado para esta operación.",
         )
 
+    # Solo una orden que llego a estar PAID incremento sales_count (ver finalize_order_payment) - hay que revertirlo aqui; una que se cancela desde TO_PAY nunca lo incremento.
+    was_paid = order.status == "PAID"
+
     deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
     await apply_stock_deltas(db, deltas)
+    if was_paid:
+        await apply_sales_count_deltas(db, [(product_uuid, -qty) for product_uuid, qty in deltas])
 
     order.status = "CANCELLED"
     if order.accepted_at is not None:
@@ -192,6 +197,10 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
         if order.status != "PAID":
             became_paid = True
         order.status = "PAID"
+        if became_paid:
+            # Registro de "mas vendidos" (Product.sales_count) - solo en la transicion real, nunca en un reintento del webhook para una orden ya PAID.
+            deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
+            await apply_sales_count_deltas(db, deltas)
     elif mp_status in MP_PENDING_STATUSES:
         # Solo aplica si sigue TO_PAY - una notificacion pending/in_process tardia de OTRO intento de pago no debe regresar una orden ya resuelta a TO_PAY.
         if order.status == "TO_PAY":

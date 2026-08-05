@@ -1,5 +1,5 @@
 from decimal import Decimal
-from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, text
 from sqlalchemy.dialects.postgresql import JSONB
 from app.core.database import Base
 
@@ -12,6 +12,8 @@ class Product(Base):
         # Declarados aqui (no solo en la migracion que los creo) para que autogenerate no proponga su drop como falso positivo - ver 806cd48b3b2a.
         Index("ix_products_sku_trgm", "sku", postgresql_using="gin", postgresql_ops={"sku": "gin_trgm_ops"}),
         Index("ix_products_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
+        # Parcial: solo cubre lo que consulta GET /products/best-sellers y sort_by=relevance (mismo patron que ix_client_addresses_one_default en client.py).
+        Index("ix_products_sales_count", "sales_count", postgresql_where=text("is_deleted = false AND is_active = true")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -40,6 +42,13 @@ class Product(Base):
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
     stock = Column(Numeric(12, 3), default=Decimal("0"))
     is_bulk = Column(Boolean, default=False)
+
+    # Registro local de unidades vendidas (nunca lo maneja Sicar X) - se incrementa/decrementa
+    # en la transicion TO_PAY->PAID y en su reverso via apply_sales_count_deltas (ver
+    # order_history_service.py). server_default requerido: el upsert de sync_task.py omite
+    # esta columna a proposito (ver comentario junto a update_dict ahi) para que el sync
+    # periodico no la resetee.
+    sales_count = Column(Numeric(12, 3), nullable=False, default=Decimal("0"), server_default="0")
 
     is_active = Column(Boolean, default=True)
     is_deleted = Column(Boolean, default=False)  # Para marcar productos que ya no existen en Sicar

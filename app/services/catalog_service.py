@@ -50,6 +50,9 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         stmt = stmt.order_by(Product.price.desc())
     elif sort_by == "name_asc":
         stmt = stmt.order_by(Product.name.asc())
+    elif sort_by == "relevance":
+        # Sin texto de busqueda aqui, "relevance" = popularidad (sales_count) - el proxy estandar de e-commerce para el orden por defecto de una categoria.
+        stmt = stmt.order_by(Product.sales_count.desc(), Product.name.asc())
 
     stmt = stmt.limit(filters.get("limit", 60)).offset(filters.get("offset", 0))
 
@@ -63,7 +66,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance"):
     """Substring search (ILIKE) en sku/name via GIN pg_trgm; prefix matches ordenan primero. `q` se escapa para que %/_ no se interpreten como comodines ILIKE."""
     escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped_q}%"
@@ -99,8 +102,18 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)
 
-    priority = case((starts_with, 0), else_=1)
-    stmt = stmt.order_by(priority, Product.name).limit(limit).offset(offset)
+    if sort_by == "price_asc":
+        stmt = stmt.order_by(Product.price.asc())
+    elif sort_by == "price_desc":
+        stmt = stmt.order_by(Product.price.desc())
+    elif sort_by == "name_asc":
+        stmt = stmt.order_by(Product.name.asc())
+    else:
+        # "relevance" (default): coincidencia de texto primero (prefix antes que substring), luego popularidad, luego nombre para desempate estable.
+        priority = case((starts_with, 0), else_=1)
+        stmt = stmt.order_by(priority, Product.sales_count.desc(), Product.name.asc())
+
+    stmt = stmt.limit(limit).offset(offset)
 
     result = await db.execute(stmt)
     products = result.scalars().all()
@@ -111,3 +124,36 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         "total": total_items,
         "docs": products
     }
+
+async def get_best_selling_products(db: AsyncSession, limit: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False):
+    """Productos mas vendidos (Product.sales_count > 0), para la seccion de la pagina principal - ver order_history_service.py para como se mantiene sales_count al dia."""
+    stmt = select(Product).where(
+        Product.is_deleted == False,
+        Product.is_active == True,
+        Product.sales_count > 0,
+    )
+
+    if department_uuid:
+        stmt = stmt.where(Product.department_uuid == department_uuid)
+
+    if category_uuid:
+        stmt = stmt.where(Product.category_uuid == category_uuid)
+
+    if taxonomy_uuid:
+        descendant_uuids = await get_descendant_uuids(db, taxonomy_uuid)
+        stmt = stmt.where(Product.id.in_(
+            select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
+
+    if vehicle_uuid:
+        stmt = stmt.where(Product.id.in_(
+            select(product_vehicles.c.product_id).where(product_vehicles.c.vehicle_uuid == vehicle_uuid)
+        ))
+
+    if in_stock:
+        stmt = stmt.where(Product.stock > 0)
+
+    stmt = stmt.order_by(Product.sales_count.desc()).limit(limit)
+
+    result = await db.execute(stmt)
+    return result.scalars().all()
