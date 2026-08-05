@@ -9,6 +9,9 @@ from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
 from app.core.database import AsyncSessionLocal
 from app.models.product import Product, SyncStatus
+# Necesario para que SQLAlchemy resuelva el ForeignKey de Product.variant_group_uuid -
+# sin este import falla con "could not find table 'variant_groups'".
+from app.models.attribute import VariantGroup  # noqa: F401
 from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
