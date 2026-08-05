@@ -1520,7 +1520,104 @@ Errores de archivo completo (rechazan toda la solicitud, no generan `errors` por
 - `422` si una hoja presente no tiene todas sus columnas requeridas (nombra la hoja y las
   columnas que faltan).
 
-## Notas y advertencias
+### Dashboard de ventas
+
+Tres endpoints de solo lectura para alimentar un dashboard de ventas: KPIs/serie diaria,
+productos más vendidos y ventas por categoría — todos filtrables por rango de fechas.
+Ninguno persiste nada; todos agregan en vivo sobre `orders` (y, para categorías, también
+`products`/`product_categories`/`categories`) en cada llamada.
+
+**Rango de fechas, común a los tres**: `startDate`/`endDate` (`YYYY-MM-DD`), ambos
+opcionales. Si se omiten, por defecto cubre los **últimos 30 días** (`endDate` = hoy UTC,
+`startDate` = `endDate - 29 días`). El rango es inclusivo de ambos extremos (incluye todo
+`endDate` completo, no solo hasta medianoche). Los tres solo consideran pedidos
+`status: "PAID"` y no eliminados (`deletedAt: null`) — pedidos `TO_PAY`/`CANCELLED` nunca
+cuentan como venta.
+
+#### `GET /v1/admin/dashboard/summary` — KPIs y serie diaria
+
+```http
+GET /v1/admin/dashboard/summary?startDate=2026-07-01&endDate=2026-08-05
+X-Admin-Key: <admin-key>
+```
+
+Respuesta `200`:
+```json
+{
+  "startDate": "2026-07-01",
+  "endDate": "2026-08-05",
+  "totalRevenue": 458320.50,
+  "orderCount": 612,
+  "averageOrderValue": 748.89,
+  "totalUnitsSold": 2140,
+  "daily": [
+    { "date": "2026-07-01", "revenue": 12500.00, "orderCount": 18, "unitsSold": 64 }
+  ]
+}
+```
+
+`averageOrderValue` es `0` (no un error) si `orderCount` es `0` en el rango pedido.
+`daily` viene ordenado por fecha ascendente y solo incluye días con al menos un pedido
+`PAID` — un día sin ventas simplemente no aparece en el arreglo (el dashboard debe rellenar
+huecos con `0` si necesita un eje continuo para graficar).
+
+#### `GET /v1/admin/dashboard/top-products` — productos más vendidos
+
+```http
+GET /v1/admin/dashboard/top-products?startDate=2026-07-01&endDate=2026-08-05&sortBy=revenue&limit=20&offset=0
+X-Admin-Key: <admin-key>
+```
+
+- `sortBy` — `"revenue"` (default) o `"quantity"`.
+- `limit` (1-100, default 20), `offset` (≥0, default 0).
+
+Respuesta `200`:
+```json
+{
+  "total": 314,
+  "docs": [
+    { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "imageUrl": "https://.../taladro.jpg", "unitsSold": 42, "revenue": 37758.00 }
+  ]
+}
+```
+
+`total` es la cantidad de productos **distintos** vendidos en el rango (para paginar), no
+la cantidad de unidades. `name`/`sku`/`imageUrl` vienen de la foto fija guardada en cada
+pedido al momento de venderse (`Order.items`), **no** del catálogo actual — un producto
+renombrado, re-precificado o marcado como eliminado después de venderse sigue apareciendo
+aquí con los datos vigentes al momento de cada venta.
+
+#### `GET /v1/admin/dashboard/top-categories` — ventas por categoría
+
+```http
+GET /v1/admin/dashboard/top-categories?startDate=2026-07-01&endDate=2026-08-05&sortBy=revenue&limit=20&offset=0
+X-Admin-Key: <admin-key>
+```
+
+Mismos parámetros que `top-products` (`sortBy`/`limit`/`offset`). Agrupa por el árbol de
+categorías propio (`GET/POST/PATCH /v1/admin/categories`), no por el `departmentUuid`/
+`categoryUuid` sincronizado de Sicar X.
+
+Respuesta `200`:
+```json
+{
+  "total": 18,
+  "docs": [
+    { "categoryUuid": "3f9a1c2e-...", "categoryName": "Herramientas Eléctricas", "unitsSold": 310, "revenue": 89250.00 }
+  ]
+}
+```
+
+Dos comportamientos a tener en cuenta al construir la UI:
+- **Un producto asignado a varias categorías suma su revenue/unidades completas a cada
+  una** — esto es un desglose por faceta (como los filtros del storefront), no una
+  partición del total. Sumar `revenue` de todas las filas de `docs` **no** debe usarse
+  como "revenue total" (para eso está `GET .../summary`).
+- **Productos sin ninguna categoría asignada quedan fuera de este reporte por completo**
+  — no hay una fila "Sin categoría". Revenue de esos productos solo aparece en
+  `/top-products` y `/summary`.
+
+
 
 - **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo
   sobreescribe. Todas las mutaciones (`/accept`, `/advance-status`, `/shipping/generate`) aplican

@@ -522,7 +522,8 @@ Respuesta `200`:
       "descriptionDetails": null,
       "imageUrl": null,
       "price": 8.62069,
-      "stock": 2.0
+      "stock": 2.0,
+      "salesCount": 0.0
     }
   ]
 }
@@ -542,10 +543,20 @@ entre sí y con el resto de los filtros.
 `price` siempre viene con 2 decimales exactos (es un `Numeric` en la base de datos, no un
 `float`) — no asumas más precisión que esa al mostrarlo o redondearlo del lado del frontend.
 
-`sortBy` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`.
-Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden garantizado entre
-llamadas — usa `sortBy` siempre que el orden le importe a la UI (p. ej. un selector de
-"Ordenar por: Precio menor a mayor / mayor a menor / Nombre A-Z").
+**`salesCount` (nuevo, campo aditivo)** — unidades vendidas en pedidos que llegaron a `PAID`
+(ver `GET /v1/products/best-sellers` más abajo). Es un `Numeric`, no un entero — algunos
+productos se venden por peso/medida, así que puede traer decimales (p. ej. `2.5`). Empieza en
+`0.0` para todo el catálogo hasta que existan pedidos pagados reales; no lo trates como
+disponible desde el día uno de este cambio.
+
+`sortBy` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`,
+`"relevance"` (nuevo). Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden
+garantizado entre llamadas — usa `sortBy` siempre que el orden le importe a la UI (p. ej. un
+selector de "Ordenar por: Precio menor a mayor / mayor a menor / Nombre A-Z / Más vendidos").
+`"relevance"` ordena por `salesCount` descendente (más vendidos primero, empate alfabético por
+nombre) — como aquí no hay texto de búsqueda, es el proxy estándar de "orden por defecto" que
+usan la mayoría de tiendas en línea; útil como el orden por defecto de una categoría o de una
+vista "Destacados".
 
 `limit` debe estar entre 1 y 200 (por defecto 60 si se omite) y `offset` debe ser ≥ 0 — valores
 fuera de esos rangos responden `422` en vez de aceptarse silenciosamente.
@@ -565,7 +576,8 @@ Content-Type: application/json
   "categoryUuid": null,
   "taxonomyUuid": null,
   "vehicleUuid": null,
-  "inStock": false
+  "inStock": false,
+  "sortBy": "relevance"
 }
 ```
 
@@ -576,9 +588,17 @@ uno) — úsalos para combinar el cuadro de búsqueda con los filtros de departa
 vehículo ya existentes. `inStock: true` restringe el resultado a productos con
 `stock > 0` (por defecto `false`, no filtra por stock).
 
-Los resultados donde `sku` o `name` **empiezan con** el texto buscado aparecen primero; el resto
-(coincidencias en medio del texto) aparece después, ya paginado en ese orden — no es necesario
-ordenar nada del lado del frontend. Respuesta `200` con la misma forma que `/v1/products`:
+**`sortBy` (nuevo campo, opcional, default `"relevance"`)** — mismos cuatro valores que
+`/v1/products` (`"relevance"`, `"price_asc"`, `"price_desc"`, `"name_asc"`), `422` si se manda
+otro valor. Puedes omitirlo por completo y obtienes el comportamiento default de siempre. Con
+`"relevance"` (el default): los resultados donde `sku` o `name` **empiezan con** el texto
+buscado aparecen primero; dentro de ese mismo grupo (empieza-con vs. contiene-en-medio),
+ordenan por `salesCount` descendente (más vendido primero) y por último por nombre — ya
+paginado en ese orden, no es necesario ordenar nada del lado del frontend. Si tu UI ya tenía un
+selector "Ordenar por" en resultados de búsqueda, ahora puedes mandar `price_asc`/`price_desc`/
+`name_asc` igual que en `/v1/products` en vez de solo confiar en el orden default.
+
+Respuesta `200` con la misma forma que `/v1/products`:
 
 ```json
 {
@@ -591,7 +611,8 @@ ordenar nada del lado del frontend. Respuesta `200` con la misma forma que `/v1/
       "descriptionDetails": null,
       "imageUrl": null,
       "price": 8.62069,
-      "stock": 2.0
+      "stock": 2.0,
+      "salesCount": 0.0
     }
   ]
 }
@@ -697,6 +718,54 @@ variante (swatches, botones de talla) sin una llamada aparte por cada opción.
 `variantAttributeSlug` puede venir `null` si el grupo no tiene un atributo distintivo
 configurado — en ese caso no hay un valor estándar para etiquetar cada opción del selector,
 usa `siblings[].name`/`sku` en su lugar.
+
+### `GET /v1/products/best-sellers` — más vendidos (nuevo, para la página principal)
+
+```http
+GET /v1/products/best-sellers?limit=10
+x-api-key: <api-key>
+```
+
+Pensado específicamente para una sección "Los más vendidos" en la página principal — a
+diferencia de `POST /v1/products`/`POST /v1/search`, es `GET` con query params (no un body) y
+**no pagina**: es un feed acotado de top-N, no un listado para hacer scroll infinito. Todos los
+parámetros son opcionales:
+
+| Query param | Tipo | Default | Descripción |
+|---|---|---|---|
+| `limit` | int (1-50) | `10` | Cuántos productos devolver |
+| `departmentUuid` | string | — | Igual que en `/v1/products` |
+| `categoryUuid` | string | — | Igual que en `/v1/products` |
+| `taxonomyUuid` | string | — | Igual que en `/v1/products` (nodo del árbol de `GET /v1/taxonomy`) |
+| `vehicleUuid` | string | — | Igual que en `/v1/products` (fitment resuelto de `GET /v1/vehicles`) |
+| `inStock` | bool | `false` | Si `true`, solo productos con `stock > 0` |
+
+Respuesta `200`:
+```json
+{
+  "docs": [
+    {
+      "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sku": "PR2057",
+      "name": "PORTAROLLO",
+      "descriptionDetails": null,
+      "imageUrl": null,
+      "price": 8.62069,
+      "stock": 2.0,
+      "salesCount": 14.0
+    }
+  ]
+}
+```
+
+Sin `total` (a propósito — no es un listado paginado, así que un conteo total no aplica). Solo
+incluye productos con `salesCount > 0`, ya ordenados de mayor a menor — **puede venir `docs: []`**
+si todavía no hay ningún pedido pagado en el sistema (o ninguno que combine con los filtros
+usados), no es un error; en ese caso, la UI debería simplemente ocultar la sección en vez de
+mostrarla vacía. `salesCount` se cuenta desde pedidos que llegaron a `status: "PAID"` (ver
+`POST /v1/orders` más abajo) y se descuenta de vuelta si ese mismo pedido se cancela después de
+haber sido pagado — así que este feed puede cambiar de un día a otro, no lo caches de forma
+agresiva.
 
 ### `GET /v1/taxonomy` — árbol de categorías (para filtros)
 
@@ -1607,6 +1676,15 @@ async function payOrder(orderId: string, clientToken: string, formData: Record<s
   anónimo (cookie `httpOnly` `charly_cart_token`, cross-site entre `ferreteriacharly.com` y
   `api-production-cf7a.up.railway.app`) nunca se guarda ni se reenvía, y cada visita se ve como un
   carrito nuevo vacío. No aplica a `/v1/auth/*` ni al resto de la API — es específico de `/v1/cart*`.
+- **Nuevo: registro de "más vendidos" y orden por relevancia.** `GET /v1/products/best-sellers`
+  es el nuevo endpoint para una sección "Los más vendidos" en la página principal (ver
+  referencia arriba). `POST /v1/products` gana un cuarto valor de `sortBy`, `"relevance"`
+  (ordena por popularidad). `POST /v1/search` gana `sortBy` como campo nuevo (antes no existía
+  ahí), con default `"relevance"` que preserva el orden de siempre pero ahora desempata por
+  popularidad en vez de solo por nombre — no requiere ningún cambio si tu frontend no manda
+  `sortBy` hoy. Todo esto se apoya en un campo nuevo y aditivo, `salesCount`, en cada producto
+  de `POST /v1/products`/`POST /v1/search`/`GET /v1/products/best-sellers` (no en
+  `GET /v1/products/{uuid}`).
 - **Ya no existe `X-Cart-Token` ni almacenamiento manual del carrito anónimo** — si el frontend
   todavía tiene un `lib/cartToken.ts` o similar guardando ese header en `localStorage`, puede
   eliminarse: la identidad anónima ahora es 100% automática vía cookie (ver el punto 3 de "Dos
