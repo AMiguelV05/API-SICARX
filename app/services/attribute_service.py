@@ -49,9 +49,13 @@ def _validate_enum_values(data_type: str, allowed_values: list[str] | None) -> N
 
 
 async def _attribute_in_use(db: AsyncSession, slug: str) -> bool:
-    """True si algun producto tiene esta clave en su Product.attributes (JSONB) -
-    condiciona si renombrar/cambiar el tipo del atributo es seguro."""
-    return bool(await db.scalar(select(Product.id).where(Product.attributes.has_key(slug)).limit(1)))
+    """True si algun producto ACTIVO (is_deleted=False) tiene esta clave en su
+    Product.attributes (JSONB) - condiciona si renombrar/cambiar el tipo del atributo es
+    seguro, y si se puede borrar. Filtra is_deleted igual que get_attributes_for_product/
+    list_variant_group_products, para que un producto discontinuado por el sync (ya
+    invisible en cualquier listado admin) no bloquee para siempre un renombre/borrado de
+    algo que ya no se ve en ningun lado."""
+    return bool(await db.scalar(select(Product.id).where(Product.attributes.has_key(slug), Product.is_deleted == False).limit(1)))
 
 
 async def create_attribute(db: AsyncSession, name: str, data_type: str, allowed_values: list[str] | None, unit: str | None) -> Attribute:
@@ -441,9 +445,20 @@ async def delete_variant_group(db: AsyncSession, variant_group_uuid: str) -> Non
     if group is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grupo de variantes no encontrado.")
 
-    has_products = await db.scalar(select(Product.id).where(Product.variant_group_uuid == variant_group_uuid).limit(1))
-    if has_products:
+    # Solo cuenta productos ACTIVOS como "todavia asignado" - filtra is_deleted igual que
+    # list_variant_group_products/get_variant_group_detail, para que un producto
+    # discontinuado por el sync (ya invisible en GET .../products) no bloquee para siempre
+    # el borrado de un grupo que el admin ve vacio.
+    has_active_products = await db.scalar(
+        select(Product.id).where(Product.variant_group_uuid == variant_group_uuid, Product.is_deleted == False).limit(1)
+    )
+    if has_active_products:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este grupo tiene productos asignados; quitalos primero.")
+
+    # Lo unico que puede seguir apuntando aqui a esta altura es un producto soft-deleted -
+    # se desvincula antes de borrar, si no la FK de products.variant_group_uuid rechazaria
+    # el DELETE con un IntegrityError real en vez del 409 controlado de arriba.
+    await db.execute(update(Product).where(Product.variant_group_uuid == variant_group_uuid).values(variant_group_uuid=None))
 
     await db.delete(group)
     await db.commit()
