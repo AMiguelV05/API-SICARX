@@ -157,11 +157,11 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             if product_values:
                 stmt = insert(Product)
 
-                # sales_count es un contador local (registro de ventas) que Sicar X no conoce - excluido
-                # para que el upsert no lo resetee a 0 en cada pasada de sync.
-                update_dict = {c.name: c for c in stmt.excluded if not c.primary_key and c.name != "sales_count"}
+                # Whitelist de campos que vienen de Sicar X y que se pueden actualizar en un conflicto.
+                sicar_fields = product_values[0].keys() - {"sicar_uuid"}
+                update_dict = {field: getattr(stmt.excluded, field) for field in sicar_fields}
                 stmt = stmt.on_conflict_do_update(
-                    index_elements=['sicar_uuid'], 
+                    index_elements=['sicar_uuid'],
                     set_=update_dict
                 )
                 
