@@ -969,6 +969,34 @@ X-Admin-Key: <admin-key>
 `204` sin cuerpo si tiene éxito. Borrado real. `409` si algún producto todavía tiene esta clave
 en `attributes`, o si el atributo sigue asignado a algún preset — quítalo de ambos primero.
 
+#### `GET /v1/admin/attributes/{uuid}/products` — listar productos que tienen este atributo guardado
+
+```http
+GET /v1/admin/attributes/8bdb99f9-.../products?limit=60&offset=0
+X-Admin-Key: <admin-key>
+```
+
+Dirección inversa de `GET /v1/admin/products/{uuid}/attributes` — dado un atributo, qué
+productos tienen esa clave guardada en `attributes` (contención JSONB, no una tabla pivote
+como categorías/vehículos, pero mismo propósito/shape que
+`GET /v1/admin/categories/{uuid}/products`/`GET /v1/admin/vehicles/{uuid}/products`).
+Paginado igual que el resto (`limit` 1-200, default 60; `offset`). **Nota**: a diferencia de
+esas dos rutas, no existe (ni se planea) un `GET /v1/admin/attributes/by-product/{productUuid}`
+— esa dirección ya la cubre `GET /v1/admin/products/{uuid}/attributes` de arriba, que además
+trae el `value` guardado de cada atributo, no solo cuáles están asignados.
+
+Respuesta `200` — mismo shape que el equivalente de categorías/vehículos:
+```json
+{
+  "total": 2,
+  "docs": [
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "descriptionDetails": null, "imageUrl": null, "price": 8.62, "stock": 2.0 }
+  ]
+}
+```
+
+`404` si el atributo no existe.
+
 #### `POST /v1/admin/attribute-presets` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
 
 Mismo patrón CRUD que atributos (`{ "name": "Llantas" }` al crear, `slug` derivado

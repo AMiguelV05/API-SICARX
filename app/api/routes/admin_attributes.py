@@ -9,7 +9,9 @@ from app.schemas.attribute import (
     AttributeCreateRequest,
     AttributeUpdateRequest,
     AttributeListResponse,
+    AttributeProductsResponse,
 )
+from app.schemas.products import ProductBasic
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
@@ -51,3 +53,18 @@ async def admin_delete_attribute(attribute_uuid: str, db: DbDep):
     """Borrado real. `409` si algun producto tiene esta clave en `attributes` o si esta
     asignado a algun preset - quitarlo de ambos primero."""
     await attribute_service.delete_attribute(db, attribute_uuid)
+
+
+@router.get("/{attribute_uuid}/products", response_model=AttributeProductsResponse, summary="Listar productos que tienen este atributo guardado")
+async def admin_list_attribute_products(
+    attribute_uuid: str,
+    db: DbDep,
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Direccion inversa de `GET /admin/products/{uuid}/attributes`: dado un atributo, que
+    productos tienen esta clave guardada en `attributes` (JSONB) - mismo proposito que
+    `GET /admin/categories/{uuid}/products`/`GET /admin/vehicles/{uuid}/products`, via
+    containment JSONB en vez de una tabla pivote. `404` si el atributo no existe."""
+    total, products = await attribute_service.list_products_with_attribute(db, attribute_uuid, limit, offset)
+    return AttributeProductsResponse(total=total, docs=[ProductBasic.model_validate(p) for p in products])

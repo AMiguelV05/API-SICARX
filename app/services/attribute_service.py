@@ -150,6 +150,22 @@ async def list_attributes(db: AsyncSession, *, search: str | None, data_type: st
     return total or 0, list(result.scalars().all())
 
 
+async def list_products_with_attribute(db: AsyncSession, attribute_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:
+    """Direccion inversa de get_product_attributes: dado un atributo, que productos tienen
+    esta clave guardada en su `attributes` (JSONB) - mismo proposito que
+    list_category_products/list_vehicle_products, pero via containment JSONB (`?`) en vez
+    de una tabla pivote. Filtra is_deleted igual que esos dos (mismo criterio de
+    _attribute_in_use)."""
+    attribute = await db.get(Attribute, attribute_uuid)
+    if attribute is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Atributo no encontrado.")
+
+    base = select(Product).where(Product.attributes.has_key(attribute.slug), Product.is_deleted == False)
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+    result = await db.execute(base.order_by(Product.name).limit(limit).offset(offset))
+    return total or 0, list(result.scalars().all())
+
+
 # --- Attribute presets: bundles de conveniencia, nunca obligatorios ni validados contra un producto -----
 
 async def create_preset(db: AsyncSession, name: str) -> AttributePreset:

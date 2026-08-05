@@ -51,6 +51,11 @@ class AttributeListResponse(CamelModel):
     docs: List[AttributePublic]
 
 
+class AttributeProductsResponse(CamelModel):
+    total: int
+    docs: List[ProductBasic]
+
+
 # --- Attribute presets: bundles de conveniencia, nunca obligatorios ni validados contra un producto -----
 
 class AttributePresetPublic(CamelModel):
