@@ -9,6 +9,8 @@ from app.schemas.taxonomy import (
     CategoryUpdateRequest,
     ReplaceCategoryProductsRequest,
     ReplaceCategoryProductsResponse,
+    PatchCategoryProductsRequest,
+    PatchCategoryProductsResponse,
     CategoryProductsResponse,
 )
 from app.schemas.products import ProductBasic
@@ -58,9 +60,28 @@ async def admin_delete_category(category_uuid: str, db: DbDep):
 async def admin_replace_category_products(category_uuid: str, db: DbDep, data: ReplaceCategoryProductsRequest = Body()):
     """Reemplaza el conjunto COMPLETO de productos asignados directamente a la categoria
     (`productUuids`, resueltos contra `Product.sicar_uuid`) - unica forma de poblar
-    `product_categories`. Reemplazo, no incremental. `404` si algun uuid no resuelve."""
+    `product_categories`. Reemplazo, no incremental - para categorias con mas productos
+    asignados que el limite de `GET .../products` (200), preferir el `PATCH` de abajo para
+    no arriesgar sobreescribir asignaciones que el picker del dashboard nunca cargo.
+    `404` si algun uuid no resuelve."""
     product_uuids = await taxonomy_service.replace_category_products(db, category_uuid, data.product_uuids)
     return ReplaceCategoryProductsResponse(category_uuid=category_uuid, product_uuids=product_uuids)
+
+
+@router.patch("/{category_uuid}/products", response_model=PatchCategoryProductsResponse, summary="Agregar/quitar productos de una categoria de forma incremental")
+async def admin_patch_category_products(category_uuid: str, db: DbDep, data: PatchCategoryProductsRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba): agrega/quita sin necesitar conocer
+    el conjunto completo asignado - seguro de usar aunque la categoria tenga mas productos
+    que el limite de `GET .../products`. `add` ya asignados se ignoran (idempotente);
+    `remove` no asignados o inexistentes tambien se ignoran (no-op tolerante). `422` si un
+    mismo `productUuid` aparece en `add` y `remove` a la vez. `404` si algun uuid de `add`
+    no resuelve a un producto real y no eliminado."""
+    added, removed, added_count, removed_count = await taxonomy_service.patch_category_products(
+        db, category_uuid, data.add, data.remove
+    )
+    return PatchCategoryProductsResponse(
+        category_uuid=category_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
+    )
 
 
 @router.get("/{category_uuid}/products", response_model=CategoryProductsResponse, summary="Listar productos asignados directamente a una categoria (sin incluir descendientes)")

@@ -605,6 +605,47 @@ Respuesta `200`:
   un producto real y no eliminado — el detalle nombra exactamente cuáles no se
   encontraron, para que el dashboard pueda señalarlos sin adivinar.
 
+**Cuidado con categorías con más de 200 productos asignados**: `GET .../products` (abajo)
+está limitado a `limit ≤ 200`. Si el dashboard carga una sola página para poblar el picker
+y la categoría tiene más productos asignados que esa página, un `PUT` guardado desde esa
+UI **sobreescribe silenciosamente** el conjunto completo con solo lo que se cargó — los
+productos no cargados se pierden sin ningún error. Para ese caso, usar el `PATCH` de abajo
+en vez de este `PUT`.
+
+#### `PATCH /v1/admin/categories/{uuid}/products` — agregar/quitar productos de forma incremental
+
+```http
+PATCH /v1/admin/categories/3f9a1c2e-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
+```
+
+**Incremental** — a diferencia del `PUT` de arriba, no necesita conocer el conjunto
+completo asignado: solo agrega los `productUuids` de `add` y quita los de `remove`,
+dejando todo lo demás intacto. Seguro de usar aunque la categoría tenga más productos
+asignados que el límite de `GET .../products`. `add` de un producto ya asignado es un
+no-op (idempotente); `remove` de un producto no asignado o inexistente también se ignora
+(no-op tolerante) — solo se valida la existencia real de los `productUuids` de `add`.
+
+Respuesta `200`:
+```json
+{
+  "categoryUuid": "3f9a1c2e-...",
+  "added": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"],
+  "removed": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"],
+  "addedCount": 1,
+  "removedCount": 1
+}
+```
+`addedCount`/`removedCount` son los vínculos realmente afectados (no un eco de lo
+mandado) — p. ej. un `add` de un producto ya asignado no incrementa `addedCount`.
+
+- `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
+- `404` si la categoría no existe, o si algún `productUuid` de `add` no resuelve a un
+  producto real y no eliminado (nombra cuáles).
+
 #### `GET /v1/admin/categories/{uuid}/products` — listar productos asignados directamente
 
 ```http
@@ -773,6 +814,33 @@ Respuesta `200`:
 ```json
 { "vehicleUuid": "8f2c1a4e-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
 ```
+
+**Cuidado con vehículos con más de 200 productos asignados**: mismo riesgo que en
+categorías (ver nota arriba) — `GET .../products` está limitado a `limit ≤ 200`, y un
+`PUT` guardado desde un picker que solo cargó una página sobreescribe silenciosamente el
+resto. Usar el `PATCH` de abajo para ediciones incrementales.
+
+#### `PATCH /v1/admin/vehicles/{uuid}/products` — agregar/quitar productos de forma incremental
+
+```http
+PATCH /v1/admin/vehicles/8f2c1a4e-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": [] }
+```
+
+Mismo comportamiento incremental que el equivalente de categorías arriba: agrega/quita
+sin tocar el resto del conjunto asignado. `add` de un producto ya asignado es un no-op;
+`remove` de uno no asignado o inexistente también se ignora.
+
+Respuesta `200`:
+```json
+{ "vehicleUuid": "8f2c1a4e-...", "added": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "removed": [], "addedCount": 1, "removedCount": 0 }
+```
+
+- `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
+- `404` si el vehículo no existe, o si algún `productUuid` de `add` no resuelve.
 
 #### `GET /v1/admin/vehicles/models-for-years` — modelos disponibles en varios años a la vez
 
@@ -1047,6 +1115,48 @@ Respuesta `200`:
 `docs` es un eco minimalista de lo que quedó aplicado (sin datos de producto — usa `GET
 .../products` de arriba, que sí los trae, para la UI de listado/edición).
 
+**Cuidado con atributos con más de 200 productos asignados**: mismo riesgo que en
+categorías/vehículos (ver notas arriba) — `GET .../products` está limitado a `limit ≤
+200`, y un `PUT` guardado desde un picker que solo cargó una página le quita
+silenciosamente la clave a los productos no cargados. Usar el `PATCH` de abajo para
+ediciones incrementales.
+
+#### `PATCH /v1/admin/attributes/{uuid}/products` — asignar/actualizar o quitar el valor de este atributo, de forma incremental
+
+```http
+PATCH /v1/admin/attributes/8bdb99f9-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{
+  "upsert": [{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Verde" }],
+  "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"]
+}
+```
+
+**Incremental** — a diferencia del `PUT` de arriba, no necesita conocer el conjunto
+completo: `upsert` asigna/actualiza el `value` de este atributo en cada producto listado
+(sin tocar sus demás atributos guardados), `remove` le quita la clave a los productos
+listados (sin tocar el resto). `remove` de un producto que no tenga la clave, o que no
+exista, se ignora (no-op tolerante).
+
+Respuesta `200`:
+```json
+{
+  "attributeUuid": "8bdb99f9-...",
+  "upserted": [{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Verde" }],
+  "removed": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"],
+  "upsertedCount": 1,
+  "removedCount": 1
+}
+```
+
+- `422` si un mismo `productUuid` aparece en `upsert` y `remove` a la vez, o si algún
+  `value` no coincide con el `dataType`/`allowedValues` de este atributo (nombra
+  cuáles) — no escribe nada hasta que todos pasen.
+- `404` si el atributo no existe, o si algún `productUuid` de `upsert` no resuelve a un
+  producto real y no eliminado.
+
 #### `POST /v1/admin/attribute-presets` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
 
 Mismo patrón CRUD que atributos (`{ "name": "Llantas" }` al crear, `slug` derivado
@@ -1223,6 +1333,37 @@ Respuesta `200`:
 `GET /v1/admin/variant-groups/{uuid}/products` (paginado, mismo shape que el equivalente de
 categorías/vehículos) lista los miembros actuales — pensado para poblar la UI de edición antes
 de un `PUT`.
+
+**Cuidado con grupos con más de 200 productos asignados**: mismo riesgo que en
+categorías/vehículos/atributos (ver notas arriba) — un `PUT` guardado desde un picker que
+solo cargó una página de `GET .../products` expulsa silenciosamente del grupo a los
+productos no cargados. Usar el `PATCH` de abajo para ediciones incrementales.
+
+#### `PATCH /v1/admin/variant-groups/{uuid}/products` — agregar/quitar productos de forma incremental
+
+```http
+PATCH /v1/admin/variant-groups/b52bf1c5-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
+```
+
+**Incremental** — a diferencia del `PUT` de arriba, no necesita conocer el conjunto
+completo de miembros. `add` reasigna `variantGroupUuid` incondicionalmente (si un
+producto ya pertenecía a otro grupo, esta llamada gana). `remove` solo quita la
+pertenencia si el producto **sigue perteneciendo a este grupo** en el momento de la
+llamada — a diferencia de vaciar y reasignar todo el grupo como hace el `PUT`, esta
+guarda evita que un `remove` le quite por accidente la pertenencia a un producto que
+mientras tanto ya fue movido a otro grupo por una llamada distinta.
+
+Respuesta `200`:
+```json
+{ "variantGroupUuid": "b52bf1c5-...", "added": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "removed": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"], "addedCount": 1, "removedCount": 1 }
+```
+
+- `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
+- `404` si el grupo no existe, o si algún `productUuid` de `add` no resuelve.
 
 ### Importación masiva por Excel
 

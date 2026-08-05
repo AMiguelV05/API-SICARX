@@ -10,6 +10,8 @@ from app.schemas.attribute import (
     VariantGroupListResponse,
     ReplaceVariantGroupProductsRequest,
     ReplaceVariantGroupProductsResponse,
+    PatchVariantGroupProductsRequest,
+    PatchVariantGroupProductsResponse,
     VariantGroupProductsResponse,
 )
 from app.schemas.products import ProductBasic
@@ -55,9 +57,29 @@ async def admin_delete_variant_group(variant_group_uuid: str, db: DbDep):
 @router.put("/{variant_group_uuid}/products", response_model=ReplaceVariantGroupProductsResponse, summary="Reemplazar el conjunto completo de productos de un grupo de variantes")
 async def admin_replace_variant_group_products(variant_group_uuid: str, db: DbDep, data: ReplaceVariantGroupProductsRequest = Body()):
     """Reemplaza el conjunto COMPLETO de miembros: limpia el grupo de quien ya no este en
-    la lista y lo asigna a quien si. `404` si algun uuid no resuelve."""
+    la lista y lo asigna a quien si. `404` si algun uuid no resuelve. Para grupos con mas
+    productos asignados que el limite de `GET .../products` (200), preferir el `PATCH` de
+    abajo para no arriesgar sobreescribir asignaciones que el picker del dashboard nunca
+    cargo."""
     product_uuids = await attribute_service.replace_variant_group_products(db, variant_group_uuid, data.product_uuids)
     return ReplaceVariantGroupProductsResponse(variant_group_uuid=variant_group_uuid, product_uuids=product_uuids)
+
+
+@router.patch("/{variant_group_uuid}/products", response_model=PatchVariantGroupProductsResponse, summary="Agregar/quitar productos de un grupo de variantes de forma incremental")
+async def admin_patch_variant_group_products(variant_group_uuid: str, db: DbDep, data: PatchVariantGroupProductsRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba): agrega/quita sin necesitar conocer
+    el conjunto completo - seguro de usar aunque el grupo tenga mas productos que el
+    limite de `GET .../products`. `add` reasigna incondicionalmente (si un producto ya
+    estaba en otro grupo, esta llamada gana). `remove` solo quita la pertenencia si el
+    producto sigue en ESTE grupo - no le toca `variantGroupUuid` si mientras tanto ya fue
+    movido a otro grupo por una llamada distinta. `422` si un mismo `productUuid` aparece
+    en `add` y `remove` a la vez. `404` si algun uuid de `add` no resuelve."""
+    added, removed, added_count, removed_count = await attribute_service.patch_variant_group_products(
+        db, variant_group_uuid, data.add, data.remove
+    )
+    return PatchVariantGroupProductsResponse(
+        variant_group_uuid=variant_group_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
+    )
 
 
 @router.get("/{variant_group_uuid}/products", response_model=VariantGroupProductsResponse, summary="Listar productos asignados a un grupo de variantes")

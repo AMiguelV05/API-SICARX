@@ -82,6 +82,30 @@ class ReplaceAttributeProductsResponse(CamelModel):
     docs: List[AttributeProductValueInput]
 
 
+class PatchAttributeProductsRequest(CamelModel):
+    """Incremental (a diferencia de ReplaceAttributeProductsRequest): agrega/actualiza
+    valores o quita la clave de este atributo sin necesitar conocer el conjunto completo -
+    pensado para cuando el atributo tiene mas productos asignados que el limite de
+    GET .../products (200)."""
+    upsert: List[AttributeProductValueInput] = Field(default_factory=list, max_length=5000, description="Productos a los que se les asigna/actualiza el valor de este atributo.")
+    remove: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a los que se les quita la clave de este atributo; quien no la tenga o no exista se ignora (no-op tolerante).")
+
+    @model_validator(mode="after")
+    def _no_overlap(self) -> "PatchAttributeProductsRequest":
+        overlap = {v.product_uuid for v in self.upsert} & set(self.remove)
+        if overlap:
+            raise ValueError(f"Un producto no puede estar en 'upsert' y 'remove' a la vez: {', '.join(sorted(overlap))}")
+        return self
+
+
+class PatchAttributeProductsResponse(CamelModel):
+    attribute_uuid: str
+    upserted: List[AttributeProductValueInput]
+    removed: List[str]
+    upserted_count: int
+    removed_count: int
+
+
 # --- Attribute presets: bundles de conveniencia, nunca obligatorios ni validados contra un producto -----
 
 class AttributePresetPublic(CamelModel):
@@ -185,6 +209,31 @@ class ReplaceVariantGroupProductsResponse(CamelModel):
 class VariantGroupProductsResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
+
+
+class PatchVariantGroupProductsRequest(CamelModel):
+    """Incremental (a diferencia de ReplaceVariantGroupProductsRequest): agrega/quita sin
+    necesitar conocer el conjunto completo - pensado para cuando el grupo tiene mas
+    productos asignados que el limite de GET .../products (200). `remove` solo quita la
+    pertenencia si el producto sigue en ESTE grupo - no le toca variantGroupUuid si
+    mientras tanto ya fue movido a otro grupo."""
+    add: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a asignar a este grupo; reasigna incondicionalmente aunque ya pertenecieran a otro grupo.")
+    remove: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a quitar de este grupo; quien no pertenezca a este grupo (o no exista) se ignora (no-op tolerante).")
+
+    @model_validator(mode="after")
+    def _no_overlap(self) -> "PatchVariantGroupProductsRequest":
+        overlap = set(self.add) & set(self.remove)
+        if overlap:
+            raise ValueError(f"Un producto no puede estar en 'add' y 'remove' a la vez: {', '.join(sorted(overlap))}")
+        return self
+
+
+class PatchVariantGroupProductsResponse(CamelModel):
+    variant_group_uuid: str
+    added: List[str]
+    removed: List[str]
+    added_count: int
+    removed_count: int
 
 
 class SetProductVariantGroupRequest(CamelModel):

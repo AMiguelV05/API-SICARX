@@ -13,6 +13,8 @@ from app.schemas.attribute import (
     AttributeProductsResponse,
     ReplaceAttributeProductsRequest,
     ReplaceAttributeProductsResponse,
+    PatchAttributeProductsRequest,
+    PatchAttributeProductsResponse,
 )
 from app.services import attribute_service
 
@@ -100,6 +102,30 @@ async def admin_replace_attribute_products(attribute_uuid: str, db: DbDep, data:
 
     `404` si algun `productUuid` no resuelve. `422` si algun `value` no cuadra con el
     `dataType`/`allowedValues` de este atributo (nombra cuales) - no escribe nada hasta que
-    todos pasen."""
+    todos pasen. Para atributos con mas productos asignados que el limite de
+    `GET .../products` (200), preferir el `PATCH` de abajo para no arriesgar sobreescribir
+    asignaciones que el picker del dashboard nunca cargo."""
     docs = await attribute_service.replace_attribute_products(db, attribute_uuid, [v.model_dump() for v in data.values])
     return ReplaceAttributeProductsResponse(attribute_uuid=attribute_uuid, docs=docs)
+
+
+@router.patch("/{attribute_uuid}/products", response_model=PatchAttributeProductsResponse, summary="Agregar/actualizar o quitar el valor de este atributo en un lote de productos, de forma incremental")
+async def admin_patch_attribute_products(attribute_uuid: str, db: DbDep, data: PatchAttributeProductsRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba): asigna/actualiza el `value` de este
+    atributo en `upsert` o le quita la clave a `remove`, sin necesitar conocer el conjunto
+    completo - seguro de usar aunque el atributo tenga mas productos que el limite de
+    `GET .../products`. `remove` de productos que no tengan la clave (o no existan) se
+    ignora (no-op tolerante). `422` si un mismo `productUuid` aparece en `upsert` y
+    `remove` a la vez, o si algun `value` no cuadra con el `dataType`/`allowedValues` de
+    este atributo (nombra cuales) - no escribe nada hasta que todos pasen. `404` si algun
+    `productUuid` de `upsert` no resuelve."""
+    upserted, removed, upserted_count, removed_count = await attribute_service.patch_attribute_products(
+        db, attribute_uuid, [v.model_dump() for v in data.upsert], data.remove
+    )
+    return PatchAttributeProductsResponse(
+        attribute_uuid=attribute_uuid,
+        upserted=upserted,
+        removed=removed,
+        upserted_count=upserted_count,
+        removed_count=removed_count,
+    )

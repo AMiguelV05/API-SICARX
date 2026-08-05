@@ -12,6 +12,8 @@ from app.schemas.vehicle import (
     VehicleModelsResponse,
     ReplaceVehicleProductsRequest,
     ReplaceVehicleProductsResponse,
+    PatchVehicleProductsRequest,
+    PatchVehicleProductsResponse,
     VehicleProductsResponse,
     AssignProductsToModelRequest,
     AssignProductsToModelResponse,
@@ -117,9 +119,28 @@ async def admin_delete_vehicle(vehicle_uuid: str, db: DbDep):
 @router.put("/{vehicle_uuid}/products", response_model=ReplaceVehicleProductsResponse, summary="Reemplazar el conjunto completo de productos asignados a un vehiculo")
 async def admin_replace_vehicle_products(vehicle_uuid: str, db: DbDep, data: ReplaceVehicleProductsRequest = Body()):
     """Reemplaza el conjunto COMPLETO de productos asignados a un vehiculo - mismo
-    comportamiento reemplazo-no-incremental que el equivalente de categorias."""
+    comportamiento reemplazo-no-incremental que el equivalente de categorias. Para
+    vehiculos con mas productos asignados que el limite de `GET .../products` (200),
+    preferir el `PATCH` de abajo para no arriesgar sobreescribir asignaciones que el
+    picker del dashboard nunca cargo."""
     product_uuids = await vehicle_service.replace_vehicle_products(db, vehicle_uuid, data.product_uuids)
     return ReplaceVehicleProductsResponse(vehicle_uuid=vehicle_uuid, product_uuids=product_uuids)
+
+
+@router.patch("/{vehicle_uuid}/products", response_model=PatchVehicleProductsResponse, summary="Agregar/quitar productos de un vehiculo de forma incremental")
+async def admin_patch_vehicle_products(vehicle_uuid: str, db: DbDep, data: PatchVehicleProductsRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba): agrega/quita sin necesitar conocer
+    el conjunto completo asignado - seguro de usar aunque el vehiculo tenga mas productos
+    que el limite de `GET .../products`. `add` ya asignados se ignoran (idempotente);
+    `remove` no asignados o inexistentes tambien se ignoran (no-op tolerante). `422` si un
+    mismo `productUuid` aparece en `add` y `remove` a la vez. `404` si algun uuid de `add`
+    no resuelve a un producto real y no eliminado."""
+    added, removed, added_count, removed_count = await vehicle_service.patch_vehicle_products(
+        db, vehicle_uuid, data.add, data.remove
+    )
+    return PatchVehicleProductsResponse(
+        vehicle_uuid=vehicle_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
+    )
 
 
 @router.get("/{vehicle_uuid}/products", response_model=VehicleProductsResponse, summary="Listar productos asignados directamente a un vehiculo")

@@ -130,6 +130,51 @@ async def replace_vehicle_products(db: AsyncSession, vehicle_uuid: str, product_
     return unique_uuids
 
 
+async def patch_vehicle_products(db: AsyncSession, vehicle_uuid: str, add_uuids: list[str], remove_uuids: list[str]) -> tuple[list[str], list[str], int, int]:
+    """Incremental (a diferencia de replace_vehicle_products): agrega/quita sin tocar el
+    resto del conjunto asignado - pensado para vehiculos con mas productos asignados que
+    el limite de GET .../products. `remove_uuids` es tolerante (no valida existencia)."""
+    vehicle = await db.get(Vehicle, vehicle_uuid)
+    if vehicle is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehiculo no encontrado.")
+
+    unique_add = sorted(set(add_uuids))
+    add_product_ids: list[int] = []
+    if unique_add:
+        result = await db.execute(
+            select(Product.id, Product.sicar_uuid).where(Product.sicar_uuid.in_(unique_add), Product.is_deleted == False)
+        )
+        found = {row.sicar_uuid: row.id for row in result.all()}
+        missing = [u for u in unique_add if u not in found]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Productos no encontrados: {', '.join(missing)}")
+        add_product_ids = [found[u] for u in unique_add]
+
+    added_count = 0
+    if add_product_ids:
+        insert_stmt = pg_insert(product_vehicles).values(
+            [{"vehicle_uuid": vehicle_uuid, "product_id": pid} for pid in add_product_ids]
+        ).on_conflict_do_nothing(index_elements=["vehicle_uuid", "product_id"]).returning(product_vehicles.c.product_id)
+        insert_result = await db.execute(insert_stmt)
+        added_count = len(insert_result.all())
+
+    unique_remove = sorted(set(remove_uuids))
+    removed_count = 0
+    if unique_remove:
+        delete_stmt = delete(product_vehicles).where(
+            product_vehicles.c.vehicle_uuid == vehicle_uuid,
+            product_vehicles.c.product_id.in_(select(Product.id).where(Product.sicar_uuid.in_(unique_remove))),
+        ).returning(product_vehicles.c.product_id)
+        delete_result = await db.execute(delete_stmt)
+        removed_count = len(delete_result.all())
+
+    await db.commit()
+    logger.info(
+        f"Vehiculo {vehicle_uuid}: {added_count} producto(s) agregado(s), {removed_count} quitado(s) via PATCH /admin."
+    )
+    return unique_add, unique_remove, added_count, removed_count
+
+
 async def list_vehicle_products(db: AsyncSession, vehicle_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:
     vehicle = await db.get(Vehicle, vehicle_uuid)
     if vehicle is None:

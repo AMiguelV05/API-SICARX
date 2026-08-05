@@ -222,6 +222,64 @@ async def replace_attribute_products(db: AsyncSession, attribute_uuid: str, valu
     return [{"product_uuid": u, "value": value_by_uuid[u]} for u in unique_uuids]
 
 
+async def patch_attribute_products(db: AsyncSession, attribute_uuid: str, upsert_values: list[dict], remove_uuids: list[str]) -> tuple[list[dict], list[str], int, int]:
+    """Incremental (a diferencia de replace_attribute_products): asigna/actualiza el valor
+    de este atributo en un lote de productos o le quita la clave a otro lote, sin tocar el
+    resto de productos que ya tenian este atributo asignado - pensado para atributos con
+    mas productos asignados que el limite de GET .../products. `remove_uuids` es tolerante
+    (un uuid que no exista o no tenga la clave se ignora)."""
+    attribute = await db.get(Attribute, attribute_uuid)
+    if attribute is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Atributo no encontrado.")
+
+    unique_uuids = sorted({v["product_uuid"] for v in upsert_values})
+    upsert_products: dict[str, Product] = {}
+    if unique_uuids:
+        result = await db.execute(select(Product).where(Product.sicar_uuid.in_(unique_uuids), Product.is_deleted == False))
+        upsert_products = {p.sicar_uuid: p for p in result.scalars().all()}
+        missing = [u for u in unique_uuids if u not in upsert_products]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Productos no encontrados: {', '.join(missing)}")
+
+    value_by_uuid: dict[str, object] = {}
+    errors: list[str] = []
+    for v in upsert_values:
+        try:
+            value_by_uuid[v["product_uuid"]] = coerce_and_validate_value(attribute, v["value"])
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(errors))
+
+    for sicar_uuid, product in upsert_products.items():
+        new_attrs = dict(product.attributes or {})
+        new_attrs[attribute.slug] = value_by_uuid[sicar_uuid]
+        product.attributes = new_attrs
+
+    unique_remove = sorted(set(remove_uuids))
+    removed_uuids: list[str] = []
+    if unique_remove:
+        current_result = await db.execute(
+            select(Product).where(
+                Product.attributes.has_key(attribute.slug),
+                Product.sicar_uuid.in_(unique_remove),
+                Product.is_deleted == False,
+            )
+        )
+        for product in current_result.scalars().all():
+            new_attrs = dict(product.attributes or {})
+            new_attrs.pop(attribute.slug, None)
+            product.attributes = new_attrs or None
+            removed_uuids.append(product.sicar_uuid)
+
+    await db.commit()
+    logger.info(
+        f"Atributo {attribute_uuid}: {len(upsert_products)} producto(s) actualizado(s), "
+        f"{len(removed_uuids)} quitado(s) via PATCH /admin."
+    )
+    return [{"product_uuid": u, "value": value_by_uuid[u]} for u in unique_uuids], sorted(removed_uuids), len(upsert_products), len(removed_uuids)
+
+
 # --- Attribute presets: bundles de conveniencia, nunca obligatorios ni validados contra un producto -----
 
 async def create_preset(db: AsyncSession, name: str) -> AttributePreset:
@@ -572,6 +630,58 @@ async def replace_variant_group_products(db: AsyncSession, variant_group_uuid: s
     await db.commit()
     logger.info(f"Grupo de variantes {variant_group_uuid}: productos reemplazados via /admin ({len(product_ids)} productos).")
     return unique_uuids
+
+
+async def patch_variant_group_products(db: AsyncSession, variant_group_uuid: str, add_uuids: list[str], remove_uuids: list[str]) -> tuple[list[str], list[str], int, int]:
+    """Incremental (a diferencia de replace_variant_group_products): agrega/quita sin
+    tocar el resto de miembros del grupo - pensado para grupos con mas productos
+    asignados que el limite de GET .../products. `add` reasigna incondicionalmente
+    (mismo criterio que el PUT: si un producto ya estaba en otro grupo, esta llamada
+    gana). `remove` lleva guarda `variant_group_uuid == este grupo` - a diferencia del
+    PUT, que limpia el grupo entero antes de reasignar, aqui solo opera sobre el
+    subconjunto pedido, asi que sin esta guarda podria quitarle por accidente la
+    pertenencia a un producto que mientras tanto ya fue movido a OTRO grupo."""
+    group = await db.get(VariantGroup, variant_group_uuid)
+    if group is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Grupo de variantes no encontrado.")
+
+    unique_add = sorted(set(add_uuids))
+    add_product_ids: list[int] = []
+    if unique_add:
+        result = await db.execute(select(Product.id, Product.sicar_uuid).where(Product.sicar_uuid.in_(unique_add), Product.is_deleted == False))
+        found = {row.sicar_uuid: row.id for row in result.all()}
+        missing = [u for u in unique_add if u not in found]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Productos no encontrados: {', '.join(missing)}")
+        add_product_ids = [found[u] for u in unique_add]
+
+    added_count = 0
+    if add_product_ids:
+        result = await db.execute(
+            update(Product).where(Product.id.in_(add_product_ids)).values(variant_group_uuid=variant_group_uuid).returning(Product.id)
+        )
+        added_count = len(result.all())
+
+    unique_remove = sorted(set(remove_uuids))
+    removed_count = 0
+    if unique_remove:
+        result = await db.execute(
+            update(Product)
+            .where(
+                Product.variant_group_uuid == variant_group_uuid,
+                Product.sicar_uuid.in_(unique_remove),
+            )
+            .values(variant_group_uuid=None)
+            .returning(Product.id)
+        )
+        removed_count = len(result.all())
+
+    await db.commit()
+    logger.info(
+        f"Grupo de variantes {variant_group_uuid}: {added_count} producto(s) agregado(s), "
+        f"{removed_count} quitado(s) via PATCH /admin."
+    )
+    return unique_add, unique_remove, added_count, removed_count
 
 
 async def list_variant_group_products(db: AsyncSession, variant_group_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:

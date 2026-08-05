@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import List, Literal, Optional
 from datetime import datetime
-from pydantic import Field
+from pydantic import Field, model_validator
 from app.schemas.base import CamelModel
 from app.schemas.products import ProductBasic
 
@@ -50,6 +50,27 @@ class ReplaceVehicleProductsResponse(CamelModel):
 class VehicleProductsResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
+
+class PatchVehicleProductsRequest(CamelModel):
+    """Incremental (a diferencia de ReplaceVehicleProductsRequest): agrega/quita sin
+    necesitar conocer el conjunto completo - pensado para cuando el vehiculo tiene mas
+    productos asignados que el limite de GET .../products (200)."""
+    add: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a asignar; ya asignados se ignoran (idempotente).")
+    remove: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a quitar; no asignados o inexistentes se ignoran (no-op tolerante).")
+
+    @model_validator(mode="after")
+    def _no_overlap(self) -> "PatchVehicleProductsRequest":
+        overlap = set(self.add) & set(self.remove)
+        if overlap:
+            raise ValueError(f"Un producto no puede estar en 'add' y 'remove' a la vez: {', '.join(sorted(overlap))}")
+        return self
+
+class PatchVehicleProductsResponse(CamelModel):
+    vehicle_uuid: str
+    added: List[str]
+    removed: List[str]
+    added_count: int
+    removed_count: int
 
 class AssignProductsToModelRequest(CamelModel):
     """Asignacion masiva ADITIVA a un modelo en varios anios - distinto de ReplaceVehicleProductsRequest (reemplaza un solo vehiculo)."""
