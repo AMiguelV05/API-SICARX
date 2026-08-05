@@ -150,12 +150,13 @@ async def list_attributes(db: AsyncSession, *, search: str | None, data_type: st
     return total or 0, list(result.scalars().all())
 
 
-async def list_products_with_attribute(db: AsyncSession, attribute_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:
+async def list_products_with_attribute(db: AsyncSession, attribute_uuid: str, limit: int, offset: int) -> tuple[int, Attribute, list[Product]]:
     """Direccion inversa de get_product_attributes: dado un atributo, que productos tienen
     esta clave guardada en su `attributes` (JSONB) - mismo proposito que
     list_category_products/list_vehicle_products, pero via containment JSONB (`?`) en vez
     de una tabla pivote. Filtra is_deleted igual que esos dos (mismo criterio de
-    _attribute_in_use)."""
+    _attribute_in_use). Devuelve tambien `attribute` (no solo su uuid) para que el caller
+    pueda leer `product.attributes[attribute.slug]` sin una segunda consulta."""
     attribute = await db.get(Attribute, attribute_uuid)
     if attribute is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Atributo no encontrado.")
@@ -163,7 +164,62 @@ async def list_products_with_attribute(db: AsyncSession, attribute_uuid: str, li
     base = select(Product).where(Product.attributes.has_key(attribute.slug), Product.is_deleted == False)
     total = await db.scalar(select(func.count()).select_from(base.subquery()))
     result = await db.execute(base.order_by(Product.name).limit(limit).offset(offset))
-    return total or 0, list(result.scalars().all())
+    return total or 0, attribute, list(result.scalars().all())
+
+
+async def replace_attribute_products(db: AsyncSession, attribute_uuid: str, values: list[dict]) -> list[dict]:
+    """Direccion attribute-primero: reemplaza el conjunto COMPLETO de productos que tienen
+    ESTE atributo asignado (complementa `replace_product_attributes`, product-primero, que
+    reemplaza TODOS los atributos de un producto). Solo TOCA la clave de este atributo en
+    el `attributes` JSONB de cada producto - un producto que ya la tenia y no viene en
+    `values` la pierde, pero cualquier otro atributo que ya tuviera guardado no se toca."""
+    attribute = await db.get(Attribute, attribute_uuid)
+    if attribute is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Atributo no encontrado.")
+
+    unique_uuids = sorted({v["product_uuid"] for v in values})
+    target_products: dict[str, Product] = {}
+    if unique_uuids:
+        result = await db.execute(select(Product).where(Product.sicar_uuid.in_(unique_uuids), Product.is_deleted == False))
+        target_products = {p.sicar_uuid: p for p in result.scalars().all()}
+        missing = [u for u in unique_uuids if u not in target_products]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Productos no encontrados: {', '.join(missing)}")
+
+    value_by_uuid: dict[str, object] = {}
+    errors: list[str] = []
+    for v in values:
+        try:
+            value_by_uuid[v["product_uuid"]] = coerce_and_validate_value(attribute, v["value"])
+        except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(errors))
+
+    current_result = await db.execute(select(Product).where(Product.attributes.has_key(attribute.slug), Product.is_deleted == False))
+    current_products = {p.sicar_uuid: p for p in current_result.scalars().all()}
+
+    # Quita la clave de quien ya la tenia y no esta en el nuevo conjunto - reasignacion
+    # completa (no dict.pop in-place: SQLAlchemy solo detecta el cambio si se reasigna el
+    # atributo a un objeto nuevo, mismo criterio que replace_product_attributes).
+    for sicar_uuid, product in current_products.items():
+        if sicar_uuid not in target_products:
+            new_attrs = dict(product.attributes or {})
+            new_attrs.pop(attribute.slug, None)
+            product.attributes = new_attrs or None
+
+    for sicar_uuid, product in target_products.items():
+        new_attrs = dict(product.attributes or {})
+        new_attrs[attribute.slug] = value_by_uuid[sicar_uuid]
+        product.attributes = new_attrs
+
+    await db.commit()
+    removed_count = len(current_products.keys() - target_products.keys())
+    logger.info(
+        f"Atributo {attribute_uuid}: productos reemplazados via /admin "
+        f"({len(target_products)} con valor asignado, {removed_count} removidos)."
+    )
+    return [{"product_uuid": u, "value": value_by_uuid[u]} for u in unique_uuids]
 
 
 # --- Attribute presets: bundles de conveniencia, nunca obligatorios ni validados contra un producto -----

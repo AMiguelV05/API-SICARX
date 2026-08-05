@@ -9,9 +9,11 @@ from app.schemas.attribute import (
     AttributeCreateRequest,
     AttributeUpdateRequest,
     AttributeListResponse,
+    AttributeProductPublic,
     AttributeProductsResponse,
+    ReplaceAttributeProductsRequest,
+    ReplaceAttributeProductsResponse,
 )
-from app.schemas.products import ProductBasic
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,39 @@ async def admin_list_attribute_products(
     """Direccion inversa de `GET /admin/products/{uuid}/attributes`: dado un atributo, que
     productos tienen esta clave guardada en `attributes` (JSONB) - mismo proposito que
     `GET /admin/categories/{uuid}/products`/`GET /admin/vehicles/{uuid}/products`, via
-    containment JSONB en vez de una tabla pivote. `404` si el atributo no existe."""
-    total, products = await attribute_service.list_products_with_attribute(db, attribute_uuid, limit, offset)
-    return AttributeProductsResponse(total=total, docs=[ProductBasic.model_validate(p) for p in products])
+    containment JSONB en vez de una tabla pivote. A diferencia de esas dos rutas, cada
+    producto trae su `value` guardado para este atributo (no solo membresia) - pensado
+    para precargar la UI de edicion antes de un `PUT` de abajo. `404` si el atributo no
+    existe."""
+    total, attribute, products = await attribute_service.list_products_with_attribute(db, attribute_uuid, limit, offset)
+    docs = [
+        AttributeProductPublic(
+            sicar_uuid=p.sicar_uuid,
+            sku=p.sku,
+            name=p.name,
+            description_details=p.description_details,
+            image_url=p.image_url,
+            price=p.price,
+            stock=p.stock,
+            value=(p.attributes or {}).get(attribute.slug),
+        )
+        for p in products
+    ]
+    return AttributeProductsResponse(total=total, docs=docs)
+
+
+@router.put("/{attribute_uuid}/products", response_model=ReplaceAttributeProductsResponse, summary="Reemplazar el conjunto completo de productos que tienen este atributo asignado")
+async def admin_replace_attribute_products(attribute_uuid: str, db: DbDep, data: ReplaceAttributeProductsRequest = Body()):
+    """Direccion attribute-primero: asigna/actualiza este atributo en un lote de productos
+    de una sola llamada, en vez de un `PUT /admin/products/{uuid}/attributes` por producto.
+    **Reemplazo completo, no incremental** - un producto que ya tenia este atributo y no
+    aparece en `values` pierde la clave; los que si aparecen quedan con el `value` dado.
+    Solo TOCA la clave de este atributo en cada producto - cualquier otro atributo que ya
+    tuviera guardado no se toca (a diferencia de `PUT /admin/products/{uuid}/attributes`,
+    que reemplaza el diccionario completo de un producto).
+
+    `404` si algun `productUuid` no resuelve. `422` si algun `value` no cuadra con el
+    `dataType`/`allowedValues` de este atributo (nombra cuales) - no escribe nada hasta que
+    todos pasen."""
+    docs = await attribute_service.replace_attribute_products(db, attribute_uuid, [v.model_dump() for v in data.values])
+    return ReplaceAttributeProductsResponse(attribute_uuid=attribute_uuid, docs=docs)

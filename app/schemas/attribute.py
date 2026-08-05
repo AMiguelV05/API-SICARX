@@ -51,9 +51,35 @@ class AttributeListResponse(CamelModel):
     docs: List[AttributePublic]
 
 
+class AttributeProductPublic(ProductBasic):
+    """ProductBasic + el valor guardado de ESTE atributo - a diferencia de ProductBasic
+    puro (usado por categorias/vehiculos, sin valor por definicion), aqui hay un valor
+    real que mostrar junto con cada producto en la UI de edicion."""
+    value: AttributeValue = None
+
+
 class AttributeProductsResponse(CamelModel):
     total: int
-    docs: List[ProductBasic]
+    docs: List[AttributeProductPublic]
+
+
+class AttributeProductValueInput(CamelModel):
+    product_uuid: str
+    value: AttributeValue = Field(description="Se valida server-side contra el dataType/allowedValues de este atributo, igual que en ReplaceProductAttributesRequest.")
+
+
+class ReplaceAttributeProductsRequest(CamelModel):
+    """Direccion attribute-primero: reemplaza el conjunto COMPLETO de productos que tienen
+    ESTE atributo asignado. Complementa ReplaceProductAttributesRequest (product-primero,
+    reemplaza TODOS los atributos de un producto) - aqui solo se toca la clave de este
+    atributo en cada producto, el resto de lo que cada producto ya tuviera guardado no se
+    toca."""
+    values: List[AttributeProductValueInput] = Field(default_factory=list, max_length=5000, description="Un producto que ya tenia este atributo y no aparece aqui pierde la clave (sin tocar sus demas atributos guardados).")
+
+
+class ReplaceAttributeProductsResponse(CamelModel):
+    attribute_uuid: str
+    docs: List[AttributeProductValueInput]
 
 
 # --- Attribute presets: bundles de conveniencia, nunca obligatorios ni validados contra un producto -----

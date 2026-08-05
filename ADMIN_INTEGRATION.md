@@ -982,20 +982,70 @@ como categorías/vehículos, pero mismo propósito/shape que
 `GET /v1/admin/categories/{uuid}/products`/`GET /v1/admin/vehicles/{uuid}/products`).
 Paginado igual que el resto (`limit` 1-200, default 60; `offset`). **Nota**: a diferencia de
 esas dos rutas, no existe (ni se planea) un `GET /v1/admin/attributes/by-product/{productUuid}`
-— esa dirección ya la cubre `GET /v1/admin/products/{uuid}/attributes` de arriba, que además
-trae el `value` guardado de cada atributo, no solo cuáles están asignados.
+— esa dirección ya la cubre `GET /v1/admin/products/{uuid}/attributes` de arriba.
 
-Respuesta `200` — mismo shape que el equivalente de categorías/vehículos:
+Respuesta `200` — mismo shape que el equivalente de categorías/vehículos, **más `value`** (el
+valor guardado de este atributo para cada producto — a diferencia de categorías/vehículos,
+que son solo membresía sin valor), pensado para precargar la UI de edición antes de un `PUT`
+de abajo:
 ```json
 {
   "total": 2,
   "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "descriptionDetails": null, "imageUrl": null, "price": 8.62, "stock": 2.0 }
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "descriptionDetails": null, "imageUrl": null, "price": 8.62, "stock": 2.0, "value": "Rojo" }
   ]
 }
 ```
 
 `404` si el atributo no existe.
+
+#### `PUT /v1/admin/attributes/{uuid}/products` — asignar este atributo a un lote de productos
+
+```http
+PUT /v1/admin/attributes/8bdb99f9-.../products
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{
+  "values": [
+    { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Rojo" },
+    { "productUuid": "7Bqz2PPydY2HpTaM0sFuUANM8vo", "value": "Azul" }
+  ]
+}
+```
+
+**Dirección atributo-primero** — asigna/actualiza este atributo en un lote de productos de
+una sola llamada, en vez de un `PUT /v1/admin/products/{uuid}/attributes` por producto.
+Complementa esa ruta (dirección producto-primero, reemplaza *todos* los atributos de un
+producto): esta ruta **solo toca la clave de este atributo** en cada producto — cualquier
+otro atributo que el producto ya tuviera guardado no se toca.
+
+**Reemplazo completo, no incremental** (mismo criterio que categorías/vehículos/grupos de
+variantes) — el conjunto de productos con este atributo asignado queda exactamente igual a
+`values`: un producto que ya lo tenía y no aparece aquí **pierde la clave** (sus demás
+atributos siguen intactos), y los que sí aparecen quedan con el `value` dado (nuevo o
+actualizado). Una lista vacía (`{ "values": [] }`) quita el atributo de todos los productos
+que lo tuvieran.
+
+Cada `value` se valida server-side contra el `dataType`/`allowedValues` de este atributo
+**antes de escribir nada** — igual que `PUT /v1/admin/products/{uuid}/attributes`:
+
+- `404` si algún `productUuid` no resuelve a un producto real y no eliminado (nombra cuáles).
+- `422` si algún `value` no coincide con el `dataType`, o (para `ENUM`) no está en
+  `allowedValues` (nombra el/los producto(s) y por qué).
+
+Respuesta `200`:
+```json
+{
+  "attributeUuid": "8bdb99f9-...",
+  "docs": [
+    { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Rojo" },
+    { "productUuid": "7Bqz2PPydY2HpTaM0sFuUANM8vo", "value": "Azul" }
+  ]
+}
+```
+`docs` es un eco minimalista de lo que quedó aplicado (sin datos de producto — usa `GET
+.../products` de arriba, que sí los trae, para la UI de listado/edición).
 
 #### `POST /v1/admin/attribute-presets` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
 
