@@ -361,7 +361,8 @@ async def delete_order(
 
     Requiere `X-Client-Token`; 404 si la orden no pertenece al cliente autenticado (y
     en una segunda llamada sobre la misma orden ya borrada — idempotente). 409 si ya
-    esta `PAID` o `CANCELLED`.
+    esta `PAID` o `CANCELLED`, o si ya tiene una referencia de pago OXXO generada
+    (`mp_ticket_url`) — ver el comentario junto a ese chequeo.
 
     Antes de encolar la cancelacion, cancela cualquier pago de Mercado Pago pendiente/en
     proceso (nunca `approved`, eso ya la habria puesto en `PAID`) - ver `mp_resolved_here`
@@ -373,6 +374,12 @@ async def delete_order(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Solo se pueden eliminar ordenes reservadas que aun no han sido pagadas ni canceladas."
+        )
+
+    if local_order.mp_ticket_url:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Esta orden ya tiene una referencia de pago (OXXO) generada y no puede descartarse automáticamente. Usa /cancel si el cliente desea cancelarla explícitamente.",
         )
 
     # Ver el comentario equivalente en cancel_order - misma razon.
