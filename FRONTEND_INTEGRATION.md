@@ -460,7 +460,8 @@ Respuesta `200`:
       "totalQuantity": 3,
       "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": null }, "deliveryType": "PICKUP" },
       "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
-      "createdAt": "2026-07-10T18:32:05Z"
+      "createdAt": "2026-07-10T18:32:05Z",
+      "cancellationReason": null
     }
   ]
 }
@@ -1234,6 +1235,7 @@ token de auth — aquí no hay token, así que van explícitos en el body:
   "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": "juan@example.com" }, "deliveryType": "PICKUP" },
   "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
   "createdAt": "2026-07-10T18:32:05Z",
+  "cancellationReason": null,
   "clientEmail": "juan@example.com",
   "clientName": "Juan Pérez"
 }
@@ -1256,17 +1258,21 @@ para evaluar una cola de reintentos ahí.
 Mismo mecanismo que `order-confirmed` de arriba — este backend llama a esta ruta
 directamente (nunca el navegador) en el momento exacto en que un pedido pasa a
 `"CANCELLED"`, ya sea porque el cliente lo canceló (`POST /v1/orders/{order_id}/cancel`),
-lo eliminó (`DELETE /v1/orders/{order_id}`), o porque un pago con Mercado Pago fue
+lo eliminó (`DELETE /v1/orders/{order_id}`), un pago con Mercado Pago fue
 rechazado/cancelado (webhook de Mercado Pago o el `POST /v1/orders/{order_id}/pay`
-síncrono). Implementa esta ruta para disparar tu propio correo de cancelación, igual que
-con `order-confirmed`.
+síncrono), o un administrador lo canceló desde el dashboard admin
+(`POST /v1/admin/orders/{orderUuid}/cancel`, ver `ADMIN_INTEGRATION.md`). Implementa esta
+ruta para disparar tu propio correo de cancelación, igual que con `order-confirmed`.
 
 **Verificación de firma**: exactamente el mismo esquema que `order-confirmed` — mismos
 headers, mismo secreto compartido (`FRONTEND_WEBHOOK_SECRET`), misma fórmula de manifest.
 No la repetimos aquí — consulta la sección de `order-confirmed` arriba.
 
 **Body**: mismo shape que `order-confirmed` (un elemento de `GET /v1/auth/me/orders/{orderUuid}`
-más `clientEmail`/`clientName`), con `"status": "CANCELLED"`.
+más `clientEmail`/`clientName`), con `"status": "CANCELLED"`. `cancellationReason` es `null`
+para las tres cancelaciones disparadas por el cliente arriba, y un texto libre cuando fue un
+administrador quien canceló — útil si quieres mostrarle al cliente el motivo en el correo de
+cancelación.
 
 **Importante — si el pedido ya había sido aceptado por un administrador, avisarle a Sicar X
 puede seguir en curso cuando llega este webhook** (y si nunca fue aceptado, no se le avisa

@@ -18,6 +18,9 @@ from app.schemas.client import ClientAddressPublic
 from app.services.sicar_auth import sicar_auth
 from app.services import shipping_service
 from app.services import order_status_notification_service
+from app.services import payment_service
+from app.services.order_history_service import prepare_local_cancellation
+from app.services.order_cancellation_notification_service import notify_order_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +196,64 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
         logger.error(f"Fallo inesperado notificando 'orden aceptada' para la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     return order
+
+
+async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str) -> tuple[Order, bool]:
+    """Cancela una orden como admin - mismo mecanismo local-first que
+    `routes/orders.py::cancel_order` (reembolso/cancelación de Mercado Pago si aplica,
+    luego `prepare_local_cancellation`), pero sin ownership de cliente (admin puede
+    cancelar cualquier orden) y persistiendo `reason` en `Order.cancellation_reason` -
+    visible después vía `OrderPublic`/`AdminOrderPublic` y en el webhook `order-cancelled`
+    (NULL ahí para cancelaciones del cliente). Devuelve además si la orden ya había sido
+    aceptada, para que la ruta reporte si de verdad se encoló un aviso asíncrono a Sicar X."""
+    order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    if order.status == "CANCELLED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
+    # COMPLETE se excluye a proposito: tambien es el estado terminal de pedidos PICKUP.
+    if order.dispatch_status == "DISPATCHED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue enviada y no puede cancelarse.")
+
+    was_accepted = order.accepted_at is not None
+
+    # Ver el comentario equivalente en orders.py::cancel_order - misma razon (no revertir
+    # un hecho de Mercado Pago ya resuelto si prepare_local_cancellation rechaza despues).
+    mp_resolved_here = False
+
+    try:
+        if order.mp_payment_id:
+            if order.mp_status == "approved":
+                await payment_service.refund_payment(order.mp_payment_id)
+                order.mp_status = "refunded"
+                mp_resolved_here = True
+            elif order.mp_status in ("pending", "in_process"):
+                await payment_service.cancel_payment(order.mp_payment_id)
+                order.mp_status = "cancelled"
+                mp_resolved_here = True
+
+        order.cancellation_reason = reason
+        order = await prepare_local_cancellation(db, order)
+        await db.commit()
+    except HTTPException:
+        if mp_resolved_here:
+            await db.commit()
+        else:
+            await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error inesperado al cancelar la orden {order_uuid} (admin): {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ocurrió un error interno al cancelar el pedido.")
+
+    logger.info(f"Orden {order.uuid} cancelada por admin (motivo: {reason!r}). Stock restaurado, sincronizacion con Sicar X encolada." if was_accepted else f"Orden {order.uuid} cancelada por admin (motivo: {reason!r}). Nunca fue aceptada, Sicar X no fue notificado.")
+
+    try:
+        await notify_order_cancelled(order)
+    except Exception as e:
+        logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
+
+    return order, was_accepted
 
 
 async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, target_status: str) -> Order:

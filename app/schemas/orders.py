@@ -107,6 +107,7 @@ class OrderPublic(CamelModel):
     delivery_info: dict[str, Any]
     items: list[dict[str, Any]]
     created_at: datetime
+    cancellation_reason: Optional[str] = Field(default=None, description="Motivo de cancelación si un admin canceló la orden (POST /admin/orders/{uuid}/cancel). Null si nunca se canceló o si fue el cliente quien canceló.")
 
 class OrderListResponse(CamelModel):
     total: int

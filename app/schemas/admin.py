@@ -73,6 +73,7 @@ class AdminOrderPublic(CamelModel):
     delivery_address: Optional[ClientAddressPublic] = None
     # None hasta que POST .../shipping/generate tenga exito una vez - ver Order.shipping_label.
     shipping_label: Optional[ShippingLabelInfo] = None
+    cancellation_reason: Optional[str] = None
 
 class AdminOrderListResponse(CamelModel):
     total: int
@@ -88,6 +89,17 @@ class OrderAcceptResponse(CamelModel):
     dispatch_status: str
     sync_status: Literal["QUEUED"] = "QUEUED"
     note: str = "La aceptación ya se aplicó localmente (dispatchStatus = PENDING); se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
+
+class AdminOrderCancelRequest(CamelModel):
+    reason: str = Field(min_length=1, description="Motivo de cancelación, visible para el cliente")
+
+class AdminOrderCancelResponse(CamelModel):
+    order_uuid: str
+    cancelled_at: datetime
+    reason: str
+    status: Literal["CANCELLED"] = "CANCELLED"
+    sync_status: Literal["QUEUED", "NOT_NEEDED"]
+    note: str
 
 class AdvanceDispatchStatusRequest(CamelModel):
     dispatch_status: Literal["PREPARING", "COMPLETE", "DISPATCHED"] = Field(

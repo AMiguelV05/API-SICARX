@@ -103,6 +103,7 @@ ver `FRONTEND_INTEGRATION.md` para el shape completo, no lo repetimos aqui:
   "totalQuantity": 3,
   "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
   "createdAt": "2026-07-10T18:32:05Z",
+  "cancellationReason": null,
   "clientEmail": "juan@example.com",
   "clientName": "Juan Pérez"
 }
@@ -112,6 +113,11 @@ ver `FRONTEND_INTEGRATION.md` para el shape completo, no lo repetimos aqui:
 puede seguir en curso cuando llega este webhook** (y si nunca fue aceptado, no se le avisa
 nada a Sicar X en absoluto) - la cancelacion local ya es un hecho consumado de cualquier
 forma, ver `POST /v1/orders/{order_id}/cancel` en `FRONTEND_INTEGRATION.md`.
+
+**`cancellationReason`** es un campo nuevo en este body: `null` cuando el disparador fue el
+cliente (self-cancel, `DELETE`, o pago rechazado/cancelado en Mercado Pago) o un texto libre
+cuando un administrador canceló el pedido vía `POST /v1/admin/orders/{orderUuid}/cancel` (ver
+arriba) — úsalo para distinguir ambos casos en la notificación que le muestres al cliente.
 
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/order-sicar-sync-failed`
 
@@ -312,7 +318,8 @@ Respuesta `200`:
   "acceptedAt": null,
   "acceptedBy": null,
   "deliveryCompany": null,
-  "deliveryAssignedAt": null
+  "deliveryAssignedAt": null,
+  "cancellationReason": null
 }
 ```
 
@@ -322,7 +329,10 @@ Mismo shape base que `GET /v1/auth/me/orders/{orderUuid}` en el storefront (ver
 expone), y los cuatro campos nuevos de aceptación/mensajería (`acceptedAt`/`acceptedBy`/
 `deliveryCompany`/`deliveryAssignedAt`). `404` si el `orderUuid` no existe (o está soft-deleted y
 no se mandó `includeDeleted=true`) — esta ruta no filtra por dueño, así que un `orderUuid` válido
-de cualquier cliente siempre resuelve.
+de cualquier cliente siempre resuelve. `cancellationReason` (también expuesto en
+`GET /v1/auth/me/orders/{orderUuid}` del storefront, no solo aquí) es `null` salvo que la orden
+haya sido cancelada vía `POST .../cancel` de abajo — una cancelación hecha por el propio cliente
+deja este campo en `null`.
 
 ### `POST /v1/admin/orders/{orderUuid}/accept` — aceptar un pedido
 
@@ -355,6 +365,48 @@ avisarle a Sicar X: eso ocurre en el siguiente ciclo del worker (cada minuto), v
 `sicar_sync_outbox` que ya usa la cancelación. Si sospechas que ese aviso no llegó, consulta
 `GET /v1/admin/sync/outbox?status=FAILED`. `404` si el pedido no existe (o está soft-deleted). `409`
 si el pedido ya fue aceptado antes (`acceptedAt` ya tenía un valor) — no se puede "re-aceptar".
+
+### `POST /v1/admin/orders/{orderUuid}/cancel` — cancelar un pedido como administrador
+
+```http
+POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/cancel
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "reason": "Producto agotado en tienda" }
+```
+
+`reason` es **obligatorio y no puede estar vacío** — a diferencia de `acceptedBy` en `/accept`,
+esto no es solo auditoría interna: queda guardado en la orden (`cancellationReason`, visible en
+`GET .../orders/{orderUuid}` de arriba y en `GET /v1/auth/me/orders/{orderUuid}` del storefront)
+y viaja en el webhook `order-cancelled` de abajo — es lo que el cliente ve como motivo de su
+cancelación. No hay `cancelledBy` en este contrato — no existe todavía un sistema de usuarios
+admin real detrás de `X-Admin-Key` para identificar quién canceló (mismo motivo por el que
+`acceptedBy` en `/accept` es texto libre y opcional).
+
+Respuesta `200`:
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "cancelledAt": "2026-08-07T19:35:29Z",
+  "reason": "Producto agotado en tienda",
+  "status": "CANCELLED",
+  "syncStatus": "QUEUED",
+  "note": "La cancelación ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona vía sicar_sync_outbox."
+}
+```
+
+Mismo mecanismo de fondo que `POST /v1/orders/{order_id}/cancel` del storefront (ver
+`FRONTEND_INTEGRATION.md`): stock/reserva local restaurados de inmediato, cualquier pago de
+Mercado Pago pendiente/aprobado se reembolsa/cancela primero, y — a diferencia de
+`DELETE /v1/orders/{order_id}` del storefront — **esta ruta nunca hace soft-delete**: la orden
+sigue apareciendo en el historial del cliente, ahora como `CANCELLED` con su `reason`. `syncStatus`
+es `"QUEUED"` si la orden ya había sido aceptada (`POST .../accept`, así que Sicar X ya sabía de
+ella y hay que avisarle de forma asíncrona vía `sicar_sync_outbox`, igual que `/accept`) o
+`"NOT_NEEDED"` si nunca fue aceptada (Sicar X nunca se enteró de esta orden, no hay nada que
+sincronizar). `404` si el pedido no existe (o está soft-deleted). `409` si ya está `CANCELLED`, o
+si `dispatchStatus` ya es `DISPATCHED` (`COMPLETE` sigue siendo cancelable — también es el estado
+terminal de pedidos `PICKUP`, que nunca se "enviaron" a ningún lado).
 
 ### `POST /v1/admin/orders/{orderUuid}/advance-status` — avanzar (o revertir) el estado de cumplimiento
 

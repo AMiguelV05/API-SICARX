@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Numeric, JSON, DateTime, ForeignKey, Index, UniqueConstraint, func, text
+from sqlalchemy import Column, Integer, String, Text, Numeric, JSON, DateTime, ForeignKey, Index, UniqueConstraint, func, text
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -65,6 +65,10 @@ class Order(Base):
     # Metadato local de mensajeria, texto libre - sin llamada a ninguna API de paqueteria.
     delivery_company = Column(String, nullable=True)
     delivery_assigned_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Motivo de cancelacion cuando un admin cancela la orden (POST /admin/orders/{uuid}/cancel).
+    # NULL para cancelaciones del cliente (POST /orders/{id}/cancel, DELETE, pago rechazado).
+    cancellation_reason = Column(Text, nullable=True)
 
     client_account = relationship("ClientAccount", back_populates="orders")
 

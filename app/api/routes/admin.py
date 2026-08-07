@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, HTTPException, Query, status
 from app.core.database import DbDep
@@ -12,6 +13,8 @@ from app.schemas.admin import (
     AdminOrderPublic,
     OrderAcceptRequest,
     OrderAcceptResponse,
+    AdminOrderCancelRequest,
+    AdminOrderCancelResponse,
     AdvanceDispatchStatusRequest,
     AdvanceDispatchStatusResponse,
     DeliveryAssignRequest,
@@ -109,6 +112,30 @@ async def admin_accept_order(order_uuid: str, db: DbDep, data: OrderAcceptReques
     este punto."""
     order = await admin_service.accept_order(db, order_uuid, data.accepted_by)
     return OrderAcceptResponse(order_uuid=order.uuid, accepted_at=order.accepted_at, accepted_by=order.accepted_by, dispatch_status=order.dispatch_status)
+
+
+@router.post("/orders/{order_uuid}/cancel", response_model=AdminOrderCancelResponse, summary="Cancelar una orden como administrador")
+async def admin_cancel_order(order_uuid: str, db: DbDep, data: AdminOrderCancelRequest = Body()):
+    """Cancela localmente cualquier orden (`status = "CANCELLED"`, stock/reserva
+    restaurados), con un `reason` obligatorio que queda guardado en la orden y viaja en el
+    webhook `order-cancelled` - visible para el cliente, a diferencia de una cancelación
+    hecha por el propio cliente (`reason` queda `null` en ese caso). Mismo gating que
+    `POST /orders/{id}/cancel`: `409` si ya está `CANCELLED` o si `dispatchStatus` ya es
+    `DISPATCHED` (COMPLETE sigue siendo cancelable - también es terminal para pedidos
+    PICKUP). Si la orden ya había sido aceptada, se le avisa a Sicar X de forma asíncrona
+    vía `sicar_sync_outbox`; si nunca fue aceptada, no hay nada que sincronizar."""
+    order, was_accepted = await admin_service.cancel_order_admin(db, order_uuid, data.reason)
+    return AdminOrderCancelResponse(
+        order_uuid=order.uuid,
+        cancelled_at=datetime.now(timezone.utc),
+        reason=order.cancellation_reason,
+        sync_status="QUEUED" if was_accepted else "NOT_NEEDED",
+        note=(
+            "La cancelación ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona vía sicar_sync_outbox."
+            if was_accepted
+            else "La cancelación ya se aplicó localmente. Sicar X nunca fue notificado de esta orden, así que no hay nada que sincronizar."
+        ),
+    )
 
 
 @router.post("/orders/{order_uuid}/advance-status", response_model=AdvanceDispatchStatusResponse, summary="Avanzar (o revertir un paso) el dispatchStatus de una orden")
