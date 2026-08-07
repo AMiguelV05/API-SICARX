@@ -14,7 +14,7 @@ from app.schemas.attribute import (
     PatchVariantGroupProductsResponse,
     VariantGroupProductsResponse,
 )
-from app.schemas.products import ProductBasic
+from app.schemas.products import ProductAdminBasic
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
@@ -90,4 +90,4 @@ async def admin_list_variant_group_products(
     offset: int = Query(default=0, ge=0),
 ):
     total, products = await attribute_service.list_variant_group_products(db, variant_group_uuid, limit, offset)
-    return VariantGroupProductsResponse(total=total, docs=[ProductBasic.model_validate(p) for p in products])
+    return VariantGroupProductsResponse(total=total, docs=[ProductAdminBasic.model_validate(p) for p in products])

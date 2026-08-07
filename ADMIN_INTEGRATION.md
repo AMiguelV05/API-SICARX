@@ -47,6 +47,109 @@ storefront (que siempre exige `x-api-key`), este router **no** valida `x-api-key
   defecto), **todas** las rutas de `/v1/admin/*` responden `401` sin importar qué se envíe —
   es el comportamiento seguro-por-defecto mientras no exista un valor real que verificar.
 
+## Webhooks salientes hacia el dashboard admin
+
+Ademas de las rutas de `/v1/admin/*` que el dashboard llama hacia esta API (documentadas
+abajo), esta API llama **hacia el dashboard** en 3 situaciones puntuales. Implementa estas 3
+rutas en el backend/servidor del dashboard (nunca las recibe el navegador, mismo criterio
+"server-to-server" de arriba) para recibirlas.
+
+**Verificacion de firma** (obligatoria, misma formula para las 3 - no se repite en cada una):
+
+```http
+POST /api/webhooks/<lo que corresponda>
+Content-Type: application/json
+X-Webhook-Timestamp: 1783961178
+X-Webhook-Signature: 3f2a9c...  (hex, HMAC-SHA256)
+```
+
+```
+manifest = "{X-Webhook-Timestamp}." + <raw request body, tal cual, sin re-serializar>
+signature = hex(HMAC_SHA256(ADMIN_WEBHOOK_SECRET, manifest))
+```
+
+`ADMIN_WEBHOOK_SECRET` es un secreto **distinto** de `ADMIN_API_KEY` de arriba (ese autentica
+llamadas *hacia* esta API; este firma llamadas *desde* esta API hacia el dashboard - un leak
+de uno no compromete al otro) y se entrega por el mismo canal seguro fuera de este repo, nunca
+documentado aqui. Recalcula `signature` con el mismo secreto y comparala contra
+`X-Webhook-Signature` con una comparacion en tiempo constante (no `===`/`==`), usando el
+**body crudo** para el HMAC - un JSON re-serializado puede no ser byte-a-byte identico al
+original. Rechaza tambien si `X-Webhook-Timestamp` tiene mas de ~5 minutos de antiguedad
+(proteccion contra replay).
+
+**Sin reintentos de este lado para las 3** - responde `200` rapido; si tu endpoint falla o
+tarda, esta API no reintenta automaticamente (mismo comportamiento que los webhooks hacia el
+storefront, ver `FRONTEND_INTEGRATION.md`).
+
+**Si `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET` no estan configurados del lado de esta
+API, las 3 llamadas se omiten silenciosamente** (se loguea a nivel INFO, no hay error
+visible) - confirma con el equipo de backend que ambos estan configurados en produccion antes
+de asumir que estas notificaciones estan llegando.
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-cancelled`
+
+Se llama en el momento exacto en que un pedido pasa a `"CANCELLED"` - mismo disparador
+(cliente cancela/elimina, o pago rechazado/cancelado en Mercado Pago) y mismo body
+(`OrderPublic` mas `clientEmail`/`clientName`) que el webhook homonimo hacia el storefront -
+ver `FRONTEND_INTEGRATION.md` para el shape completo, no lo repetimos aqui:
+
+```json
+{
+  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "status": "CANCELLED",
+  "dispatchStatus": "PENDING_ACCEPTANCE",
+  "total": 129.99,
+  "totalQuantity": 3,
+  "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
+  "createdAt": "2026-07-10T18:32:05Z",
+  "clientEmail": "juan@example.com",
+  "clientName": "Juan Pérez"
+}
+```
+
+**Importante - si el pedido ya habia sido aceptado por un administrador, avisarle a Sicar X
+puede seguir en curso cuando llega este webhook** (y si nunca fue aceptado, no se le avisa
+nada a Sicar X en absoluto) - la cancelacion local ya es un hecho consumado de cualquier
+forma, ver `POST /v1/orders/{order_id}/cancel` en `FRONTEND_INTEGRATION.md`.
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-sicar-sync-failed`
+
+Senal de que `sicar_sync_outbox` agoto sus reintentos (`MAX_ATTEMPTS = 5`, backoff
+exponencial 1/2/4/8/16 min) intentando avisarle a Sicar X de un `ACCEPT`/`CANCEL` de
+inventario - requiere reconciliacion **manual** directamente en Sicar X, esta API ya no lo va
+a reintentar sola. Usa `GET /v1/admin/sync/outbox`/`POST .../retry` mas abajo para resolverlo
+desde el dashboard una vez identificado.
+
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "lastError": "Connection timeout after 30s"
+}
+```
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/product-stock-drift`
+
+Senal de que uno o mas productos tienen `reserved` (unidades reservadas por pedidos locales
+todavia no aceptados) por encima de `stock` (el stock real, sincronizado desde Sicar X) - pasa
+cuando el stock real baja por una razon ajena a esta API (venta en tienda, otro canal)
+mientras habia unidades reservadas en linea, dejando `availableStock` en 0 en los endpoints de
+catalogo aunque `reserved` siga reteniendo mas de lo que fisicamente existe (ver `stock`/
+`availableStock` en la seccion de productos por categoria/vehiculo/grupo de variantes/atributo
+mas abajo). Se dispara desde el sync de catalogo (cada 5 minutos) cada vez que la corrida
+termina con al menos un producto en ese estado - puede repetirse en corridas consecutivas
+mientras la deriva no se resuelva manualmente (ajustando el stock en Sicar X o reconciliando
+el pedido correspondiente).
+
+```json
+{
+  "products": [
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "stock": 2.0, "reserved": 3.0 }
+  ]
+}
+```
+
 ## Referencia de endpoints
 
 ### `GET /v1/admin/health` — estado operativo
@@ -659,12 +762,19 @@ subcategorías (a diferencia del filtro `taxonomyUuid` de `/catalog`/`/search`, 
 incluye descendientes — ese es para navegación del storefront, este es para editar un
 nodo puntual). Paginado igual que `/catalog` (`limit` 1-200, default 60; `offset`).
 
+Cada producto trae **ambos** números de stock (a diferencia de `/catalog`/`/search`, que
+solo exponen `stock` = disponible para venta): `stock` es el físico crudo sincronizado
+desde Sicar X, `availableStock` es lo que realmente queda vendible ahora mismo (`stock`
+menos reservas de pedidos locales todavía no aceptados — ver el webhook
+`product-stock-drift` arriba para cuando `availableStock` cae a 0 por una razón ajena a
+esta API).
+
 Respuesta `200`:
 ```json
 {
   "total": 2,
   "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "descriptionDetails": null, "imageUrl": "https://.../taladro.jpg", "price": 899.00, "stock": 12 }
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "descriptionDetails": null, "imageUrl": "https://.../taladro.jpg", "price": 899.00, "stock": 12, "availableStock": 9, "salesCount": 34 }
   ]
 }
 ```
@@ -1060,7 +1170,7 @@ de abajo:
 {
   "total": 2,
   "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "descriptionDetails": null, "imageUrl": null, "price": 8.62, "stock": 2.0, "value": "Rojo" }
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "descriptionDetails": null, "imageUrl": null, "price": 8.62, "stock": 2.0, "availableStock": 2.0, "salesCount": 15.0, "value": "Rojo" }
   ]
 }
 ```

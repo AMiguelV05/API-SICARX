@@ -35,7 +35,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         ))
 
     if filters.get("in_stock"):
-        stmt = stmt.where(Product.stock > 0)
+        stmt = stmt.where(Product.available_stock > 0)
 
     if filters.get("tag"):
         stmt = stmt.where(Product.tags.contains([filters["tag"]]))
@@ -97,7 +97,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         ))
 
     if in_stock:
-        stmt = stmt.where(Product.stock > 0)
+        stmt = stmt.where(Product.available_stock > 0)
 
     count_stmt = select(func.count()).select_from(stmt.subquery())
     total_items = await db.scalar(count_stmt)
@@ -151,7 +151,7 @@ async def get_best_selling_products(db: AsyncSession, limit: int, department_uui
         ))
 
     if in_stock:
-        stmt = stmt.where(Product.stock > 0)
+        stmt = stmt.where(Product.available_stock > 0)
 
     stmt = stmt.order_by(Product.sales_count.desc()).limit(limit)
 

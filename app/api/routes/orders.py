@@ -9,7 +9,7 @@ from app.core.security import validate_api_key, CurrentClientHeaderDep
 from app.core.rate_limit import limiter
 from app.models.order import Order
 from app.services.order_service import validate_cart_items, build_order_payload, _to_decimal
-from app.services.product_stock_service import apply_stock_deltas
+from app.services.product_stock_service import apply_reserved_deltas
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment, prepare_local_cancellation
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
@@ -155,10 +155,11 @@ async def create_order(
         )
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
 
-        # Descuento local de inventario en un solo lote. Sicar X no se entera de esta orden
-        # hasta que un admin la acepte (admin_service.accept_order).
-        deltas = [(item.get("uuid"), -_to_decimal(item.get("quantity", 0))) for item in order_payload_dict["ecOrderDto"]["products"]]
-        await apply_stock_deltas(db, deltas)
+        # Reserva local de inventario en un solo lote (Product.reserved, no Product.stock -
+        # ver CLAUDE.md, "stock sync y ordenes"). Sicar X no se entera de esta orden hasta
+        # que un admin la acepte (admin_service.accept_order); stock real se descuenta ahi.
+        deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in order_payload_dict["ecOrderDto"]["products"]]
+        await apply_reserved_deltas(db, deltas)
 
         local_order = await create_local_order(
             db=db,

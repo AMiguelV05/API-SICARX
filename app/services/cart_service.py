@@ -40,7 +40,7 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
                 name=product.name,
                 imageUrl=product.image_url,
                 price=float(product.price),
-                stock=product.stock,
+                stock=product.available_stock,
                 quantity=quantity,
                 lineTotal=float(line_total_decimal),
                 available=True,

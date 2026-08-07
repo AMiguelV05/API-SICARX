@@ -1,6 +1,7 @@
 from decimal import Decimal
-from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, text
+from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, text, func
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.hybrid import hybrid_property
 from app.core.database import Base
 
 class Product(Base):
@@ -14,6 +15,10 @@ class Product(Base):
         Index("ix_products_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
         # Parcial: solo cubre lo que consulta GET /products/best-sellers y sort_by=relevance (mismo patron que ix_client_addresses_one_default en client.py).
         Index("ix_products_sales_count", "sales_count", postgresql_where=text("is_deleted = false AND is_active = true")),
+        # Expresion, no columna: debe coincidir EXACTAMENTE con available_stock.expression
+        # (GREATEST(stock - reserved, 0)) para que el planner la use en los filtros in_stock
+        # de catalog_service.py (Product.available_stock > 0) - ver migracion 3a208e2812e1.
+        Index("ix_products_available_stock", text("GREATEST(stock - reserved, 0)"), postgresql_where=text("is_deleted = false AND is_active = true")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -40,8 +45,18 @@ class Product(Base):
 
     price = Column(Numeric(10, 2), nullable=False)
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
+    # Verdad de Sicar X: solo lo escribe el upsert de sync_task.py y los dos "espejos"
+    # locales en sicar_sync_worker.py (exito de ACCEPT/CANCEL). Checkout/cancelacion ya NO
+    # lo tocan directamente - ver `reserved` abajo y CLAUDE.md.
     stock = Column(Numeric(12, 3), default=Decimal("0"))
     is_bulk = Column(Boolean, default=False)
+
+    # Reserva local (nunca la maneja Sicar X): suma de cantidades de ordenes locales
+    # abiertas (TO_PAY/PAID) todavia no reflejadas en el stock real de Sicar X. Igual que
+    # sales_count, el upsert de sync_task.py nunca la incluye en product_values, asi que
+    # el sync periodico no puede resetearla - existe justamente para que ese sync no pueda
+    # revertir una reserva de checkout todavia no aceptada. Ver `available_stock` abajo.
+    reserved = Column(Numeric(12, 3), nullable=False, default=Decimal("0"), server_default="0")
 
     # Registro local de unidades vendidas (nunca lo maneja Sicar X) - se incrementa/decrementa
     # en la transicion TO_PAY->PAID y en su reverso via apply_sales_count_deltas (ver
@@ -49,6 +64,21 @@ class Product(Base):
     # esta columna a proposito (ver comentario junto a update_dict ahi) para que el sync
     # periodico no la resetee.
     sales_count = Column(Numeric(12, 3), nullable=False, default=Decimal("0"), server_default="0")
+
+    @hybrid_property
+    def available_stock(self):
+        """Cantidad realmente vendible ahora mismo (stock - reserved). Clamped a 0: si el
+        stock real de Sicar X baja por una razon ajena a este backend (venta en tienda)
+        mientras hay unidades reservadas localmente, reserved puede superar transitoriamente
+        a stock - ver sync_task.py, alerta de deriva. Unica definicion de disponibilidad
+        usada en todo lo cara al cliente (catalogo, busqueda, carrito, checkout)."""
+        stock = self.stock if self.stock is not None else Decimal("0")
+        reserved = self.reserved if self.reserved is not None else Decimal("0")
+        return max(stock - reserved, Decimal("0"))
+
+    @available_stock.expression
+    def available_stock(cls):
+        return func.greatest(cls.stock - cls.reserved, 0)
 
     is_active = Column(Boolean, default=True)
     is_deleted = Column(Boolean, default=False)  # Para marcar productos que ya no existen en Sicar

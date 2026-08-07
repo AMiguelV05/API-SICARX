@@ -3,12 +3,13 @@ import asyncio
 import logging
 from decimal import Decimal
 from logging.handlers import RotatingFileHandler
-from sqlalchemy import update
+from sqlalchemy import update, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
 from app.core.database import AsyncSessionLocal
 from app.models.product import Product, SyncStatus
+from app.services import admin_notification_service
 # Necesario para que SQLAlchemy resuelva el ForeignKey de Product.variant_group_uuid -
 # sin este import falla con "could not find table 'variant_groups'".
 from app.models.attribute import VariantGroup  # noqa: F401
@@ -199,6 +200,32 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         except Exception as e:
             await db.rollback()
             logger.error(f"Error de base de datos durante la limpieza: {e}")
+
+        # Alerta de deriva: Product.reserved > Product.stock significa que el stock real de
+        # Sicar X bajo por una razon ajena a este backend (venta en tienda, otro canal)
+        # mientras habia unidades reservadas localmente - ver Product.available_stock y
+        # admin_notification_service.notify_admin_stock_drift.
+        try:
+            drift_result = await db.execute(
+                select(Product.sicar_uuid, Product.sku, Product.name, Product.stock, Product.reserved)
+                .where(Product.reserved > Product.stock, Product.is_deleted == False, Product.is_active == True)
+            )
+            drift_rows = drift_result.all()
+            if drift_rows:
+                drift_products = [
+                    {
+                        "sicarUuid": row.sicar_uuid,
+                        "sku": row.sku,
+                        "name": row.name,
+                        "stock": float(row.stock),
+                        "reserved": float(row.reserved),
+                    }
+                    for row in drift_rows
+                ]
+                logger.warning(f"Deriva de stock detectada: {len(drift_products)} producto(s) con reserved > stock.")
+                await admin_notification_service.notify_admin_stock_drift(drift_products)
+        except Exception as e:
+            logger.error(f"Error verificando deriva de stock (reserved > stock): {e}")
 
     return total_procesados, deactivated_count, sync_completed_successfully
 

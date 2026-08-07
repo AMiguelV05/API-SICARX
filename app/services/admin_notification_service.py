@@ -11,6 +11,7 @@ from app.core.webhook_signing import sign_hmac_sha256
 
 ORDER_CANCELLED_WEBHOOK_PATH = "/api/webhooks/order-cancelled"
 SICAR_SYNC_FAILED_WEBHOOK_PATH = "/api/webhooks/order-sicar-sync-failed"
+STOCK_DRIFT_WEBHOOK_PATH = "/api/webhooks/product-stock-drift"
 WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
 logger = logging.getLogger(__name__)
@@ -63,3 +64,12 @@ async def notify_admin_sicar_sync_failed(order: Order, last_error: str) -> None:
         "lastError": last_error,
     }
     await _post_to_admin(SICAR_SYNC_FAILED_WEBHOOK_PATH, body, f"Sincronizacion con Sicar X agotada para la orden {order.uuid}")
+
+async def notify_admin_stock_drift(products: list[dict]) -> None:
+    """Señal de que Product.reserved supera a Product.stock para uno o mas productos - el
+    stock real de Sicar X bajo por una razon ajena a este backend (venta en tienda, otro
+    canal) mientras habia unidades reservadas localmente, asi que Product.available_stock
+    quedo en 0 aunque `reserved` siga reteniendo mas de lo que fisicamente existe. Llamada
+    desde sync_task.py tras cada corrida exitosa del sync de catalogo."""
+    body = {"products": products}
+    await _post_to_admin(STOCK_DRIFT_WEBHOOK_PATH, body, f"Deriva de stock detectada en {len(products)} producto(s) (reserved > stock)")

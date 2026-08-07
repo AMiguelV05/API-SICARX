@@ -26,8 +26,7 @@ async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantitie
 
         if (
             product is None
-            or product.stock is None
-            or Decimal(str(requested_qty)) > product.stock
+            or Decimal(str(requested_qty)) > product.available_stock
             or product.price is None
             or product.price <= 0
         ):

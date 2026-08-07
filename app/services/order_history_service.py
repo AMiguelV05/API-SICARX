@@ -10,7 +10,7 @@ from app.models.order import Order, SicarSyncOutbox
 from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_service import _to_decimal
-from app.services.product_stock_service import apply_stock_deltas, apply_sales_count_deltas
+from app.services.product_stock_service import apply_reserved_deltas, apply_sales_count_deltas
 
 logger = logging.getLogger(__name__)
 
@@ -106,12 +106,20 @@ async def get_order_by_uuid(db: AsyncSession, order_uuid: str) -> Order | None:
 async def prepare_local_cancellation(
     db: AsyncSession, order: Order, *, cash_register_uuid: str | None = None, require_status: str | None = None,
 ) -> Order:
-    """Cancela LOCALMENTE sin tocar Sicar X todavia: relockea la fila, restaura stock,
-    marca CANCELLED y, solo si la orden ya habia sido aceptada (`accepted_at is not
-    None`), encola una fila en sicar_sync_outbox para que el worker avise a Sicar X de
-    forma asincrona con reintentos (si nunca fue aceptada, Sicar X nunca supo de esta
-    orden). Unico punto llamado por las 3 rutas de cancelacion (POST /cancel, DELETE,
-    rama rejected/cancelled de finalize_order_payment) - no duplicar esta logica.
+    """Cancela LOCALMENTE sin tocar Sicar X todavia: relockea la fila, marca CANCELLED y,
+    solo si la orden ya habia sido aceptada (`accepted_at is not None`), encola una fila en
+    sicar_sync_outbox para que el worker avise a Sicar X de forma asincrona con reintentos
+    (si nunca fue aceptada, Sicar X nunca supo de esta orden). Unico punto llamado por las
+    3 rutas de cancelacion (POST /cancel, DELETE, rama rejected/cancelled de
+    finalize_order_payment) - no duplicar esta logica.
+
+    Inventario: si `accepted_at is None`, la orden solo tenia una reserva local
+    (Product.reserved, ver checkout en routes/orders.py) que se libera aqui mismo - Sicar X
+    nunca supo de esta orden, nada que reconciliar. Si ya fue aceptada, Product.stock ya fue
+    descontado de forma local+real al aceptar (ver sicar_sync_worker.py) y su restauracion
+    ocurre de forma asincrona cuando el CANCEL encolado abajo tenga exito en el worker - no
+    se toca inventario local aqui en ese caso (evita la reversion "instantanea pero
+    incorrecta" que el siguiente sync periodico terminaba revirtiendo de nuevo).
 
     SELECT...FOR UPDATE + re-chequeo de status DENTRO del lock es el unico mutex real
     ahora que no hay llamada sincrona a Sicar X que serialice cancelaciones concurrentes -
@@ -142,7 +150,11 @@ async def prepare_local_cancellation(
     was_paid = order.status == "PAID"
 
     deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
-    await apply_stock_deltas(db, deltas)
+    if order.accepted_at is None:
+        # Nunca se le aviso a Sicar X de esta orden - solo liberar el hold local.
+        await apply_reserved_deltas(db, [(product_uuid, -qty) for product_uuid, qty in deltas])
+    # else: la restauracion de Product.stock ocurre en sicar_sync_worker.py cuando el
+    # SicarSyncOutbox(action="CANCEL") encolado abajo tenga exito.
     if was_paid:
         await apply_sales_count_deltas(db, [(product_uuid, -qty) for product_uuid, qty in deltas])
 

@@ -83,6 +83,8 @@ async def admin_list_attribute_products(
             image_url=p.image_url,
             price=p.price,
             stock=p.stock,
+            available_stock=p.available_stock,
+            sales_count=p.sales_count,
             value=(p.attributes or {}).get(attribute.slug),
         )
         for p in products

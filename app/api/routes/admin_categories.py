@@ -13,7 +13,7 @@ from app.schemas.taxonomy import (
     PatchCategoryProductsResponse,
     CategoryProductsResponse,
 )
-from app.schemas.products import ProductBasic
+from app.schemas.products import ProductAdminBasic
 from app.services import taxonomy_service
 
 logger = logging.getLogger(__name__)
@@ -95,4 +95,4 @@ async def admin_list_category_products(
     para eso esta el filtro `taxonomyUuid` de `/catalog`/`/search`). Pensada para poblar
     la UI de edicion antes de un PUT de arriba."""
     total, products = await taxonomy_service.list_category_products(db, category_uuid, limit, offset)
-    return CategoryProductsResponse(total=total, docs=[ProductBasic.model_validate(p) for p in products])
+    return CategoryProductsResponse(total=total, docs=[ProductAdminBasic.model_validate(p) for p in products])

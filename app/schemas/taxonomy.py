@@ -3,7 +3,7 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import Field, model_validator
 from app.schemas.base import CamelModel
-from app.schemas.products import ProductBasic
+from app.schemas.products import ProductAdminBasic
 
 class CategoryNode(CamelModel):
     """Nodo recursivo del arbol de categorias; reemplaza Department/Category (ya no hay distincion) - cambio de forma respecto a la version anterior, requiere actualizar el frontend."""
@@ -42,7 +42,7 @@ class ReplaceCategoryProductsResponse(CamelModel):
 
 class CategoryProductsResponse(CamelModel):
     total: int
-    docs: List[ProductBasic]
+    docs: List[ProductAdminBasic]
 
 class PatchCategoryProductsRequest(CamelModel):
     """Incremental (a diferencia de ReplaceCategoryProductsRequest): agrega/quita sin

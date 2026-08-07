@@ -3,7 +3,7 @@ from typing import List, Optional
 from datetime import datetime
 from pydantic import Field, model_validator
 from app.schemas.base import CamelModel
-from app.schemas.products import ProductBasic, DataType, AttributeValue, AttributeValuePublic
+from app.schemas.products import ProductAdminBasic, DataType, AttributeValue, AttributeValuePublic
 
 # Admin (/v1/admin/attributes/*, /v1/admin/attribute-presets/*, /v1/admin/variant-groups/*):
 # catalogo de definiciones de atributos + bundles de conveniencia + agrupacion de variantes.
@@ -51,10 +51,11 @@ class AttributeListResponse(CamelModel):
     docs: List[AttributePublic]
 
 
-class AttributeProductPublic(ProductBasic):
-    """ProductBasic + el valor guardado de ESTE atributo - a diferencia de ProductBasic
-    puro (usado por categorias/vehiculos, sin valor por definicion), aqui hay un valor
-    real que mostrar junto con cada producto en la UI de edicion."""
+class AttributeProductPublic(ProductAdminBasic):
+    """ProductAdminBasic (stock crudo + available_stock, vista admin) + el valor guardado
+    de ESTE atributo - a diferencia de ProductAdminBasic puro (usado por
+    categorias/vehiculos, sin valor por definicion), aqui hay un valor real que mostrar
+    junto con cada producto en la UI de edicion."""
     value: AttributeValue = None
 
 
@@ -208,7 +209,7 @@ class ReplaceVariantGroupProductsResponse(CamelModel):
 
 class VariantGroupProductsResponse(CamelModel):
     total: int
-    docs: List[ProductBasic]
+    docs: List[ProductAdminBasic]
 
 
 class PatchVariantGroupProductsRequest(CamelModel):

@@ -10,6 +10,8 @@ from app.models.order import Order, SicarSyncOutbox
 # sin este import falla con "failed to locate a name ('ClientAccount')".
 from app.models.client import ClientAccount  # noqa: F401
 from app.services.sicar_stock_service import apply_order_stock_delta
+from app.services.product_stock_service import apply_stock_deltas, apply_reserved_deltas
+from app.services.order_service import _to_decimal
 from app.services import admin_notification_service
 
 logger = logging.getLogger(__name__)
@@ -66,16 +68,31 @@ async def _process_claimed_row(row_id: int) -> None:
             return
 
         try:
+            item_deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
+
             if row.action == "ACCEPT":
                 # Unico punto donde este backend le avisa algo a Sicar X: descuento de inventario.
                 await apply_order_stock_delta(order.items, order.branch_id, sign=-1)
+                # Espejo local, en el mismo commit que SUCCEEDED (ver comentario de atomicidad
+                # abajo): descuenta Product.stock de inmediato (en vez de esperar el proximo
+                # sync de 5 min) y libera el hold en Product.reserved - la reserva ya quedo
+                # materializada permanentemente en el stock real de Sicar X.
+                await apply_stock_deltas(session, [(uuid, -qty) for uuid, qty in item_deltas])
+                await apply_reserved_deltas(session, [(uuid, -qty) for uuid, qty in item_deltas])
             elif row.action == "CANCEL":
                 # Reversion del descuento; solo se encola si la orden ya habia sido aceptada.
                 await apply_order_stock_delta(order.items, order.branch_id, sign=1)
+                # Espejo local de la restauracion - reserved no se toca aqui, ya se libero al
+                # aceptar (rama ACCEPT arriba).
+                await apply_stock_deltas(session, item_deltas)
             else:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
 
             row.status = "SUCCEEDED"
+            # Atomico junto con el espejo local de stock/reserved arriba: si el proceso
+            # muere antes de este commit, la fila sigue IN_PROGRESS y se vuelve a reclamar
+            # tras STALE_LEASE_MINUTES, reintentando la llamada a Sicar X y el espejo local
+            # juntos - nunca queda uno aplicado sin el otro.
             await session.commit()
             logger.info(f"Sincronizacion con Sicar X exitosa para la orden {order.uuid} (sicar_sync_outbox {row.id}, accion={row.action}).")
         except Exception as e:

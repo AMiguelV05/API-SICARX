@@ -3,7 +3,7 @@ from typing import List, Literal, Optional
 from datetime import datetime
 from pydantic import Field, model_validator
 from app.schemas.base import CamelModel
-from app.schemas.products import ProductBasic
+from app.schemas.products import ProductAdminBasic
 
 # Admin (/v1/admin/vehicles/*): CRUD de fitments y asignacion de productos; el surface publico de solo lectura vive en routes/vehicles.py.
 
@@ -49,7 +49,7 @@ class ReplaceVehicleProductsResponse(CamelModel):
 
 class VehicleProductsResponse(CamelModel):
     total: int
-    docs: List[ProductBasic]
+    docs: List[ProductAdminBasic]
 
 class PatchVehicleProductsRequest(CamelModel):
     """Incremental (a diferencia de ReplaceVehicleProductsRequest): agrega/quita sin

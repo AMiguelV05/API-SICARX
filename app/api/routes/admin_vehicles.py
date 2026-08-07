@@ -18,7 +18,7 @@ from app.schemas.vehicle import (
     AssignProductsToModelRequest,
     AssignProductsToModelResponse,
 )
-from app.schemas.products import ProductBasic
+from app.schemas.products import ProductAdminBasic
 from app.services import vehicle_service
 
 logger = logging.getLogger(__name__)
@@ -153,4 +153,4 @@ async def admin_list_vehicle_products(
     """Lista paginada de productos asignados directamente a un vehiculo. Pensada para
     poblar la UI de edicion antes de un PUT de arriba."""
     total, products = await vehicle_service.list_vehicle_products(db, vehicle_uuid, limit, offset)
-    return VehicleProductsResponse(total=total, docs=[ProductBasic.model_validate(p) for p in products])
+    return VehicleProductsResponse(total=total, docs=[ProductAdminBasic.model_validate(p) for p in products])

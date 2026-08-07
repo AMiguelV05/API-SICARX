@@ -107,7 +107,7 @@ async def get_product_details(uuid: str, db: DbDep):
         department_uuid=product.department_uuid,
         category_uuid=product.category_uuid,
         price=product.price,
-        stock=product.stock,
+        stock=product.available_stock,
         is_bulk=product.is_bulk,
         is_active=product.is_active,
         is_deleted=product.is_deleted,

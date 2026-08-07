@@ -750,7 +750,7 @@ async def get_variant_group_detail(db: AsyncSession, product: Product) -> dict |
                 "name": s.name,
                 "image_url": s.image_url,
                 "price": s.price,
-                "stock": s.stock,
+                "stock": s.available_stock,
                 "value": _value_for(s),
             }
             for s in siblings

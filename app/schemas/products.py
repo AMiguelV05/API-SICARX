@@ -55,8 +55,23 @@ class ProductBasic(CamelModel):
     description_details: Optional[str]
     image_url: Optional[str]
     price: float
-    stock: float
+    # Fuente real es Product.available_stock (stock - reserved), no Product.stock crudo -
+    # ver CLAUDE.md, "stock sync y ordenes". El alias mantiene el wire format ("stock") sin
+    # cambios para el frontend. Vistas admin/PIM: ver ProductAdminBasic abajo, que expone
+    # ambos numeros en vez de solo este.
+    stock: float = Field(
+        validation_alias="available_stock", serialization_alias="stock",
+        description="Cantidad disponible para venta ahora mismo (stock real menos reservas de ordenes locales todavia no aceptadas) - no el stock fisico crudo.",
+    )
     sales_count: float
+
+class ProductAdminBasic(ProductBasic):
+    """ProductBasic pero para vistas admin/PIM (productos por categoria/vehiculo/grupo de
+    variantes/atributo) - a diferencia de las vistas cara al cliente, aqui `stock` vuelve a
+    ser el fisico crudo de Sicar X y se agrega `available_stock` aparte, para que el admin
+    vea ambos numeros a la vez en vez de solo uno."""
+    stock: float = Field(description="Stock fisico crudo, sincronizado directamente desde Sicar X (sin descontar reservas locales).")
+    available_stock: float = Field(description="Cantidad disponible para venta ahora mismo (stock - reservas de ordenes locales todavia no aceptadas) - lo mismo que ve el cliente en el catalogo.")
 
 class LocalCatalogResponse(CamelModel):
     total: int

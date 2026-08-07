@@ -1480,6 +1480,16 @@ nunca supo que este pedido existía. Solo si el pedido ya había sido aceptado (
 inventario que se le había avisado al aceptarlo. Ninguno de los dos casos cambia la respuesta
 que ves aquí ni requiere ningún manejo distinto del lado del frontend.
 
+**Actualización (2026-08-07)**: matiza "el stock restaurado de inmediato" de arriba — sigue
+siendo exactamente así en el caso normal (pedido nunca aceptado). Si el pedido **sí** había
+sido aceptado, el stock disponible (`stock` en `/v1/products`/`/v1/search`, que ya representa
+lo vendible neto de reservas) se restaura recién cuando el aviso asíncrono a Sicar X del
+párrafo de arriba tiene éxito — normalmente bien por debajo de un minuto, hasta ~16 minutos en
+el peor caso si Sicar X está teniendo problemas. Nada cambia en la respuesta de esta llamada ni
+en que la cancelación ya es definitiva de inmediato para el cliente — el único efecto práctico
+es que, solo en ese caso puntual, el producto puede tardar un poco en volver a mostrarse con
+stock disponible en el catálogo.
+
 Errores esperables:
 - `401` — falta o es inválido `X-Client-Token`
 - `404` — el pedido no existe o no pertenece a la cuenta autenticada
