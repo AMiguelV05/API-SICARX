@@ -1,6 +1,6 @@
 import logging
 from decimal import Decimal
-from sqlalchemy import update, bindparam
+from sqlalchemy import update, bindparam, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.product import Product
 
@@ -21,7 +21,13 @@ async def apply_stock_deltas(db: AsyncSession, deltas: list[tuple[str, Decimal]]
     await db.execute(stmt, params)
 
 async def apply_reserved_deltas(db: AsyncSession, deltas: list[tuple[str, Decimal]]) -> None:
-    """Ajustes de reserved en lote (executemany) por sicar_uuid; no hace commit, es responsabilidad del llamador."""
+    """Ajustes de reserved en lote (executemany) por sicar_uuid; no hace commit, es responsabilidad del llamador.
+
+    Clampeado con GREATEST(..., 0): una orden creada antes de que existiera esta reserva
+    (pre-migracion 380517fdd109) nunca incremento `reserved` al hacer checkout, pero su
+    cancelacion igual intenta liberarla - sin el clamp, eso lleva `reserved` a negativo y
+    viola `ck_products_reserved_non_negative`. Inofensivo para el camino normal de reservar
+    (delta positivo nunca activa el clamp)."""
     params = [{"p_uuid": uuid, "p_delta": delta} for uuid, delta in deltas if uuid and delta != 0]
     if not params:
         return
@@ -29,7 +35,7 @@ async def apply_reserved_deltas(db: AsyncSession, deltas: list[tuple[str, Decima
     stmt = (
         update(Product)
         .where(Product.sicar_uuid == bindparam("p_uuid"))
-        .values(reserved=Product.reserved + bindparam("p_delta"))
+        .values(reserved=func.greatest(Product.reserved + bindparam("p_delta"), 0))
         .execution_options(dml_strategy="core_only")
     )
     await db.execute(stmt, params)
