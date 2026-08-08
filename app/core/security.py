@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import secrets
 import time
@@ -99,9 +100,12 @@ async def verify_password(password: str, hashed_password: str) -> bool:
     return await asyncio.to_thread(_verify_password_sync, password, hashed_password)
 
 def create_client_token(client_uuid: str) -> str:
-    """Genera el JWT de sesión para una cuenta de cliente registrada localmente."""
-    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.CLIENT_JWT_EXPIRE_MINUTES)
-    payload = {"sub": client_uuid, "exp": expire}
+    """Genera el JWT de sesión para una cuenta de cliente registrada localmente. Lleva
+    `iat` explícito (PyJWT no lo agrega solo) para que _resolve_client_from_token pueda
+    invalidar tokens emitidos antes del último cambio de password de la cuenta."""
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=settings.CLIENT_JWT_EXPIRE_MINUTES)
+    payload = {"sub": client_uuid, "exp": expire, "iat": now}
     return jwt.encode(payload, settings.CLIENT_JWT_SECRET, algorithm=CLIENT_JWT_ALGORITHM)
 
 EMAIL_VERIFICATION_EXPIRE_MINUTES = 60 * 24  # 24 horas
@@ -132,6 +136,21 @@ def decode_email_verification_token(token: str) -> str:
 
     return payload.get("sub")
 
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = 30  # corto a proposito, mas sensible que verificar correo
+
+def generate_password_reset_token() -> str:
+    """Token de un solo uso para POST /auth/reset-password. A diferencia de
+    create_email_verification_token, NO es un JWT - se persiste (hasheado, ver
+    hash_reset_token) en password_reset_tokens para poder marcarlo usado/invalidarlo,
+    algo que un JWT stateless no permite. 256 bits de entropia, suficiente sin necesidad
+    de un hash lento tipo bcrypt para guardarlo."""
+    return secrets.token_urlsafe(32)
+
+def hash_reset_token(token: str) -> str:
+    """Hash determinista (no bcrypt) del token de reset, para buscarlo en
+    password_reset_tokens.token_hash sin persistir el valor en texto plano."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
 async def _resolve_client_from_token(token: str, db: AsyncSession) -> ClientAccount:
     """
     Decodifica un JWT de cuenta de cliente (emitido por `create_client_token`) y
@@ -157,6 +176,22 @@ async def _resolve_client_from_token(token: str, db: AsyncSession) -> ClientAcco
     client = await db.scalar(select(ClientAccount).where(ClientAccount.uuid == payload.get("sub")))
     if not client or not client.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Cuenta no encontrada o desactivada.")
+
+    # Un cambio de password (reset o PATCH /auth/me) invalida cualquier sesion emitida
+    # antes de ese momento. Tokens sin `iat` (emitidos por una version anterior de
+    # create_client_token, antes de que este claim existiera) se tratan como "siempre
+    # anteriores" - solo importa si esta cuenta en particular ya cambio su password.
+    # `password_changed_at` se trunca a segundo completo antes de comparar: `iat` de un JWT
+    # solo tiene resolucion de segundos (PyJWT trunca el datetime), asi que un token recien
+    # emitido en el MISMO segundo que el cambio (el caso real de /auth/reset-password, que
+    # loguea automaticamente justo despues de cambiar la password) podia compararse como
+    # "anterior" por los microsegundos de mas que trae `password_changed_at` y quedar
+    # rechazado de inmediato - bug confirmado en pruebas manuales antes de este ajuste.
+    if client.password_changed_at is not None:
+        issued_at = payload.get("iat")
+        changed_at_floor = client.password_changed_at.replace(microsecond=0)
+        if issued_at is None or datetime.fromtimestamp(issued_at, tz=timezone.utc) < changed_at_floor:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La sesión expiró, inicia sesión nuevamente.")
 
     return client
 

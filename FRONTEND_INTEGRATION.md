@@ -278,6 +278,56 @@ enumeración de cuentas registradas) — solo tiene sentido desde "Mi cuenta" o 
 no desde una pantalla pública. `204` sin contenido si se reenvía. `400` si la cuenta ya está
 verificada. Limitado a 5 por minuto por IP.
 
+### `POST /v1/auth/forgot-password` — solicitar recuperación de contraseña
+
+```http
+POST /v1/auth/forgot-password
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "email": "juan@example.com"
+}
+```
+
+Responde `200` **siempre con el mismo body**, exista o no una cuenta con ese correo — a
+propósito, para no habilitar enumeración de cuentas registradas:
+
+```json
+{ "detail": "Si el correo existe, se enviará un enlace de recuperación." }
+```
+
+Si el correo corresponde a una cuenta local activa (con contraseña), dispara el webhook
+`password-reset-requested` (ver más abajo) con un token de un solo uso. Si corresponde a
+una cuenta que solo inicia sesión con Google (sin contraseña local), el webhook igual se
+dispara, pero con `hasPassword: false` y sin token — úsalo para mostrarle a esa persona un
+correo que le explique que su cuenta usa Google, en vez de silencio total. Pedir un nuevo
+reset invalida cualquier token anterior sin usar de la misma cuenta — solo el enlace más
+reciente funciona. Limitado a 5 por minuto por IP.
+
+### `POST /v1/auth/reset-password` — confirmar recuperación de contraseña
+
+```http
+POST /v1/auth/reset-password
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "token": "AaBbCc...",
+  "newPassword": "unaContraseñaNueva123"
+}
+```
+
+`token` es el que llega en el webhook `password-reset-requested` — tu backend arma el link
+(p. ej. `https://tudominio.com/restablecer-contraseña?token=...`) y esta ruta lo confirma
+cuando el usuario lo abre y define su nueva contraseña. **No requiere sesión activa** — el
+token en sí prueba propiedad del correo. Responde `200` con el mismo shape que
+`/v1/auth/login` (`token`/`client`/`cart`) — el usuario queda logueado de inmediato, sin un
+paso extra de login tras el reset. `400` si el token es inválido, ya fue usado, o venció
+(vigencia 30 minutos desde que se generó) — en ese caso, hay que pedir uno nuevo desde
+`/v1/auth/forgot-password`. Cualquier sesión (token JWT) previa de esa cuenta deja de
+funcionar tras un reset exitoso. Limitado a 10 por minuto por IP.
+
 ### `GET /v1/auth/me` — datos de la cuenta (para "Mi cuenta")
 
 ```http
@@ -1360,6 +1410,46 @@ en tiempo constante, rechazar timestamps viejos, usar el body crudo). No la repe
 página del frontend llama a `POST /v1/auth/verify-email` con ese mismo valor. Vigencia de
 24h desde que se generó este webhook; pasado ese tiempo, `/v1/auth/verify-email` responde
 `401` y el usuario necesita pedir uno nuevo desde `/v1/auth/resend-verification`.
+
+**Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde
+`200` rápido, no hay reintento automático si tu endpoint falla.
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/password-reset-requested`
+
+Mismo mecanismo que `verification-requested` arriba — este backend llama a esta ruta
+directamente (nunca el navegador) cuando hay que enviar un correo de recuperación de
+contraseña, justo después de `POST /v1/auth/forgot-password`. Implementa esta ruta para
+disparar el envío real con tu propio template y tu propia cuenta de Resend.
+
+**Verificación de firma**: exactamente el mismo esquema que `order-confirmed` — mismos
+headers, mismo secreto compartido (`FRONTEND_WEBHOOK_SECRET`), misma fórmula de manifest.
+No la repetimos aquí — consulta la sección de `order-confirmed` arriba.
+
+**Body**:
+
+```json
+{
+  "clientUuid": "f6bacfb9-cb38-4f96-adab-2593a14345bc",
+  "clientName": "Juan Pérez",
+  "clientEmail": "juan@example.com",
+  "hasPassword": true,
+  "resetToken": "AaBbCc...",
+  "expiresInMinutes": 30
+}
+```
+
+`hasPassword` distingue dos plantillas de correo distintas:
+
+- `true` — `resetToken`/`expiresInMinutes` vienen poblados. Arma el link con `resetToken`
+  (p. ej. `https://tudominio.com/restablecer-contraseña?token={resetToken}`) — cuando el
+  usuario lo abre, esa página llama a `POST /v1/auth/reset-password` con ese mismo valor.
+  Pasado el TTL, esa ruta responde `400` y el usuario necesita pedir uno nuevo desde
+  `/v1/auth/forgot-password`.
+- `false` — la cuenta es solo-Google (sin contraseña local); `resetToken`/
+  `expiresInMinutes` vienen `null`. No hay nada que resetear — envía un correo distinto
+  explicándole a esa persona que su cuenta inicia sesión con Google, en vez de un link de
+  recuperación. Esta es la única señal de esta distinción: `POST /v1/auth/forgot-password`
+  responde igual en ambos casos, para no filtrar el tipo de cuenta por HTTP.
 
 **Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde
 `200` rápido, no hay reintento automático si tu endpoint falla.

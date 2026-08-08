@@ -261,6 +261,49 @@ Account resolution: match by `google_sub` first (existing Google-linked account)
 
 The actual email send follows the same non-fatal, no-retry, HMAC-signed outbound webhook pattern as order confirmation (`app/services/client_notification_service.py`, mirrors `order_notification_service.py` almost exactly) — `notify_verification_requested`, POSTed to `{FRONTEND_BASE_URL}/api/webhooks/verification-requested`, reusing `FRONTEND_WEBHOOK_SECRET`/`sign_hmac_sha256` (no new secret). Named "verification-**requested**", not "email-verification" — the event is "please send a verification email," not "the email was verified," to avoid confusion with a hypothetical future "verified" event. Fired from `register_client` after commit (local accounts only — Google accounts with `email_verified=true` skip it) and from `resend_verification_email` (`400` if already verified).
 
+### Password reset (`POST /auth/forgot-password`, `POST /auth/reset-password`)
+
+**Deliberately DB-backed and single-use, unlike email verification's stateless JWT.**
+`email_verify` tokens can be safely reused (confirming twice is a no-op), so a stateless
+JWT was enough; a password-reset link is higher-value and must stop working the instant
+it's used or superseded, which a stateless JWT alone can't do without also tracking state
+somewhere — so this reuses no JWT machinery at all. `PasswordResetToken`
+(`app/models/password_reset.py`, migration `d546a205a4be`) stores only `sha256(token)` in
+`token_hash` (unique/indexed) plus `expires_at`/`used_at` — the plain token
+(`secrets.token_urlsafe(32)`, 256 bits of entropy) is never persisted, only emailed once via
+the webhook below. 30-minute TTL (`PASSWORD_RESET_TOKEN_EXPIRE_MINUTES`, `security.py`) —
+deliberately much shorter than email verification's 24h, since this grants account takeover
+if intercepted. `client_service.request_password_reset` marks any prior unused token for
+the same account `used_at` before issuing a new one, so only the most recently requested
+link ever works.
+
+**No enumeration, including of `auth_provider`.** `POST /auth/forgot-password` always
+returns the identical `200` body whether or not the email resolves to an account — same
+principle as `authenticate_client`'s constant-time dummy-hash comparison. A Google-only
+account (`hashed_password IS NULL`) is a special case of this: rather than silently letting
+a "reset" turn a Google account into a hybrid local+Google one (rejected as a design
+option), `request_password_reset` sends **no token** for it, but still fires the
+`password-reset-requested` webhook with `has_password=False` — the "you sign in with
+Google" messaging only ever reaches the actual inbox, never the HTTP response, so the API
+itself never reveals which case occurred.
+
+**Password changes now invalidate other sessions — closes a real pre-existing gap.**
+Before this, `PATCH /auth/me`'s password-change path updated `hashed_password` but left
+every previously issued session JWT valid until its own natural expiry (up to
+`CLIENT_JWT_EXPIRE_MINUTES`, 7 days) — a stolen token survived a password change. Both this
+new flow and `PATCH /auth/me` now set `ClientAccount.password_changed_at`
+(migration `d546a205a4be`); `create_client_token` gained an explicit `iat` claim (PyJWT
+doesn't set one automatically) so `_resolve_client_from_token` — the single decode path
+shared by every session-token-gated route — can reject any token whose `iat` predates the
+account's `password_changed_at`. Tokens issued before this deploy have no `iat` at all;
+they're treated as unconditionally predating any real `password_changed_at`, which only
+matters (and is only correct) once that account has changed its password at least once
+since this shipped.
+
+`POST /auth/reset-password` auto-logs-in on success (same `{token, client, cart}` shape as
+`/auth/login`, via the shared `_build_auth_response`) so the frontend doesn't need a
+separate login call right after a reset — same UX precedent as register's auto-login.
+
 ### Address book (`/auth/me/addresses`)
 
 `ClientAddress` is exposed as its own sub-resource (`routes/addresses.py`, `services/address_service.py`) rather than folded into `PATCH /auth/me` — a one-to-many collection needs per-item add/edit/remove, which a single-resource PATCH would force into error-prone client-side diffing (send the whole array, backend guesses what changed). All four routes sit under `/auth/me/addresses`, gated by the same `get_current_client` + `x-api-key` pair as `/auth/me`, and every lookup/update/delete scopes by `client_account_id == current client` — an address `uuid` belonging to a different client resolves as a plain `404`, not `403` (doesn't confirm the row exists at all).
@@ -360,6 +403,8 @@ All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted
 | `POST /auth/google` | none (just `x-api-key`) | Verifies a Google ID token (frontend-obtained) and logs in/creates the matching account; returns `{token, client}`. `409` if the email already has a local password account. Optional `cartToken` merges an anonymous cart inline. |
 | `POST /auth/verify-email` | none (just `x-api-key`) | Confirms a verification token from the outbound webhook; marks the account verified. No session required — the token itself proves ownership. |
 | `POST /auth/resend-verification` | client account (required `Authorization` header) | Re-fires the verification webhook. `400` if already verified. |
+| `POST /auth/forgot-password` | none (just `x-api-key`) | Always returns the same generic `200`, regardless of whether the email resolves to an account — fires the `password-reset-requested` webhook if it does (with `hasPassword: false` and no token for Google-only accounts). |
+| `POST /auth/reset-password` | none (just `x-api-key`) — the reset token itself proves ownership | Confirms a single-use DB-backed reset token (`400` if invalid/used/expired), sets the new password, and returns `{token, client}` like `/auth/login` — auto-logged-in. Invalidates the account's other active sessions. |
 | `GET /auth/me` | client account (required `Authorization` header) | Returns the authenticated client's own account info (including saved addresses) — for a "Mi cuenta" page. |
 | `PATCH /auth/me` | client account (required `Authorization` header) | Partial update of `name`/`phone`; `new_password` requires a correct `current_password` in the same call. |
 | `GET /auth/me/addresses` | client account (required `Authorization` header) | List the client's saved addresses. |

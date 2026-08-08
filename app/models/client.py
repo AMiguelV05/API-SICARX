@@ -25,6 +25,10 @@ class ClientAccount(Base):
     email_verified_at = Column(DateTime(timezone=True), nullable=True)
 
     is_active = Column(Boolean, default=True)
+    # Momento del ultimo cambio de password (via reset o PATCH /auth/me). NULL = nunca ha
+    # cambiado su password. Usado por _resolve_client_from_token para invalidar sesiones
+    # (JWTs) emitidas antes de este momento - ver security.py.
+    password_changed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 

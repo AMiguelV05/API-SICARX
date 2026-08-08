@@ -17,6 +17,7 @@ from app.models.order import Order
 from app.models.cart import Cart
 from app.models.vehicle import Vehicle, product_vehicles
 from app.models.attribute import Attribute, AttributePreset, attribute_preset_items, VariantGroup
+from app.models.password_reset import PasswordResetToken
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

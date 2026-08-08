@@ -9,10 +9,14 @@ from app.core.rate_limit import limiter
 from app.core.cookies import clear_cart_cookie
 from app.models.client import ClientAccount
 from app.models.cart import Cart
-from app.schemas.client import ClientRegister, ClientLogin, GoogleLogin, VerifyEmailRequest, ClientAuthResponse, ClientPublic, ClientUpdate
+from app.schemas.client import (
+    ClientRegister, ClientLogin, GoogleLogin, VerifyEmailRequest, ClientAuthResponse, ClientPublic, ClientUpdate,
+    ForgotPasswordRequest, ResetPasswordRequest, MessageResponse,
+)
 from app.services.client_service import (
     register_client, authenticate_client, update_client,
     get_or_create_google_client, verify_client_email, resend_verification_email,
+    request_password_reset, reset_password,
 )
 from app.services.google_auth_service import verify_google_id_token
 from app.services.cart_service import get_cart_response, try_merge_cart_token
@@ -95,6 +99,31 @@ async def resend_verification(request: Request, client: CurrentClientDep, db: Db
     si ya está verificada.
     """
     await resend_verification_email(db, client)
+
+@router.post("/auth/forgot-password", response_model=MessageResponse, summary="Solicitar recuperación de contraseña")
+@limiter.limit("5/minute")
+async def forgot_password(request: Request, db: DbDep, data: ForgotPasswordRequest = Body()):
+    """
+    Dispara el correo de recuperación de contraseña si el correo corresponde a una cuenta
+    local activa — responde exactamente igual sin importar si la cuenta existe, para no
+    habilitar enumeración (ver `request_password_reset`). Limitado a 5 intentos por minuto
+    por IP.
+    """
+    await request_password_reset(db, data.email)
+    return MessageResponse(detail="Si el correo existe, se enviará un enlace de recuperación.")
+
+@router.post("/auth/reset-password", response_model=ClientAuthResponse, summary="Confirmar recuperación de contraseña")
+@limiter.limit("10/minute")
+async def reset_password_route(request: Request, response: Response, db: DbDep, data: ResetPasswordRequest = Body()):
+    """
+    Confirma el token enviado por correo tras `/auth/forgot-password`, establece la nueva
+    contraseña y devuelve una sesión nueva (mismo shape que `/auth/login`) — el usuario
+    queda logueado sin un paso extra. `400` si el token es inválido, ya fue usado, o venció
+    (vigencia 30 min). Invalida cualquier sesión previa de la cuenta. Limitado a 10 intentos
+    por minuto por IP.
+    """
+    client = await reset_password(db, data.token, data.new_password)
+    return await _build_auth_response(db, client, None, response)
 
 @router.get("/auth/me", response_model=ClientPublic, summary="Obtener datos de la cuenta del cliente")
 async def get_me(client: CurrentClientDep):

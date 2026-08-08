@@ -30,6 +30,16 @@ class GoogleLogin(CamelModel):
 class VerifyEmailRequest(CamelModel):
     token: str = Field(min_length=1, description="Token de verificación recibido por correo")
 
+class ForgotPasswordRequest(CamelModel):
+    email: EmailStr
+
+class ResetPasswordRequest(CamelModel):
+    token: str = Field(min_length=1, description="Token de recuperación recibido por correo")
+    new_password: str = Field(min_length=8, description="Nueva contraseña en texto plano, mínimo 8 caracteres")
+
+class MessageResponse(CamelModel):
+    detail: str
+
 class ClientAddressBase(CamelModel):
     label: Optional[str] = None
     street: str = Field(min_length=1)

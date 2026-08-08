@@ -1,13 +1,17 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.client import ClientAccount
+from app.models.password_reset import PasswordResetToken
 from app.schemas.client import ClientRegister, ClientLogin, ClientUpdate
-from app.core.security import hash_password, verify_password, _hash_password_sync, decode_email_verification_token
-from app.services.client_notification_service import notify_verification_requested
+from app.core.security import (
+    hash_password, verify_password, _hash_password_sync, decode_email_verification_token,
+    generate_password_reset_token, hash_reset_token, PASSWORD_RESET_TOKEN_EXPIRE_MINUTES,
+)
+from app.services.client_notification_service import notify_verification_requested, notify_password_reset_requested
 from app.services.google_auth_service import GoogleIdentity
 
 logger = logging.getLogger(__name__)
@@ -73,6 +77,7 @@ async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpd
             logger.info(f"Intento de cambio de contraseña con contraseña actual incorrecta: {client.email}")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La contraseña actual es incorrecta.")
         client.hashed_password = await hash_password(data.new_password)
+        client.password_changed_at = datetime.now(timezone.utc)  # invalida sesiones previas, ver security.py
 
     if data.name is not None:
         client.name = data.name
@@ -141,3 +146,61 @@ async def resend_verification_email(db: AsyncSession, client: ClientAccount) -> 
     if client.is_verified:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta cuenta ya está verificada.")
     await notify_verification_requested(client)
+
+async def request_password_reset(db: AsyncSession, email: str) -> None:
+    """Nunca revela si la cuenta existe - la ruta siempre responde igual sin importar el
+    resultado de esta funcion (ver routes/auth.py). Si la cuenta es de Google (sin password
+    local), no se genera token; en su lugar se notifica al frontend con has_password=False
+    para que le explique al dueño real de ese correo por que no hay enlace de recuperacion -
+    la diferenciacion solo llega al correo, nunca a la respuesta HTTP, que es donde
+    "rechazar cuentas Google" se implementa sin habilitar enumeracion."""
+    email = email.lower()
+    client = await db.scalar(select(ClientAccount).where(ClientAccount.email == email))
+    if not client or not client.is_active:
+        return
+
+    if client.hashed_password is None:
+        await notify_password_reset_requested(client, token=None, has_password=False)
+        return
+
+    # Invalida cualquier token previo sin usar de esta cuenta - solo el enlace mas reciente
+    # debe funcionar.
+    await db.execute(
+        update(PasswordResetToken)
+        .where(PasswordResetToken.client_account_id == client.id, PasswordResetToken.used_at.is_(None))
+        .values(used_at=datetime.now(timezone.utc))
+    )
+
+    plain_token = generate_password_reset_token()
+    db.add(PasswordResetToken(
+        client_account_id=client.id,
+        token_hash=hash_reset_token(plain_token),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
+    ))
+    await db.commit()
+
+    logger.info(f"Token de recuperacion de password generado para: {client.email}")
+    await notify_password_reset_requested(client, token=plain_token, has_password=True)
+
+async def reset_password(db: AsyncSession, token: str, new_password: str) -> ClientAccount:
+    token_hash = hash_reset_token(token)
+    reset_token = await db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash == token_hash))
+
+    now = datetime.now(timezone.utc)
+    if not reset_token or reset_token.used_at is not None or reset_token.expires_at < now:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token inválido o expirado.")
+
+    client = await db.scalar(select(ClientAccount).where(ClientAccount.id == reset_token.client_account_id))
+    if not client or not client.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token inválido o expirado.")
+
+    client.hashed_password = await hash_password(new_password)
+    client.password_changed_at = now
+    reset_token.used_at = now
+
+    await db.commit()
+    await db.refresh(client)
+    await client.awaitable_attrs.addresses  # necesario para serializar ClientPublic.addresses
+
+    logger.info(f"Password restablecido via token de recuperación: {client.email}")
+    return client
