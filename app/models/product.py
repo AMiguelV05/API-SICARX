@@ -47,7 +47,7 @@ class Product(Base):
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
     # Verdad de Sicar X: solo lo escribe el upsert de sync_task.py y los dos "espejos"
     # locales en sicar_sync_worker.py (exito de ACCEPT/CANCEL). Checkout/cancelacion ya NO
-    # lo tocan directamente - ver `reserved` abajo y CLAUDE.md.
+    # lo tocan directamente
     stock = Column(Numeric(12, 3), default=Decimal("0"))
     is_bulk = Column(Boolean, default=False)
 
@@ -64,6 +64,15 @@ class Product(Base):
     # esta columna a proposito (ver comentario junto a update_dict ahi) para que el sync
     # periodico no la resetee.
     sales_count = Column(Numeric(12, 3), nullable=False, default=Decimal("0"), server_default="0")
+
+    # Cacheados (nunca los maneja Sicar X, igual que sales_count) - mantenidos exclusivamente
+    # por review_service.recompute_product_rating via un recalculo completo (AVG/COUNT sobre
+    # product_reviews no ocultas) despues de cada escritura que cambia el conjunto visible,
+    # no un delta incremental - evita la clase de bug de deriva que ya se dio con
+    # reserved/stock (ver CLAUDE.md). El upsert de sync_task.py las omite a proposito, igual
+    # que sales_count, asi que el sync periodico no puede resetearlas.
+    average_rating = Column(Numeric(3, 2), nullable=True)
+    reviews_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     @hybrid_property
     def available_stock(self):

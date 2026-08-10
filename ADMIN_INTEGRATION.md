@@ -1779,7 +1779,78 @@ Dos comportamientos a tener en cuenta al construir la UI:
   — no hay una fila "Sin categoría". Revenue de esos productos solo aparece en
   `/top-products` y `/summary`.
 
+### Reseñas (moderación)
 
+Cualquier cliente autenticado puede reseñar cualquier producto (no se exige compra —
+`isVerifiedPurchase` es un badge informativo, no un requisito). Estas rutas son la
+única forma de moderar ese contenido: ocultar/mostrar, responder oficialmente, o
+eliminar de forma permanente. Ver `FRONTEND_INTEGRATION.md` para las rutas
+storefront-facing (listar, crear, editar, marcar útil).
+
+#### `GET /v1/admin/reviews` — buscar/listar reseñas (todos los productos)
+
+```http
+GET /v1/admin/reviews?productUuid=3Cny4OOxdX1GoSzL9rEsTZNL7un&isHidden=false&limit=50&offset=0
+X-Admin-Key: <admin-key>
+```
+
+Filtros, todos opcionales y combinables: `productUuid`, `clientEmail`, `clientUuid`,
+`rating` (1-5), `isHidden`, `hasReply`. Sin filtros, devuelve todas las reseñas de
+todos los productos (incluidas las ocultas), más recientes primero.
+
+Respuesta `200`:
+```json
+{
+  "total": 1,
+  "docs": [
+    {
+      "uuid": "c2a8ff9a-63c4-43d2-9ce3-57aebc0e8be6",
+      "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "clientUuid": "3e0b5f17-f658-4090-a6e5-269ad4d5cb75",
+      "clientEmail": "juan@example.com",
+      "clientName": "Juan Pérez",
+      "rating": 4,
+      "comment": "Buen producto, cumple lo esperado.",
+      "isVerifiedPurchase": true,
+      "isHidden": false,
+      "hiddenReason": null,
+      "helpfulCount": 3,
+      "adminReply": null,
+      "adminReplyAt": null,
+      "createdAt": "2026-08-10T14:58:23.190116Z",
+      "updatedAt": null
+    }
+  ]
+}
+```
+
+#### `PATCH /v1/admin/reviews/{reviewUuid}` — ocultar/mostrar una reseña
+
+```http
+PATCH /v1/admin/reviews/c2a8ff9a-.../
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "isHidden": true, "hiddenReason": "Lenguaje inapropiado" }
+```
+
+Actualización parcial (`isHidden`/`hiddenReason`, ambos opcionales — solo se toca lo
+enviado). Ocultarla la excluye de inmediato de la vista pública del producto **y** de
+`averageRating`/`reviewsCount`/`ratingBreakdown` (se recalculan en la misma llamada) —
+el propio autor la sigue viendo en su propio historial (`GET /v1/auth/me/reviews`).
+Reversible: volver a mandar `isHidden: false` la restaura.
+
+#### `DELETE /v1/admin/reviews/{reviewUuid}` — eliminar permanentemente
+
+`204` sin cuerpo. A diferencia de `PATCH .../isHidden`, esto es un borrado real, no
+reversible — para contenido genuinamente abusivo o ilegal, no para moderación
+cotidiana (para eso usa ocultar).
+
+#### `PUT` / `DELETE /v1/admin/reviews/{reviewUuid}/reply` — respuesta oficial
+
+Una sola respuesta por reseña (no un hilo de comentarios) — `PUT` con `{"comment": "..."}`
+crea o **reemplaza** la respuesta existente si ya había una; `DELETE` la quita. Ambos
+responden el mismo shape que `GET`/`PATCH` de arriba.
 
 - **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo
   sobreescribe. Todas las mutaciones (`/accept`, `/advance-status`, `/shipping/generate`) aplican

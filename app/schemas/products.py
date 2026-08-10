@@ -64,6 +64,9 @@ class ProductBasic(CamelModel):
         description="Cantidad disponible para venta ahora mismo (stock real menos reservas de ordenes locales todavia no aceptadas) - no el stock fisico crudo.",
     )
     sales_count: float
+    # Cacheados en Product, mantenidos por review_service - ver ReviewListResponse. None/0 si el producto no tiene reseñas todavia.
+    average_rating: Optional[float] = None
+    reviews_count: int = 0
 
 class ProductAdminBasic(ProductBasic):
     """ProductBasic pero para vistas admin/PIM (productos por categoria/vehiculo/grupo de

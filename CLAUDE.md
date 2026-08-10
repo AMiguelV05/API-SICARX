@@ -413,6 +413,12 @@ All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted
 | `DELETE /auth/me/addresses/{uuid}` | client account (required `Authorization` header) | Remove one address; `204` on success, `404` if not owned by the caller. |
 | `GET /auth/me/orders` | client account (required `Authorization` header) | Paginated order history for the caller, most recent first. Postgres only. |
 | `GET /auth/me/orders/{orderUuid}` | client account (required `Authorization` header) | Order detail; `404` if not owned by the caller. Lazily refreshes `dispatch_status`/`dispatch_history` from SICAR X if not yet in a terminal fulfillment state. |
+| `GET /products/{productUuid}/reviews` | none (just `x-api-key`) | Paginated, non-hidden reviews for a product, sortable via `sortBy` (`newest`/`highest_rating`/`lowest_rating`/`most_helpful`). Returns the cached `averageRating`/`reviewsCount` plus a live-computed `ratingBreakdown` (1-5 star counts). |
+| `POST /products/{productUuid}/reviews` | client account (required `Authorization` header) | Creates a review (`rating` 1-5 + optional `comment`). `409` if the client already reviewed this product — edit the existing one instead. `isVerifiedPurchase` computed once at creation from the client's `PAID` orders. |
+| `PATCH /reviews/{uuid}` | client account, must own | Edit own review's `rating`/`comment`. `404` if not owned. |
+| `DELETE /reviews/{uuid}` | client account, must own | Delete own review. `204`. |
+| `PUT`/`DELETE /reviews/{uuid}/helpful` | client account (required `Authorization` header) | Idempotent mark/unmark of a "helpful" vote — one per client per review. |
+| `GET /auth/me/reviews` | client account (required `Authorization` header) | Own review history, paginated, most recent first — includes reviews an admin has hidden (only the author still sees those here). |
 
 ### Admin API (`/v1/admin/*`) — new, internal-only, not part of the frontend contract
 
@@ -452,6 +458,30 @@ Every route in `app/api/routes/admin.py` depends on `validate_admin_key` (`app/c
 | `GET /admin/dashboard/summary` | KPIs (`totalRevenue`/`orderCount`/`averageOrderValue`/`totalUnitsSold`) + serie diaria para un rango `startDate`/`endDate` (default: últimos 30 días), agregados directamente sobre `Order.total`/`Order.total_quantity` — sin desempacar `items`. Solo pedidos `PAID` no eliminados. |
 | `GET /admin/dashboard/top-products` | Productos más vendidos en el rango (`sortBy=revenue\|quantity`), agregados vía `jsonb_array_elements` sobre el snapshot de `Order.items` — nombre/sku/imagen son los vigentes al momento de cada venta, no el `Product` actual (correcto aunque el producto se haya renombrado o eliminado después). |
 | `GET /admin/dashboard/top-categories` | Ventas por categoría PIM (`product_categories`/`categories`, no el `categoryUuid`/`departmentUuid` sincronizado de Sicar X) en el rango — une el `uuid` de cada línea de `items` contra el `Product` actual por `sicar_uuid`, sin filtrar `is_deleted`. Un producto en varias categorías suma su revenue/unidades completas a cada una (desglose por faceta, no partición); productos sin categoría asignada quedan excluidos. |
+| `GET /admin/reviews` | Búsqueda/listado admin-wide de reseñas (no solo de un producto) — filtrable por `productUuid`/`clientEmail`/`clientUuid`/`rating`/`isHidden`/`hasReply`, paginado. Incluye ocultas salvo que se filtre `isHidden=false` explícitamente. |
+| `PATCH /admin/reviews/{uuid}` | `exclude_unset`, ajusta `isHidden`/`hiddenReason`. Ocultar una reseña la excluye de inmediato de `Product.average_rating`/`reviews_count` (recalculados en la misma llamada vía `recompute_product_rating`) y de la vista pública — reversible, el propio autor la sigue viendo en `GET /auth/me/reviews`. |
+| `DELETE /admin/reviews/{uuid}` | Borrado real (no soft-delete) — para contenido genuinamente abusivo/ilegal, distinto de ocultar (reversible). |
+| `PUT`/`DELETE /admin/reviews/{uuid}/reply` | Crea/reemplaza o elimina la única respuesta oficial de un admin por reseña (no un hilo). |
+
+Nueva tabla `product_reviews` (rating 1-5 + comentario opcional, una por cliente por
+producto vía `UniqueConstraint`, moderación admin via `is_hidden`/`hidden_reason`,
+respuesta oficial inline via `admin_reply`/`admin_reply_at`) y
+`product_review_helpful_votes` (un voto "útil" toggleable por cliente por reseña —
+existe como tabla, no solo un contador, porque hace falta poder revertir el voto de UN
+cliente en particular). `Product` gana `average_rating`/`reviews_count`, cacheados y
+mantenidos exclusivamente por `review_service.recompute_product_rating` — excluidos del
+upsert de `sync_task.py`, mismo tratamiento que `sales_count`/`reserved` (ver "Reserva
+local de stock" arriba). A diferencia de esos dos, el recálculo es un `AVG`/`COUNT`
+completo sobre las reseñas no ocultas después de cada escritura que cambia el conjunto
+visible (crear, editar el rating, eliminar, ocultar/mostrar) — no un delta incremental
+— deliberadamente, para no repetir la clase de bug de deriva ya vista con
+`reserved`/`stock`; el volumen de reseñas por producto es chico, así que un recálculo
+completo es barato. `isVerifiedPurchase` se calcula una sola vez al crear la reseña
+(escaneo Python-side de las órdenes `PAID` del cliente — `Order.items` es `JSON` plano,
+no `JSONB`, así que no hay containment de BD que aprovechar aquí) y nunca se
+recalcula después. `ProductBasic`/`ProductAdminBasic` (`POST /products`, `POST
+/search`, listados admin) ganan `averageRating`/`reviewsCount` de paso, para que un
+grid de productos pueda mostrar estrellas sin una llamada aparte por producto.
 
 **INCIDENTE (2026-07-30): `/shipping/quote` devolvía `options: []` para pedidos con
 carriers realmente disponibles.** Investigado en vivo contra el sandbox real de envia.com

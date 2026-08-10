@@ -574,7 +574,9 @@ Respuesta `200`:
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
-      "salesCount": 0.0
+      "salesCount": 0.0,
+      "averageRating": null,
+      "reviewsCount": 0
     }
   ]
 }
@@ -599,6 +601,12 @@ entre sí y con el resto de los filtros.
 productos se venden por peso/medida, así que puede traer decimales (p. ej. `2.5`). Empieza en
 `0.0` para todo el catálogo hasta que existan pedidos pagados reales; no lo trates como
 disponible desde el día uno de este cambio.
+
+**`averageRating`/`reviewsCount` (nuevo, campo aditivo)** — promedio y conteo de reseñas
+visibles del producto (ver "Reseñas y calificaciones de productos" más abajo), cacheados y
+listos para mostrar directo en una tarjeta de producto sin una llamada aparte por producto.
+`averageRating` es `null` (no `0`) mientras el producto no tenga ninguna reseña — no lo
+confundas con "calificación 0 estrellas" al renderizar.
 
 `sortBy` ordena los resultados — valores válidos: `"price_asc"`, `"price_desc"`, `"name_asc"`,
 `"relevance"` (nuevo). Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden
@@ -663,7 +671,9 @@ Respuesta `200` con la misma forma que `/v1/products`:
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
-      "salesCount": 0.0
+      "salesCount": 0.0,
+      "averageRating": null,
+      "reviewsCount": 0
     }
   ]
 }
@@ -1206,6 +1216,98 @@ Errores esperables:
 - `409` — uno o más productos sin disponibilidad suficiente (sin stock, o precio local
   inconsistente — ver nota abajo) — validación 100% local contra Postgres, sin ninguna llamada
   en vivo a Sicar X en este paso.
+
+## Reseñas y calificaciones de productos
+
+Cualquier cliente autenticado puede reseñar cualquier producto (no se exige haberlo
+comprado) — `isVerifiedPurchase` es solo un badge informativo, calculado una sola vez al
+crear la reseña a partir de las órdenes `PAID` del cliente. Una reseña por cliente por
+producto: para volver a opinar, edita la existente (`PATCH`) en vez de crear otra (`409`
+si lo intentas). Las respuestas siempre usan camelCase, igual que el resto de la API.
+
+### `GET /v1/products/{productUuid}/reviews` — listar reseñas de un producto
+
+No requiere sesión de cliente, solo `x-api-key`. Paginado (`limit`/`offset`, mismo
+estilo que `/v1/products`), ordenable con `sortBy` (`newest` por defecto,
+`highest_rating`, `lowest_rating` o `most_helpful`). Solo devuelve reseñas visibles
+(no ocultas por un admin).
+
+```http
+GET /v1/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/reviews?limit=20&offset=0&sortBy=newest
+x-api-key: <api-key>
+```
+
+```json
+{
+  "total": 2,
+  "docs": [
+    {
+      "uuid": "c2a8ff9a-63c4-43d2-9ce3-57aebc0e8be6",
+      "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "clientName": "Juan Pérez",
+      "rating": 4,
+      "comment": "Buen producto, cumple lo esperado.",
+      "isVerifiedPurchase": true,
+      "isHidden": false,
+      "helpfulCount": 3,
+      "adminReply": null,
+      "adminReplyAt": null,
+      "createdAt": "2026-08-10T14:58:23.190116Z",
+      "updatedAt": null
+    }
+  ],
+  "averageRating": 3.5,
+  "reviewsCount": 2,
+  "ratingBreakdown": { "1": 0, "2": 0, "3": 0, "4": 1, "5": 1 }
+}
+```
+
+`averageRating`/`reviewsCount` son el mismo par cacheado que ya viene en `stock`/
+`salesCount` de `POST /v1/products` y `POST /v1/search` (ver más abajo) — no hace falta
+volver a calcularlos en el frontend. `averageRating` es `null` si el producto todavía no
+tiene ninguna reseña visible.
+
+### `POST /v1/products/{productUuid}/reviews` — crear una reseña
+
+Requiere `Authorization: <token>` (cuenta de cliente, igual que `/v1/auth/me`).
+
+```http
+POST /v1/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/reviews
+x-api-key: <api-key>
+Authorization: <token>
+Content-Type: application/json
+
+{ "rating": 4, "comment": "Buen producto, cumple lo esperado." }
+```
+
+`rating` es obligatorio (entero 1-5, `422` fuera de rango). `comment` es opcional.
+Responde `201` con el mismo shape que un item de `docs` arriba. Errores esperables:
+- `404` — el producto no existe o no está disponible (eliminado/inactivo)
+- `409` — ya reseñaste este producto (usa `PATCH` sobre la reseña existente)
+
+### `PATCH /v1/reviews/{reviewUuid}` / `DELETE /v1/reviews/{reviewUuid}` — editar/eliminar la propia reseña
+
+Requieren `Authorization`. Todos los campos de `PATCH` son opcionales (`rating`,
+`comment`) — solo se cambia lo que se envíe. `404` si la reseña no existe o no
+pertenece a la cuenta autenticada (no se distingue de "no existe", mismo patrón que el
+resto de recursos propios de esta API). `DELETE` responde `204`.
+
+### `PUT` / `DELETE /v1/reviews/{reviewUuid}/helpful` — marcar/quitar "útil"
+
+Requieren `Authorization`. Ambos son idempotentes — marcar dos veces o quitar sin haber
+marcado antes no cambian nada ni fallan. `404` si la reseña no existe o está oculta.
+
+```json
+{ "reviewUuid": "c2a8ff9a-63c4-43d2-9ce3-57aebc0e8be6", "helpfulCount": 4, "markedByMe": true }
+```
+
+### `GET /v1/auth/me/reviews` — historial de reseñas propias
+
+Requiere `Authorization`. Paginado, mismo shape que `GET /v1/products/{uuid}/reviews`
+pero sin `averageRating`/`ratingBreakdown` reales (siempre `null`/en cero — no aplican a
+una lista mixta de productos). A diferencia de la vista pública, **sí incluye** las
+reseñas que un admin haya ocultado (`isHidden: true`) — solo el propio autor las sigue
+viendo aquí.
 
 ## Pagos con Mercado Pago (Checkout Bricks)
 
