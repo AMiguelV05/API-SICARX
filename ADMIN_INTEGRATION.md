@@ -856,6 +856,42 @@ categorías):
 `[]` si el producto existe pero no tiene ninguna categoría asignada. `404` si el
 `productUuid` no corresponde a un producto real y no eliminado.
 
+#### `GET /v1/admin/categories/export` — descargar CSV de categorías + productos
+
+```http
+GET /v1/admin/categories/export
+X-Admin-Key: <admin-key>
+```
+
+Opcionalmente `?categoryUuid=<uuid>` para acotar el export a ese nodo y sus
+descendientes (mismo criterio que `taxonomyUuid` en `/catalog`/`/search`); omitido
+exporta el árbol completo. Un botón "Exportar CSV" en el dashboard puede apuntar
+directo aquí.
+
+Respuesta `200`: el CSV en sí (`Content-Type: text/csv`, no JSON), codificado
+`utf-8-sig` (con BOM) para que los acentos se vean bien al abrirlo directo en Excel, con
+`Content-Disposition: attachment; filename=categorias_productos.csv`. Una fila por par
+(categoría, producto) — columnas `category_uuid, category_path, category_slug,
+product_sku, product_name, product_price, product_stock`:
+
+```csv
+category_uuid,category_path,category_slug,product_sku,product_name,product_price,product_stock
+3f9a1c2e-...,Herramientas > Electricas,herramientas-electricas,102959,"Compresor de aire, silencioso libre de aceite, 50 L, 2 HP",5250.00,1.000
+6a4fd308-...,Ferreteria General,ferreteria-general,,,,
+```
+
+- `category_path` es la cadena completa de ancestros (`Padre > Hijo`), no solo el nombre
+  del nodo — necesario porque dos categorías pueden compartir nombre bajo padres
+  distintos. Se resuelve para **todas** las categorías, no solo las exportadas, así un
+  export acotado con `categoryUuid` igual muestra los nombres reales de los ancestros
+  aunque esos ancestros mismos queden fuera del subárbol exportado.
+- Una categoría sin productos asignados (o cuyos productos asignados están todos
+  eliminados) igual aparece, con las cuatro columnas `product_*` en blanco — no se omite
+  del CSV.
+- `product_stock` es `availableStock` (vendible ahora mismo, no el físico crudo) — mismo
+  criterio que `ProductBasic.stock` en el storefront.
+- `404` si `categoryUuid` no corresponde a una categoría real.
+
 ### Vehículos (compatibilidad)
 
 Endpoints para administrar `vehicles` — un catálogo plano de fitments

@@ -1,10 +1,12 @@
+import csv
+import io
 import logging
 import re
 import unicodedata
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
-from sqlalchemy import select, text, func, delete, insert
+from sqlalchemy import select, text, func, delete, insert, and_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.taxonomy import Category, product_categories
@@ -71,6 +73,85 @@ async def get_categories_for_product(db: AsyncSession, product_uuid: str) -> lis
     ).order_by(func.lower(Category.name))
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def _build_category_path_map(db: AsyncSession) -> dict[str, str]:
+    """Camino completo (raiz > ... > nodo) por uuid, para TODAS las categorias - independiente
+    de cualquier filtro de subarbol, asi un export acotado igual muestra los nombres de
+    ancestros que quedan fuera del subarbol exportado."""
+    result = await db.execute(select(Category.uuid, Category.name, Category.parent_uuid))
+    rows = {row.uuid: (row.name, row.parent_uuid) for row in result.all()}
+
+    paths: dict[str, str] = {}
+
+    def resolve(uuid: str, visiting: set[str]) -> str:
+        if uuid in paths:
+            return paths[uuid]
+        name, parent_uuid = rows[uuid]
+        if parent_uuid is None or parent_uuid not in rows or parent_uuid in visiting:
+            path = name
+        else:
+            path = f"{resolve(parent_uuid, visiting | {uuid})} > {name}"
+        paths[uuid] = path
+        return path
+
+    for uuid in rows:
+        resolve(uuid, set())
+    return paths
+
+
+async def export_categories_csv(db: AsyncSession, category_uuid: str | None = None) -> bytes:
+    """Un CSV con una fila por par (categoria, producto), via outer joins - una categoria
+    sin productos (o cuyos productos asignados estan todos is_deleted) igual aparece, con
+    las columnas de producto en blanco. `category_uuid` acota el export a ese subarbol
+    (via get_descendant_uuids); omitido exporta el arbol completo. `404` si no resuelve."""
+    scoped_uuids: list[str] | None = None
+    if category_uuid is not None:
+        category = await db.get(Category, category_uuid)
+        if category is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categoria no encontrada.")
+        scoped_uuids = await get_descendant_uuids(db, category_uuid)
+
+    path_map = await _build_category_path_map(db)
+
+    stmt = (
+        select(
+            Category.uuid.label("category_uuid"),
+            Category.slug.label("category_slug"),
+            Product.id.label("product_id"),
+            Product.sku,
+            Product.name.label("product_name"),
+            Product.price,
+            Product.available_stock,
+        )
+        .select_from(Category)
+        .outerjoin(product_categories, Category.uuid == product_categories.c.category_uuid)
+        .outerjoin(Product, and_(Product.id == product_categories.c.product_id, Product.is_deleted == False))
+    )
+    if scoped_uuids is not None:
+        stmt = stmt.where(Category.uuid.in_(scoped_uuids))
+    rows = (await db.execute(stmt)).all()
+
+    def sort_key(row):
+        return (path_map.get(row.category_uuid, ""), row.product_name or "")
+
+    rows = sorted(rows, key=sort_key)
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["category_uuid", "category_path", "category_slug", "product_sku", "product_name", "product_price", "product_stock"])
+    for row in rows:
+        has_product = row.product_id is not None
+        writer.writerow([
+            row.category_uuid,
+            path_map.get(row.category_uuid, ""),
+            row.category_slug,
+            (row.sku or "") if has_product else "",
+            row.product_name if has_product else "",
+            row.price if has_product and row.price is not None else "",
+            row.available_stock if has_product else "",
+        ])
+    return buffer.getvalue().encode("utf-8-sig")
 
 
 # Desde aqui: muta categories/product_categories, solo llamado por admin_categories.py (validate_admin_key).

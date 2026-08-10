@@ -1,6 +1,6 @@
 import logging
-from typing import List
-from fastapi import APIRouter, Depends, Body, Query, status
+from typing import List, Optional
+from fastapi import APIRouter, Depends, Body, Query, Response, status
 from app.core.database import DbDep
 from app.core.security import validate_admin_key
 from app.schemas.taxonomy import (
@@ -36,6 +36,23 @@ async def admin_list_product_categories(product_uuid: str, db: DbDep):
     paginar (acotada por naturaleza); `[]` si el producto existe pero no tiene ninguna."""
     categories = await taxonomy_service.get_categories_for_product(db, product_uuid)
     return [CategoryAdminPublic.model_validate(c) for c in categories]
+
+
+@router.get("/export", summary="Descargar un CSV con todas las categorias y sus productos asignados")
+async def admin_export_categories(
+    db: DbDep,
+    category_uuid: Optional[str] = Query(default=None, alias="categoryUuid", description="Acota el export a este nodo y sus descendientes; omitido exporta el arbol completo"),
+):
+    """Un CSV con una fila por par (categoria, producto) - via outer joins, una categoria
+    sin productos (o con productos ya eliminados) igual aparece con las columnas de
+    producto en blanco. `categoryUuid` opcional acota el export a ese subarbol; `404` si
+    no resuelve a una categoria real."""
+    file_bytes = await taxonomy_service.export_categories_csv(db, category_uuid)
+    return Response(
+        content=file_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=categorias_productos.csv"},
+    )
 
 
 @router.patch("/{category_uuid}", response_model=CategoryAdminPublic, summary="Renombrar y/o mover (reasignar padre) un nodo de categoria")
