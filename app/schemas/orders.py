@@ -5,6 +5,14 @@ from datetime import datetime
 from app.core.config import settings
 from app.schemas.base import CamelModel
 
+COUPON_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+def validate_coupon_code_format(v: Optional[str]) -> Optional[str]:
+    """Compartido entre OrderCreate.couponCode y CartCouponApply.code."""
+    if v is not None and not COUPON_CODE_PATTERN.fullmatch(v):
+        raise ValueError("Código de cupón inválido.")
+    return v
+
 class ProductItem(CamelModel):
     uuid: str = Field(description="UUID del producto en Sicar")
     quantity: float = Field(gt=0, description="Cantidad a comprar o cancelar")
@@ -52,6 +60,12 @@ class OrderCreate(CamelModel):
     branchId: Optional[int] = Field(default=None, description="Por defecto 151456 si se omite")
     priceListUuid: Optional[str] = Field(default=None, description="Por defecto settings.SICAR_PRICE_LIST_ID si se omite")
     wholesalePrices: bool = Field(default=False)
+    couponCode: Optional[str] = Field(default=None, description="Código de cupón a aplicar. Se revalida y bloquea aquí (no en el carrito) - nunca se confía en el descuento ya mostrado por GET /cart.")
+
+    @field_validator("couponCode")
+    @classmethod
+    def validate_coupon_code(cls, v):
+        return validate_coupon_code_format(v)
 
 class OrderCancel(CamelModel):
     cashRegisterUuid: str = Field(default_factory=lambda: settings.CASH_REGISTER_UUID, description="UUID de la caja registradora")
@@ -64,7 +78,8 @@ class OrderResponse(CamelModel):
     status: str = Field(description="Estado local de la orden justo despues de crearla (siempre TO_PAY)")
     orderUuid: str = Field(description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid} y con POST /orders/{id}/pay")
     preferenceId: Optional[str] = Field(default=None, description="ID de preferencia de Mercado Pago para initialization.preferenceId del Payment Brick (null si Mercado Pago no respondio)")
-    amount: float = Field(description="Total autoritativo de la orden - usar en initialization.amount del Payment Brick")
+    amount: float = Field(description="Total autoritativo de la orden (YA con el descuento del cupón aplicado, si hubo uno) - usar en initialization.amount del Payment Brick")
+    discountAmount: float = Field(default=0.0, description="Monto descontado por el cupón aplicado, ya restado de `amount`. 0 si no se usó cupón.")
 
 class OrderCancelResponse(CamelModel):
     documentUuid: str = Field(description="ID de la orden (sicar_order_id) cancelada")
@@ -108,6 +123,9 @@ class OrderPublic(CamelModel):
     items: list[dict[str, Any]]
     created_at: datetime
     cancellation_reason: Optional[str] = Field(default=None, description="Motivo de cancelación si un admin canceló la orden (POST /admin/orders/{uuid}/cancel). Null si nunca se canceló o si fue el cliente quien canceló.")
+    coupon_code: Optional[str] = Field(default=None, description="Código del cupón aplicado, si hubo uno.")
+    discount_amount: Optional[float] = Field(default=None, description="Monto descontado por el cupón. Null si no se usó cupón.")
+    subtotal: Optional[float] = Field(default=None, description="Total antes del descuento del cupón. Null en órdenes anteriores a esta funcionalidad - tratar como igual a `total` en ese caso.")
 
 class OrderListResponse(CamelModel):
     total: int

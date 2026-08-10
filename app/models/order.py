@@ -70,6 +70,14 @@ class Order(Base):
     # NULL para cancelaciones del cliente (POST /orders/{id}/cancel, DELETE, pago rechazado).
     cancellation_reason = Column(Text, nullable=True)
 
+    # Cupon aplicado, si hubo uno - ver CouponRedemption para el ciclo de vida del uso.
+    # coupon_code es una foto fija del texto usado (el Coupon puede editarse/borrarse despues).
+    # subtotal es el total ANTES del descuento; NULL en ordenes historicas (tratar como == total).
+    coupon_id = Column(Integer, ForeignKey("coupons.id"), nullable=True)
+    coupon_code = Column(String, nullable=True)
+    discount_amount = Column(Numeric(10, 2), nullable=True)
+    subtotal = Column(Numeric(10, 2), nullable=True)
+
     client_account = relationship("ClientAccount", back_populates="orders")
 
 

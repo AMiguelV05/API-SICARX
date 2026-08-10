@@ -1,8 +1,8 @@
 from typing import Optional, List
 from datetime import datetime
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from app.schemas.base import CamelModel
-from app.schemas.orders import ProductItem
+from app.schemas.orders import ProductItem, validate_coupon_code_format
 from app.core.sicar_validation import is_safe_sicar_id
 
 class CartReplace(CamelModel):
@@ -20,6 +20,14 @@ class CartReplace(CamelModel):
 
 class CartMergeRequest(CamelModel):
     cartToken: str
+
+class CartCouponApply(CamelModel):
+    code: str = Field(min_length=1, max_length=40)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v):
+        return validate_coupon_code_format(v)
 
 class CartItemDelta(CamelModel):
     productUuid: str
@@ -49,3 +57,8 @@ class CartResponse(CamelModel):
     totalQuantity: float
     cartToken: Optional[str] = None
     updatedAt: Optional[datetime] = None
+    couponCode: Optional[str] = None
+    couponValid: bool = Field(default=False, description="False si couponCode está seteado pero ya no aplica (expirado, no alcanza el mínimo, etc.) - ver couponInvalidReason. GET /cart siempre responde 200, nunca falla por esto.")
+    couponInvalidReason: Optional[str] = Field(default=None, description="Motivo legible si couponValid es false. Null si no hay cupón o si es válido.")
+    discountAmount: float = 0.0
+    total: float = Field(default=0.0, description="subtotal - discountAmount, nunca negativo.")

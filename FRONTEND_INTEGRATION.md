@@ -511,7 +511,10 @@ Respuesta `200`:
       "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": null }, "deliveryType": "PICKUP" },
       "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
       "createdAt": "2026-07-10T18:32:05Z",
-      "cancellationReason": null
+      "cancellationReason": null,
+      "couponCode": "WELCOME10",
+      "discountAmount": 13.00,
+      "subtotal": 142.99
     }
   ]
 }
@@ -523,6 +526,11 @@ mostrar la imagen de cada producto en el historial de pedidos y en el correo de 
 (mismo campo también viaja en el webhook `order-confirmed`, ver más abajo). Órdenes creadas antes
 de este cambio no tienen `imageUrl` en sus `items` — trátalo como opcional/posiblemente ausente,
 no solo posiblemente `null`.
+
+`couponCode`/`discountAmount`/`subtotal` son `null` si el pedido no usó un cupón (o si es anterior
+a esta funcionalidad — trátalo igual que `null`). Cuando sí hay cupón, `total` ya viene con el
+descuento aplicado (`total = subtotal - discountAmount`) — es el mismo `total` que se cobró vía
+Mercado Pago, no hace falta restar nada del lado del frontend.
 
 ### `GET /v1/auth/me/orders/{orderUuid}` — detalle de un pedido
 
@@ -992,19 +1000,37 @@ Respuesta `200` (misma forma para `GET`, `PUT`, `PATCH /v1/cart/items` y `POST /
   "subtotal": 17.24,
   "totalQuantity": 2,
   "cartToken": "5a5c479d-9aeb-49ce-bfcd-3ff285a64188",
-  "updatedAt": "2026-07-18T14:36:17Z"
+  "updatedAt": "2026-07-18T14:36:17Z",
+  "couponCode": null,
+  "couponValid": false,
+  "couponInvalidReason": null,
+  "discountAmount": 0.0,
+  "total": 17.24
 }
 ```
 
-`subtotal` (no `total` — ese nombre ya significa "cantidad de filas" en `/v1/products`/`/v1/search`
-y en el historial de pedidos) es la suma de `lineTotal` **solo de los productos `available: true`**.
-Un producto puede aparecer con `available: false` (y sin `sku`/`name`/`price`/`stock`/`lineTotal`,
-todos `null`) si ya no existe en el catálogo local o fue desactivado/eliminado — **no desaparece
-de `items`**, muéstralo igual pero indica que ya no está disponible (p. ej. "Ya no disponible,
-quítalo del carrito"); no cuenta en `subtotal` pero sí en `totalQuantity`. `cartToken` sigue
-viniendo en el body (no `null`) cuando el carrito es anónimo — guárdalo solo en memoria, es lo que
-se manda como `cartToken` al registrarse/iniciar sesión o a `POST /v1/cart/merge` (ver arriba y
-abajo); ya no hace falta reenviarlo en ningún header.
+`subtotal` (no confundir con `total`, ver más abajo — ese nombre significaba "cantidad de filas" en
+`/v1/products`/`/v1/search` y en el historial de pedidos, pero aquí sí es un monto) es la suma de
+`lineTotal` **solo de los productos `available: true`**. Un producto puede aparecer con
+`available: false` (y sin `sku`/`name`/`price`/`stock`/`lineTotal`, todos `null`) si ya no existe
+en el catálogo local o fue desactivado/eliminado — **no desaparece de `items`**, muéstralo igual
+pero indica que ya no está disponible (p. ej. "Ya no disponible, quítalo del carrito"); no cuenta
+en `subtotal` pero sí en `totalQuantity`. `cartToken` sigue viniendo en el body (no `null`) cuando
+el carrito es anónimo — guárdalo solo en memoria, es lo que se manda como `cartToken` al
+registrarse/iniciar sesión o a `POST /v1/cart/merge` (ver arriba y abajo); ya no hace falta
+reenviarlo en ningún header.
+
+`couponCode`/`couponValid`/`couponInvalidReason`/`discountAmount`/`total` son el preview en vivo
+del cupón aplicado (ver `POST`/`DELETE /v1/cart/coupon` más abajo) — `total` es el monto real a
+mostrar como "a pagar" (`subtotal - discountAmount`, nunca negativo; sin cupón aplicado,
+`total == subtotal`). Si no hay `couponCode` aplicado, todos vienen en su valor por defecto
+(`null`/`false`/`0.0`). Si `couponCode` está seteado pero el cupón ya no aplica (expiró, no
+alcanza el mínimo de compra, etc.), `couponValid` es `false` y `couponInvalidReason` explica por
+qué en texto legible — el `GET` **nunca falla** por esto, muestra el mensaje y ofrece quitarlo.
+**Este preview no es autoritativo**: el descuento real se vuelve a calcular y bloquear en
+`POST /v1/orders` (ver más abajo) — es posible, aunque raro, que un cupón válido en el carrito ya
+no lo sea al momento de pagar (p. ej. alguien más agotó el cupo justo antes), en cuyo caso
+`POST /v1/orders` responde `409`.
 
 `GET /v1/cart` sin login y sin cookie reconocida responde un carrito vacío (`items: []`) sin crear
 nada. `DELETE /v1/cart` vacía el carrito resuelto y limpia la cookie del carrito anónimo si
@@ -1045,6 +1071,40 @@ línea se **elimina** del carrito (no se queda en `0`, desaparece). Si se manda 
 o cero para un producto que no está en el carrito, no pasa nada (`200` con el carrito sin cambios,
 no es un error). Responde el mismo shape que `GET`/`PUT /v1/cart` arriba. Igual que `PUT`, si no
 había carrito anónimo resuelto y `delta` es positivo, crea uno nuevo silenciosamente.
+
+### `POST`/`DELETE /v1/cart/coupon` — aplicar o quitar un cupón del carrito
+
+Misma identidad/cookie que el resto de `/v1/cart*` (sin login: cookie anónima + `credentials:
+"include"`; con login: `X-Client-Token`).
+
+```http
+POST /v1/cart/coupon
+x-api-key: <api-key>
+Content-Type: application/json
+
+{ "code": "WELCOME10" }
+```
+
+Guarda el código en el carrito (para que `GET /v1/cart` lo siga mostrando en visitas
+posteriores) y responde el mismo shape de `CartResponse` de arriba, ya con el descuento
+calculado. `400` si no hay carrito resuelto o está vacío (no tiene sentido aplicar un cupón a
+nada). `404` si el código no existe o está inactivo (mismo mensaje genérico para ambos casos,
+a propósito — no revela si un código desactivado existe). `409` si el código existe pero no
+aplica ahora mismo (expirado, no alcanza el mínimo de compra, ya alcanzó su límite de usos,
+etc.) — el detalle del error trae el motivo en texto legible.
+
+```http
+DELETE /v1/cart/coupon
+x-api-key: <api-key>
+```
+
+Quita el cupón aplicado. `200` con el carrito sin descuento (no `204` — a diferencia de
+`DELETE /v1/cart`, este endpoint sí devuelve el carrito actualizado). No-op si no había carrito
+o no tenía cupón aplicado.
+
+**Importante**: aplicar el cupón aquí es solo un preview — no reserva el uso ni garantiza que
+siga disponible al pagar. El código real que cuenta se manda de nuevo en `couponCode` al llamar
+`POST /v1/orders` (ver más abajo), que es donde se valida y bloquea de verdad.
 
 ### `POST /v1/cart/merge` — fusionar el carrito anónimo a la cuenta
 
@@ -1144,6 +1204,15 @@ su propio valor por defecto si se omiten (o se mandan como `null`):
 
 En la práctica casi nunca hace falta enviarlos explícitamente.
 
+**`couponCode` (opcional)** — reenvía aquí el mismo código que se aplicó en
+`POST /v1/cart/coupon` (ver esa sección arriba) si el shopper tiene uno aplicado; **el
+descuento del carrito es solo un preview, este campo es lo que realmente se valida y
+bloquea**. `409` si el código ya no aplica al momento de pagar (expiró, alguien más agotó
+el cupo, ya no alcanza el mínimo con el carrito final, etc.) o `404` si no existe/está
+inactivo — en cualquiera de los dos casos, ningún pedido se crea; muestra el error y ofrece
+quitar el cupón o reintentar. Omitir el campo (o mandar `null`) es exactamente igual que no
+tener cupón.
+
 Para entrega a domicilio, manda `addressUuid` (el `uuid` de una dirección ya guardada — ver
 `POST /v1/auth/me/addresses` arriba) en vez de una dirección escrita a mano en cada pedido:
 
@@ -1183,9 +1252,14 @@ Respuesta `200`:
   "status": "TO_PAY",
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "preferenceId": "123456789-abcdef01-2345-6789-abcd-ef0123456789",
-  "amount": 129.99
+  "amount": 129.99,
+  "discountAmount": 0.0
 }
 ```
+
+`discountAmount` es el monto descontado por el cupón aplicado (`0.0` si no se usó ninguno) —
+`amount` **ya viene con el descuento restado**, es el monto real a cobrar/mostrar en el
+Payment Brick tal cual, no hace falta restar `discountAmount` del lado del frontend.
 
 **Importante (2026-07-31) — `id`/`serieFolio`/`date` cambiaron de significado**, aunque
 siguen presentes con los mismos nombres:
@@ -1212,10 +1286,12 @@ Errores esperables:
 - `401` — falta o es inválido `X-Client-Token` (llama de nuevo a `/v1/auth/login`)
 - `400` — carrito vacío, datos de entrega inválidos, o (para `DELIVERYMAN`) la dirección
   seleccionada existe pero le faltan campos necesarios para la entrega
-- `404` — (para `DELIVERYMAN`) `addressUuid` no existe o no pertenece a la cuenta autenticada
+- `404` — (para `DELIVERYMAN`) `addressUuid` no existe o no pertenece a la cuenta autenticada,
+  **o** `couponCode` no existe/está inactivo (mismo mensaje genérico para ambos casos)
 - `409` — uno o más productos sin disponibilidad suficiente (sin stock, o precio local
-  inconsistente — ver nota abajo) — validación 100% local contra Postgres, sin ninguna llamada
-  en vivo a Sicar X en este paso.
+  inconsistente — ver nota abajo), **o** el `couponCode` enviado ya no aplica (expiró, no
+  alcanza el mínimo, alcanzó su límite de usos, etc.) — validación 100% local contra Postgres,
+  sin ninguna llamada en vivo a Sicar X en este paso.
 
 ## Reseñas y calificaciones de productos
 
@@ -1388,10 +1464,17 @@ token de auth — aquí no hay token, así que van explícitos en el body:
   "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
   "createdAt": "2026-07-10T18:32:05Z",
   "cancellationReason": null,
+  "couponCode": null,
+  "discountAmount": null,
+  "subtotal": null,
   "clientEmail": "juan@example.com",
   "clientName": "Juan Pérez"
 }
 ```
+
+`couponCode`/`discountAmount`/`subtotal` — mismo significado que en `GET /v1/auth/me/orders`
+(ver arriba) — vienen aquí "gratis" porque este webhook reusa el mismo `OrderPublic`. Útil si
+quieres mostrar "ahorraste $X" en el correo de confirmación.
 
 `clientEmail` es el destinatario a usar — se toma de `deliveryInfo.contactInfo.email` cuando la
 orden trae uno, y solo cae de vuelta al email de la cuenta (`ClientAccount.email`) si la orden se

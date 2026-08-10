@@ -8,13 +8,14 @@ from app.core.database import DbDep
 from app.core.security import validate_api_key, CurrentClientHeaderDep
 from app.core.rate_limit import limiter
 from app.models.order import Order
-from app.services.order_service import validate_cart_items, build_order_payload, _to_decimal
+from app.services.order_service import validate_cart_items, build_order_payload, compute_subtotal, _to_decimal
 from app.services.product_stock_service import apply_reserved_deltas
 from app.services.order_history_service import create_local_order, get_owned_order_by_sicar_id, finalize_order_payment, prepare_local_cancellation
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
 from app.services.address_service import get_owned_address
 from app.services import payment_service
+from app.services import coupon_service
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse
 from app.schemas.client import ClientAddressPublic
 from app.core.config import settings
@@ -91,6 +92,7 @@ async def create_order(
                         orderUuid=cached_order.uuid,
                         preferenceId=cached_order.mp_preference_id,
                         amount=float(cached_order.total),
+                        discountAmount=float(cached_order.discount_amount) if cached_order.discount_amount is not None else 0.0,
                     )
             if not is_claim_abandoned(claim):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya hay una solicitud en proceso con esta clave de idempotencia. Espera unos segundos e intenta de nuevo.")
@@ -105,6 +107,16 @@ async def create_order(
 
     try:
         local_products = await validate_cart_items(db, uuids, requested_quantities)
+
+        # Cupon: se re-valida y bloquea AQUI, nunca se confia el descuento que GET /cart ya
+        # mostro como preview - mismo principio que precio/stock, nunca confiar en el cliente.
+        discount_amount = Decimal("0")
+        coupon = None
+        if order_payload.couponCode:
+            raw_subtotal = compute_subtotal(local_products, requested_quantities)
+            coupon = await coupon_service.lock_and_validate_coupon(db, order_payload.couponCode, client.id, raw_subtotal)
+            scoped_subtotal = await coupon_service.compute_scoped_subtotal(db, coupon, local_products, requested_quantities)
+            discount_amount = coupon_service.compute_discount_amount(coupon, scoped_subtotal)
 
         delivery_address_snapshot = None
         if order_payload.deliveryInfo.deliveryType == "DELIVERYMAN":
@@ -152,6 +164,7 @@ async def create_order(
             price_list_uuid=price_list_uuid,
             content_id=content_id,
             wholesale_prices=order_payload.wholesalePrices,
+            discount_amount=discount_amount,
         )
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
 
@@ -167,7 +180,15 @@ async def create_order(
             order_payload_dict=order_payload_dict,
             local_products=local_products,
             delivery_address_snapshot=delivery_address_snapshot,
+            coupon_id=coupon.id if coupon else None,
+            coupon_code=coupon.code if coupon else None,
         )
+
+        # Debe ir DESPUES de create_local_order (necesita local_order.id) y DENTRO de la
+        # misma transaccion/lock que coupon_service.lock_and_validate_coupon de arriba, para
+        # que el conteo de topes de uso y este insert sean atomicos entre si.
+        if coupon is not None:
+            await coupon_service.create_redemption(db, coupon, client.id, local_order.id)
 
         # No fatal: la orden sigue soportando tarjeta/OXXO sin la opcion de wallet si
         # Mercado Pago no responde aqui - ver payment_service.create_preference.
@@ -193,6 +214,7 @@ async def create_order(
             orderUuid=local_order.uuid,
             preferenceId=local_order.mp_preference_id,
             amount=total_amount,
+            discountAmount=float(discount_amount),
         )
 
     except HTTPException:

@@ -7,8 +7,8 @@ from app.core.security import validate_api_key, OptionalClientHeaderDep, Current
 from app.core.cookies import CART_COOKIE_NAME, set_cart_cookie, clear_cart_cookie
 from app.models.client import ClientAccount
 from app.models.cart import Cart
-from app.schemas.cart import CartReplace, CartMergeRequest, CartItemDelta, CartResponse
-from app.services.cart_service import get_cart_response, replace_cart, clear_cart, merge_cart, adjust_cart_item
+from app.schemas.cart import CartReplace, CartMergeRequest, CartItemDelta, CartCouponApply, CartResponse
+from app.services.cart_service import get_cart_response, replace_cart, clear_cart, merge_cart, adjust_cart_item, apply_coupon_to_cart, remove_coupon_from_cart
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/cart", tags=["Cart"], dependencies=[Depends(validate_api_key)])
@@ -77,6 +77,22 @@ async def delete_cart(db: DbDep, ctx: CartContextDep, response: Response):
     _, cart = ctx
     await clear_cart(db, cart)
     clear_cart_cookie(response)
+
+@router.post("/coupon", response_model=CartResponse, summary="Aplicar un cupón al carrito")
+async def apply_cart_coupon(db: DbDep, ctx: CartContextDep, data: CartCouponApply = Body()):
+    """
+    Guarda el código de cupón en el carrito resuelto (400 si no hay carrito o está vacío) y
+    lo valida una vez para dar feedback inmediato. Esto es solo un preview - la aplicación
+    autoritativa (y el bloqueo real del uso) ocurre en `POST /orders` vía `couponCode`.
+    """
+    client, cart = ctx
+    return await apply_coupon_to_cart(db, client, cart, data.code)
+
+@router.delete("/coupon", response_model=CartResponse, summary="Quitar el cupón del carrito")
+async def remove_cart_coupon(db: DbDep, ctx: CartContextDep):
+    """Quita el cupón aplicado al carrito resuelto. No-op si no hay carrito o no tiene cupón."""
+    _, cart = ctx
+    return await remove_coupon_from_cart(db, cart)
 
 @router.post("/merge", response_model=CartResponse, summary="Fusionar un carrito anonimo a la cuenta autenticada")
 async def merge_cart_endpoint(client: CurrentClientDep, db: DbDep, response: Response, data: CartMergeRequest = Body()):

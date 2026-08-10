@@ -9,12 +9,13 @@ from app.models.client import ClientAccount
 from app.models.product import Product
 from app.schemas.cart import CartItemPublic, CartResponse
 from app.schemas.orders import ProductItem
+from app.services import coupon_service
 from app.services.order_service import _to_decimal
 
 logger = logging.getLogger(__name__)
 
-async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPublic], float, float]:
-    """Enriquece lineas guardadas (uuid+quantity) con datos frescos de Product - precio/nombre/stock nunca se guardan en el carrito."""
+async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPublic], float, float, dict]:
+    """Enriquece lineas guardadas (uuid+quantity) con datos frescos de Product - precio/nombre/stock nunca se guardan en el carrito. Tambien devuelve el mapa de Product resuelto (uuid->Product) para que get_cart_response lo reuse en el preview de cupon en vez de volver a consultar."""
     uuids = [item.get("uuid") for item in raw_items if item.get("uuid")]
     products_by_uuid = {}
     if uuids:
@@ -53,14 +54,33 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
             ))
 
     subtotal = float(subtotal_decimal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-    return enriched, subtotal, total_quantity
+    return enriched, subtotal, total_quantity, products_by_uuid
 
 async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartResponse:
-    """Ningun GET crea una fila - si no hay carrito, se responde un carrito vacio."""
+    """Ningun GET crea una fila - si no hay carrito, se responde un carrito vacio. El
+    descuento del cupon aplicado (si hay uno) se recalcula en vivo en cada lectura, mismo
+    criterio que precio/stock - nunca se confia un monto guardado. Un cupon que ya no aplica
+    (expirado, no alcanza el minimo, etc.) no falla la lectura: couponValid queda false y
+    couponInvalidReason explica por que, mismo idioma que una linea con available=false."""
     if cart is None:
-        return CartResponse(items=[], subtotal=0.0, totalQuantity=0.0, cartToken=None, updatedAt=None)
+        return CartResponse(items=[], subtotal=0.0, totalQuantity=0.0, cartToken=None, updatedAt=None, total=0.0)
 
-    enriched, subtotal, total_quantity = await _enrich(db, cart.items or [])
+    enriched, subtotal, total_quantity, products_by_uuid = await _enrich(db, cart.items or [])
+
+    coupon_valid = False
+    discount_amount = 0.0
+    invalid_reason = None
+    if cart.coupon_code:
+        try:
+            coupon = await coupon_service.get_coupon_by_code(db, cart.coupon_code)
+            await coupon_service.validate_coupon_eligibility(db, coupon, cart.client_account_id, _to_decimal(subtotal))
+            quantities = {item["uuid"]: item["quantity"] for item in (cart.items or []) if item.get("uuid")}
+            scoped_subtotal = await coupon_service.compute_scoped_subtotal(db, coupon, products_by_uuid, quantities)
+            discount_amount = float(coupon_service.compute_discount_amount(coupon, scoped_subtotal))
+            coupon_valid = True
+        except HTTPException as e:
+            invalid_reason = e.detail
+
     # cartToken siempre se deriva del carrito resuelto, nunca hace eco de lo que mando el cliente.
     cart_token = cart.uuid if cart.client_account_id is None else None
     return CartResponse(
@@ -69,6 +89,11 @@ async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartRespo
         totalQuantity=total_quantity,
         cartToken=cart_token,
         updatedAt=cart.updated_at or cart.created_at,
+        couponCode=cart.coupon_code,
+        couponValid=coupon_valid,
+        couponInvalidReason=invalid_reason,
+        discountAmount=discount_amount,
+        total=max(subtotal - discount_amount, 0.0),
     )
 
 async def replace_cart(
@@ -191,6 +216,36 @@ async def adjust_cart_item(
         existing_cart.items = raw_items
         cart = existing_cart
 
+    await db.commit()
+    await db.refresh(cart)
+    return await get_cart_response(db, cart)
+
+async def apply_coupon_to_cart(db: AsyncSession, client: Optional[ClientAccount], cart: Optional[Cart], code: str) -> CartResponse:
+    """Guarda el codigo en el carrito para que se prevea en cada GET - NO es la aplicacion
+    autoritativa (esa solo ocurre en POST /orders, ver coupon_service.lock_and_validate_coupon).
+    Se valida una vez aqui (sin lock de Coupon) solo para dar feedback inmediato (404/409) en
+    vez de guardar en silencio un codigo que ya se sabe invalido."""
+    if cart is None or not (cart.items or []):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El carrito está vacío.")
+
+    cart = await _lock_cart(db, cart.id)
+    _, subtotal, _, products_by_uuid = await _enrich(db, cart.items or [])
+    coupon = await coupon_service.get_coupon_by_code(db, code)
+    await coupon_service.validate_coupon_eligibility(db, coupon, client.id if client else None, _to_decimal(subtotal))
+
+    cart.coupon_code = coupon.code
+    await db.commit()
+    await db.refresh(cart)
+    logger.info(f"Cupón '{coupon.code}' aplicado al carrito {cart.uuid} ({'cliente ' + str(cart.client_account_id) if cart.client_account_id else 'anonimo'}).")
+    return await get_cart_response(db, cart)
+
+async def remove_coupon_from_cart(db: AsyncSession, cart: Optional[Cart]) -> CartResponse:
+    """Tolerante: sin carrito o sin cupon aplicado es un no-op 200, mismo idioma que clear_cart con carrito ausente."""
+    if cart is None or not cart.coupon_code:
+        return await get_cart_response(db, cart)
+
+    cart = await _lock_cart(db, cart.id)
+    cart.coupon_code = None
     await db.commit()
     await db.refresh(cart)
     return await get_cart_response(db, cart)

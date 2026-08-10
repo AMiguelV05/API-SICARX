@@ -11,6 +11,7 @@ from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_service import _to_decimal
 from app.services.product_stock_service import apply_reserved_deltas, apply_sales_count_deltas
+from app.services import coupon_service
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,16 @@ MP_APPROVED_STATUSES = {"approved"}
 MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
 
-async def create_local_order(db: AsyncSession, client_account_id: int, order_payload_dict: dict, local_products: dict | None = None, delivery_address_snapshot: dict | None = None) -> Order:
+async def create_local_order(
+    db: AsyncSession, client_account_id: int, order_payload_dict: dict, local_products: dict | None = None,
+    delivery_address_snapshot: dict | None = None, coupon_id: int | None = None, coupon_code: str | None = None,
+) -> Order:
     """Persiste la orden localmente (status siempre "TO_PAY" en este punto; ver
     finalize_order_payment). `sicar_order_id` se genera aqui con `uuid.uuid4()` - ya no
     viene de una respuesta real de Sicar X, checkout no le avisa nada todavia.
     `local_products` solo se usa para agregar `imageUrl` a cada item guardado.
+    `coupon_id`/`coupon_code` (opcionales) ya vienen validados/bloqueados por el llamador
+    (routes/orders.py, via coupon_service.lock_and_validate_coupon) - aqui solo se persisten.
 
     NO hace commit, solo `flush()` (para que `order.id`/`order.uuid` esten disponibles al
     llamador) - `routes/orders.py::create_order` hace el unico commit junto con el
@@ -50,6 +56,10 @@ async def create_local_order(db: AsyncSession, client_account_id: int, order_pay
         delivery_info=eco_order.get("deliveryInfo"),
         items=items,
         delivery_address_snapshot=delivery_address_snapshot,
+        coupon_id=coupon_id,
+        coupon_code=coupon_code,
+        subtotal=Decimal(str(eco_order.get("subtotal"))) if eco_order.get("subtotal") is not None else None,
+        discount_amount=Decimal(str(eco_order.get("discountAmount"))) if eco_order.get("discountAmount") is not None else None,
     )
     db.add(order)
     await db.flush()
@@ -149,6 +159,13 @@ async def prepare_local_cancellation(
     # Solo una orden que llego a estar PAID incremento sales_count (ver finalize_order_payment) - hay que revertirlo aqui; una que se cancela desde TO_PAY nunca lo incremento.
     was_paid = order.status == "PAID"
 
+    # Libera la redencion del cupon SOLO si sigue PENDING (la orden nunca llego a PAID) - una
+    # ya CONFIRMED no se toca (anti-abuso deliberado, ver CLAUDE.md/coupon_service). Se decide
+    # por el estado de la propia redencion, no el de la orden, asi que es seguro llamarla
+    # incondicionalmente en las 3 rutas de cancelacion que comparten esta funcion.
+    if order.coupon_id:
+        await coupon_service.release_redemption(db, order)
+
     deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
     if order.accepted_at is None:
         # Nunca se le aviso a Sicar X de esta orden - solo liberar el hold local.
@@ -213,6 +230,9 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             # Registro de "mas vendidos" (Product.sales_count) - solo en la transicion real, nunca en un reintento del webhook para una orden ya PAID.
             deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
             await apply_sales_count_deltas(db, deltas)
+            # Idem para la redencion del cupon: consumo permanente solo en la transicion real a PAID.
+            if order.coupon_id:
+                await coupon_service.confirm_redemption(db, order)
     elif mp_status in MP_PENDING_STATUSES:
         # Solo aplica si sigue TO_PAY - una notificacion pending/in_process tardia de OTRO intento de pago no debe regresar una orden ya resuelta a TO_PAY.
         if order.status == "TO_PAY":

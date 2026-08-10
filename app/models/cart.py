@@ -14,5 +14,8 @@ class Cart(Base):
     )
     # Solo referencias [{"uuid","quantity"}], nunca snapshot de precio/nombre; JSON simple, nada consulta dentro.
     items = Column(JSON, nullable=False, default=list)
+    # Codigo de cupon aplicado (preview) - se revalida en vivo en cada lectura, nunca se
+    # confia el descuento guardado; la aplicacion real/autoritativa ocurre en POST /orders.
+    coupon_code = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())

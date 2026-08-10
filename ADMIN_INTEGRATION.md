@@ -892,6 +892,177 @@ category_uuid,category_path,category_slug,product_sku,product_name,product_price
   criterio que `ProductBasic.stock` en el storefront.
 - `404` si `categoryUuid` no corresponde a una categoría real.
 
+### Cupones (descuentos)
+
+Endpoints para administrar códigos de cupón/descuento. Un cupón es `PERCENTAGE` (con tope
+opcional `maxDiscountAmount`) o `FIXED_AMOUNT`, y su `scopeType` decide sobre qué parte del
+carrito aplica el descuento: `ORDER` (el carrito completo), `CATEGORY` (solo las líneas cuyo
+producto está en alguna de las categorías asignadas al cupón — vía `PUT .../categories`,
+descendiente-inclusivo igual que el filtro `taxonomyUuid` de `/catalog`/`/search`) o
+`PRODUCT` (solo las líneas de los productos asignados vía `PUT .../products`). Un cupón
+`CATEGORY`/`PRODUCT` sin nada asignado todavía no es un error — simplemente no descuenta
+nada hasta que se le asigne un alcance.
+
+Cuatro mecanismos de límite de uso, combinables entre sí en el mismo cupón:
+`maxTotalUses` (tope global), `maxUsesPerClient` (tope por cliente — usar `1` para "una vez
+por cliente"), `firstPurchaseOnly` (solo clientes sin ninguna orden `PAID` previa), y
+"código asignado" (vía `PUT .../clients`: si la lista de clientes elegibles no está vacía,
+solo esos clientes pueden redimirlo — vacía significa público). También soporta ventana de
+vigencia (`startsAt`/`endsAt`, ambos opcionales) y `minOrderAmount`.
+
+**Política anti-abuso deliberada**: una vez que una orden llega a `PAID`, el uso del cupón
+queda **consumido para siempre**, incluso si esa orden se cancela o reembolsa después — así
+un cliente no puede aplicar-pagar-cancelar-reaplicar el mismo código repetidamente. Solo un
+uso que nunca llegó a `PAID` (la orden se canceló/eliminó mientras seguía `TO_PAY`) libera el
+cupo de vuelta. `GET .../redemptions` (abajo) muestra el historial completo con su `status`
+(`PENDING`/`CONFIRMED`/`RELEASED`) para auditar esto.
+
+El storefront solo ve el código en dos puntos: `POST`/`DELETE /v1/cart/coupon` (preview en el
+carrito, no autoritativo) y `couponCode` en `POST /v1/orders` (donde se valida y bloquea de
+verdad) — ver `FRONTEND_INTEGRATION.md`.
+
+#### `POST /v1/admin/coupons` — crear un cupón
+
+```http
+POST /v1/admin/coupons
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{
+  "code": "WELCOME10",
+  "discountType": "PERCENTAGE",
+  "discountValue": 10,
+  "maxDiscountAmount": 200,
+  "scopeType": "ORDER",
+  "minOrderAmount": 300,
+  "maxUsesPerClient": 1,
+  "firstPurchaseOnly": true
+}
+```
+
+`code` se normaliza a mayúsculas/sin espacios al guardar y comparar — no importa cómo lo
+teclee el cliente en el carrito. `maxDiscountAmount` solo es válido con
+`discountType: "PERCENTAGE"` (`422` si se manda con `FIXED_AMOUNT`); `discountValue` no puede
+exceder `100` para `PERCENTAGE` (`422`). `409` si ya existe un cupón con ese código.
+
+Respuesta `201`: mismo shape que `GET /{uuid}` de abajo.
+
+#### `GET /v1/admin/coupons` — buscar/listar cupones
+
+```http
+GET /v1/admin/coupons?isActive=true&code=WELCOME&limit=60&offset=0
+X-Admin-Key: <admin-key>
+```
+
+Paginado (`limit`/`offset`, mismo estilo que el resto de este documento). `code` es
+coincidencia parcial sin distinguir mayúsculas; `isActive` filtra exacto.
+
+```json
+{
+  "total": 1,
+  "docs": [
+    {
+      "uuid": "b2e4b3f0-...",
+      "code": "WELCOME10",
+      "discountType": "PERCENTAGE",
+      "discountValue": 10,
+      "maxDiscountAmount": 200,
+      "scopeType": "ORDER",
+      "minOrderAmount": 300,
+      "startsAt": null,
+      "endsAt": null,
+      "isActive": true,
+      "maxTotalUses": null,
+      "maxUsesPerClient": 1,
+      "firstPurchaseOnly": true,
+      "createdAt": "2026-08-10T12:00:00Z",
+      "updatedAt": null
+    }
+  ]
+}
+```
+
+#### `GET /v1/admin/coupons/{uuid}` — detalle de un cupón
+
+Mismo shape que un elemento de `docs` arriba. `404` si no existe.
+
+#### `PATCH /v1/admin/coupons/{uuid}` — actualización parcial
+
+Igual que categorías/vehículos: solo los campos incluidos en el body se tocan
+(`exclude_unset`). Reutiliza las mismas validaciones de `POST` (`422` si el nuevo shape de
+`discountType`/`maxDiscountAmount`/`discountValue`/fechas queda inconsistente; `409` si el
+nuevo `code` ya lo usa otro cupón).
+
+#### `DELETE /v1/admin/coupons/{uuid}` — eliminar un cupón
+
+`204` sin cuerpo. `409` si el cupón **ya tiene algún uso registrado** (cualquier
+`status` — `PENDING`, `CONFIRMED` o `RELEASED`) — preserva la integridad histórica de las
+órdenes que lo usaron. Para retirar un cupón que ya se usó, usa `PATCH {"isActive": false}`
+en vez de borrarlo.
+
+#### `PUT /v1/admin/coupons/{uuid}/categories` — reemplazar las categorías del alcance
+
+```http
+PUT /v1/admin/coupons/b2e4b3f0-.../categories
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "categoryUuids": ["3f9a1c2e-..."] }
+```
+
+Solo válido si el cupón tiene `scopeType: "CATEGORY"` (`409` si no). Reemplazo completo del
+conjunto, no incremental (a diferencia de `PATCH .../products` en categorías/vehículos, aquí
+no hay una variante incremental). `404` si algún `categoryUuid` no existe.
+
+#### `PUT /v1/admin/coupons/{uuid}/products` — reemplazar los productos del alcance
+
+Mismo comportamiento que el de categorías arriba, pero para `scopeType: "PRODUCT"` — recibe
+`productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe).
+
+#### `PUT /v1/admin/coupons/{uuid}/clients` — reemplazar la lista de clientes elegibles
+
+```http
+PUT /v1/admin/coupons/b2e4b3f0-.../clients
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "clientEmails": ["vip@example.com"] }
+```
+
+Resuelto por **email**, no por `uuid` de cliente — es lo que un admin tiene a mano. Lista
+vacía = cupón público (cualquier cliente puede intentar redimirlo, sujeto a las demás
+reglas); no vacía = solo esos clientes. `404` si algún email no corresponde a una cuenta
+existente.
+
+#### `GET /v1/admin/coupons/{uuid}/redemptions` — historial de usos
+
+```http
+GET /v1/admin/coupons/b2e4b3f0-.../redemptions?limit=60&offset=0
+X-Admin-Key: <admin-key>
+```
+
+```json
+{
+  "total": 2,
+  "docs": [
+    {
+      "id": 41,
+      "clientAccountId": 7,
+      "clientEmail": "juan@example.com",
+      "orderUuid": "f1a2b3c4-...",
+      "status": "CONFIRMED",
+      "createdAt": "2026-08-10T12:05:00Z",
+      "updatedAt": "2026-08-10T12:08:00Z"
+    }
+  ]
+}
+```
+
+`status`: `PENDING` (orden creada, esperando llegar a `PAID`), `CONFIRMED` (orden llegó a
+`PAID` — uso consumido para siempre), `RELEASED` (la orden se canceló/eliminó antes de
+pagarse — el cupo se liberó y el cliente puede volver a usar el código, sujeto a los demás
+límites).
+
 ### Vehículos (compatibilidad)
 
 Endpoints para administrar `vehicles` — un catálogo plano de fitments
