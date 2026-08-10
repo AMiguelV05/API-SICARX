@@ -302,7 +302,7 @@ async def unmark_helpful(db: AsyncSession, client: ClientAccount, review_uuid: s
 # --- Admin -----------------------------------------------------------------
 
 async def admin_list_reviews(
-    db: AsyncSession, *, product_uuid: str | None, client_email: str | None, client_uuid: str | None,
+    db: AsyncSession, *, product_uuid: str | None, product_sku: str | None, client_email: str | None, client_uuid: str | None,
     rating: int | None, is_hidden: bool | None, has_reply: bool | None, limit: int, offset: int,
 ) -> AdminReviewListResponse:
     query = select(ProductReview).join(ProductReview.product).join(ProductReview.client_account)
@@ -311,6 +311,10 @@ async def admin_list_reviews(
     filters = []
     if product_uuid is not None:
         filters.append(Product.sicar_uuid == product_uuid)
+    if product_sku is not None:
+        # Case-insensitive exacto (mismo patron que bulk_import_service._resolve_products)
+        # - no substring: un admin buscando por SKU ya sabe el codigo exacto del producto.
+        filters.append(func.upper(Product.sku) == product_sku.upper())
     if client_email is not None:
         filters.append(ClientAccount.email == client_email.lower())
     if client_uuid is not None:

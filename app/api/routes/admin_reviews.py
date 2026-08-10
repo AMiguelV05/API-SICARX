@@ -13,6 +13,7 @@ router = APIRouter(prefix="/admin/reviews", tags=["Admin - Reviews"], dependenci
 async def admin_list_reviews(
     db: DbDep,
     product_uuid: Optional[str] = Query(default=None, alias="productUuid"),
+    product_sku: Optional[str] = Query(default=None, alias="productSku", description="Coincidencia exacta (sin distinguir mayusculas) contra Product.sku"),
     client_email: Optional[str] = Query(default=None, alias="clientEmail"),
     client_uuid: Optional[str] = Query(default=None, alias="clientUuid"),
     rating: Optional[int] = Query(default=None, ge=1, le=5),
@@ -21,10 +22,11 @@ async def admin_list_reviews(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
-    """Listado admin-wide de reseñas (no solo de un producto), filtrable y paginado. Incluye ocultas salvo que se filtre `isHidden=false` explicitamente."""
+    """Listado admin-wide de reseñas (no solo de un producto), filtrable y paginado - por `productUuid` o `productSku` (coincidencia exacta) para buscar las reseñas de un producto en particular. Incluye ocultas salvo que se filtre `isHidden=false` explicitamente."""
     return await review_service.admin_list_reviews(
         db,
         product_uuid=product_uuid,
+        product_sku=product_sku,
         client_email=client_email,
         client_uuid=client_uuid,
         rating=rating,

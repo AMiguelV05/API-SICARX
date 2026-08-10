@@ -1790,13 +1790,15 @@ storefront-facing (listar, crear, editar, marcar útil).
 #### `GET /v1/admin/reviews` — buscar/listar reseñas (todos los productos)
 
 ```http
-GET /v1/admin/reviews?productUuid=3Cny4OOxdX1GoSzL9rEsTZNL7un&isHidden=false&limit=50&offset=0
+GET /v1/admin/reviews?productSku=HV-3617&isHidden=false&limit=50&offset=0
 X-Admin-Key: <admin-key>
 ```
 
-Filtros, todos opcionales y combinables: `productUuid`, `clientEmail`, `clientUuid`,
-`rating` (1-5), `isHidden`, `hasReply`. Sin filtros, devuelve todas las reseñas de
-todos los productos (incluidas las ocultas), más recientes primero.
+Filtros, todos opcionales y combinables: `productUuid`, `productSku` (coincidencia
+exacta contra `Product.sku`, sin distinguir mayúsculas/minúsculas — útil cuando el
+admin tiene el código del producto a la mano pero no su `uuid`), `clientEmail`,
+`clientUuid`, `rating` (1-5), `isHidden`, `hasReply`. Sin filtros, devuelve todas las
+reseñas de todos los productos (incluidas las ocultas), más recientes primero.
 
 Respuesta `200`:
 ```json
