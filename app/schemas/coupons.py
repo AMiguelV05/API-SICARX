@@ -3,6 +3,8 @@ from datetime import datetime
 from pydantic import EmailStr, Field, field_validator, model_validator
 from app.schemas.base import CamelModel
 from app.schemas.orders import validate_coupon_code_format
+from app.schemas.taxonomy import CategoryAdminPublic
+from app.schemas.products import ProductAdminBasic
 
 DiscountType = Literal["PERCENTAGE", "FIXED_AMOUNT"]
 CouponScopeType = Literal["ORDER", "CATEGORY", "PRODUCT"]
@@ -83,6 +85,11 @@ class CouponListResponse(CamelModel):
     docs: List[CouponAdminPublic]
 
 
+class CouponCategoriesResponse(CamelModel):
+    """Lectura del alcance CATEGORY actual - sin paginar, para poblar la UI antes de un PUT."""
+    docs: List[CategoryAdminPublic]
+
+
 class ReplaceCouponCategoriesRequest(CamelModel):
     category_uuids: List[str] = Field(default_factory=list, max_length=5000)
 
@@ -92,6 +99,11 @@ class ReplaceCouponCategoriesResponse(CamelModel):
     category_uuids: List[str]
 
 
+class CouponProductsResponse(CamelModel):
+    total: int
+    docs: List[ProductAdminBasic]
+
+
 class ReplaceCouponProductsRequest(CamelModel):
     product_uuids: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de cada producto - reemplaza el conjunto completo del alcance del cupón.")
 
@@ -99,6 +111,20 @@ class ReplaceCouponProductsRequest(CamelModel):
 class ReplaceCouponProductsResponse(CamelModel):
     coupon_uuid: str
     product_uuids: List[str]
+
+
+class CouponAssignedClientPublic(CamelModel):
+    """Vista acotada del cliente para la lista de elegibles - NO ClientPublic (esa carga
+    `addresses`, que necesita un awaitable_attrs explícito antes de serializar; aquí no
+    hace falta ni se resuelve)."""
+    uuid: str
+    email: str
+    name: str
+
+
+class CouponClientsResponse(CamelModel):
+    total: int
+    docs: List[CouponAssignedClientPublic]
 
 
 class ReplaceCouponClientsRequest(CamelModel):

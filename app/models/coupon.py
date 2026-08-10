@@ -5,25 +5,38 @@ from app.core.database import Base
 # N:M cupon<->categoria, solo relevante cuando Coupon.scope_type == "CATEGORY" - la
 # pertenencia scope_type/junction correcta se valida en coupon_service, no aqui (sin
 # precedente de CHECK/trigger cross-tabla en este codebase).
+#
+# ondelete="CASCADE" solo en el lado coupon_id: estas filas describen exclusivamente al
+# cupon (no tienen sentido sin el), a diferencia de product_categories/product_vehicles
+# donde ambos lados son entidades independientes - borrar un cupon debe limpiar su propio
+# alcance/elegibilidad automaticamente, no bloquear (habria que vaciar el alcance a mano
+# antes de poder borrar, lo cual es al reves de lo util). El lado category_uuid/product_id/
+# client_account_id se deja SIN cascade a proposito: borrar una categoria/producto/cliente
+# que un cupon sigue usando debe bloquearse (409) en delete_category, no arrastrar en
+# silencio el alcance de un cupon activo - ver taxonomy_service.delete_category.
 coupon_categories = Table(
     "coupon_categories", Base.metadata,
-    Column("coupon_id", Integer, ForeignKey("coupons.id"), primary_key=True),
+    Column("coupon_id", Integer, ForeignKey("coupons.id", ondelete="CASCADE"), primary_key=True),
     Column("category_uuid", String, ForeignKey("categories.uuid"), primary_key=True),
 )
 
 # N:M cupon<->producto, solo relevante cuando scope_type == "PRODUCT". product_id (no
-# sicar_uuid), igual que product_categories/product_vehicles.
+# sicar_uuid), igual que product_categories/product_vehicles. Productos nunca se borran de
+# verdad en este codebase (solo is_deleted), asi que a diferencia de category_uuid arriba,
+# el lado product_id nunca puede romper por un DELETE real de todas formas.
 coupon_products = Table(
     "coupon_products", Base.metadata,
-    Column("coupon_id", Integer, ForeignKey("coupons.id"), primary_key=True),
+    Column("coupon_id", Integer, ForeignKey("coupons.id", ondelete="CASCADE"), primary_key=True),
     Column("product_id", Integer, ForeignKey("products.id"), primary_key=True),
 )
 
 # N:M cupon<->cliente elegible ("codigos asignados"). Vacia = cupon publico (cualquier
 # cliente puede intentarlo, sujeto a las demas reglas); no vacia = solo estos clientes.
+# Cuentas de cliente tampoco se borran de verdad hoy (ver CLAUDE.md), mismo razonamiento
+# que product_id arriba.
 coupon_assigned_clients = Table(
     "coupon_assigned_clients", Base.metadata,
-    Column("coupon_id", Integer, ForeignKey("coupons.id"), primary_key=True),
+    Column("coupon_id", Integer, ForeignKey("coupons.id", ondelete="CASCADE"), primary_key=True),
     Column("client_account_id", Integer, ForeignKey("client_accounts.id"), primary_key=True),
 )
 

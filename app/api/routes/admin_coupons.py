@@ -8,15 +8,21 @@ from app.schemas.coupons import (
     CouponCreateRequest,
     CouponUpdateRequest,
     CouponListResponse,
+    CouponCategoriesResponse,
     ReplaceCouponCategoriesRequest,
     ReplaceCouponCategoriesResponse,
+    CouponProductsResponse,
     ReplaceCouponProductsRequest,
     ReplaceCouponProductsResponse,
+    CouponAssignedClientPublic,
+    CouponClientsResponse,
     ReplaceCouponClientsRequest,
     ReplaceCouponClientsResponse,
     CouponRedemptionAdminPublic,
     CouponRedemptionListResponse,
 )
+from app.schemas.taxonomy import CategoryAdminPublic
+from app.schemas.products import ProductAdminBasic
 from app.services import coupon_service
 
 logger = logging.getLogger(__name__)
@@ -74,11 +80,33 @@ async def admin_replace_coupon_categories(coupon_uuid: str, db: DbDep, data: Rep
     return ReplaceCouponCategoriesResponse(coupon_uuid=coupon_uuid, category_uuids=category_uuids)
 
 
+@router.get("/{coupon_uuid}/categories", response_model=CouponCategoriesResponse, summary="Listar las categorías asignadas al alcance del cupón")
+async def admin_list_coupon_categories(coupon_uuid: str, db: DbDep):
+    """Lectura del alcance CATEGORY actual, para poblar la UI de edición antes de un `PUT`
+    de arriba. Sin paginar (acotada por naturaleza) - `[]` si el cupón no tiene ninguna
+    asignada todavía (incluye un cupón que no es `scopeType=CATEGORY`, no es un error)."""
+    categories = await coupon_service.list_coupon_categories(db, coupon_uuid)
+    return CouponCategoriesResponse(docs=[CategoryAdminPublic.model_validate(c) for c in categories])
+
+
 @router.put("/{coupon_uuid}/products", response_model=ReplaceCouponProductsResponse, summary="Reemplazar el conjunto completo de productos del alcance del cupón")
 async def admin_replace_coupon_products(coupon_uuid: str, db: DbDep, data: ReplaceCouponProductsRequest = Body()):
     """Solo válido para cupones con `scopeType=PRODUCT` (`409` si no). Reemplazo completo."""
     product_uuids = await coupon_service.replace_coupon_products(db, coupon_uuid, data.product_uuids)
     return ReplaceCouponProductsResponse(coupon_uuid=coupon_uuid, product_uuids=product_uuids)
+
+
+@router.get("/{coupon_uuid}/products", response_model=CouponProductsResponse, summary="Listar los productos asignados al alcance del cupón")
+async def admin_list_coupon_products(
+    coupon_uuid: str,
+    db: DbDep,
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Paginada (a diferencia de `.../categories`) - un cupón `scopeType=PRODUCT` puede
+    tener muchos productos asignados. Pensada para poblar la UI antes de un `PUT` de arriba."""
+    total, products = await coupon_service.list_coupon_products(db, coupon_uuid, limit, offset)
+    return CouponProductsResponse(total=total, docs=[ProductAdminBasic.model_validate(p) for p in products])
 
 
 @router.put("/{coupon_uuid}/clients", response_model=ReplaceCouponClientsResponse, summary="Reemplazar la lista de clientes elegibles para un cupón asignado")
@@ -88,6 +116,21 @@ async def admin_replace_coupon_clients(coupon_uuid: str, db: DbDep, data: Replac
     resuelve a una cuenta existente."""
     client_emails = await coupon_service.replace_coupon_clients(db, coupon_uuid, data.client_emails)
     return ReplaceCouponClientsResponse(coupon_uuid=coupon_uuid, client_emails=client_emails)
+
+
+@router.get("/{coupon_uuid}/clients", response_model=CouponClientsResponse, summary="Listar los clientes elegibles para un cupón asignado")
+async def admin_list_coupon_clients(
+    coupon_uuid: str,
+    db: DbDep,
+    limit: int = Query(default=60, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Paginada - una campaña de códigos asignados puede apuntar a muchos clientes. `[]` si
+    el cupón es público (nada asignado) - no distingue eso de `scopeType` no-CATEGORY/PRODUCT,
+    la elegibilidad por cliente es independiente del alcance de descuento."""
+    total, clients = await coupon_service.list_coupon_clients(db, coupon_uuid, limit, offset)
+    docs = [CouponAssignedClientPublic(uuid=c.uuid, email=c.email, name=c.name) for c in clients]
+    return CouponClientsResponse(total=total, docs=docs)
 
 
 @router.get("/{coupon_uuid}/redemptions", response_model=CouponRedemptionListResponse, summary="Listar el historial de usos de un cupón")

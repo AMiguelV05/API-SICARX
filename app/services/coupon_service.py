@@ -306,6 +306,44 @@ async def list_coupons(db: AsyncSession, limit: int, offset: int, *, is_active: 
     return total or 0, list(result.scalars().all())
 
 
+async def list_coupon_categories(db: AsyncSession, coupon_uuid: str) -> list[Category]:
+    """Lectura para poblar la UI de edicion antes de un PUT .../categories. Sin paginar
+    (acotada por naturaleza, mismo criterio que get_categories_for_product en
+    taxonomy_service) - el conjunto de categorias asignadas a UN cupon es chico."""
+    coupon = await get_coupon_by_uuid(db, coupon_uuid)
+    stmt = (
+        select(Category)
+        .join(coupon_categories, Category.uuid == coupon_categories.c.category_uuid)
+        .where(coupon_categories.c.coupon_id == coupon.id)
+        .order_by(func.lower(Category.name))
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def list_coupon_products(db: AsyncSession, coupon_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:
+    """Paginada (a diferencia de list_coupon_categories) - un cupon PRODUCT puede tener
+    muchos productos asignados, mismo criterio que list_category_products."""
+    coupon = await get_coupon_by_uuid(db, coupon_uuid)
+    base = select(Product).join(coupon_products, Product.id == coupon_products.c.product_id).where(
+        coupon_products.c.coupon_id == coupon.id,
+        Product.is_deleted == False,
+    )
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+    result = await db.execute(base.order_by(Product.name).limit(limit).offset(offset))
+    return total or 0, list(result.scalars().all())
+
+
+async def list_coupon_clients(db: AsyncSession, coupon_uuid: str, limit: int, offset: int) -> tuple[int, list[ClientAccount]]:
+    """Paginada - una campana de codigos asignados puede apuntar a muchos clientes."""
+    coupon = await get_coupon_by_uuid(db, coupon_uuid)
+    base = select(ClientAccount).join(coupon_assigned_clients, ClientAccount.id == coupon_assigned_clients.c.client_account_id).where(
+        coupon_assigned_clients.c.coupon_id == coupon.id
+    )
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+    result = await db.execute(base.order_by(ClientAccount.email).limit(limit).offset(offset))
+    return total or 0, list(result.scalars().all())
+
+
 async def replace_coupon_categories(db: AsyncSession, coupon_uuid: str, category_uuids: list[str]) -> list[str]:
     """Reemplaza el conjunto COMPLETO (no add/remove incremental) - mismo patron que replace_category_products."""
     coupon = await get_coupon_by_uuid(db, coupon_uuid)

@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.taxonomy import Category, product_categories
 from app.models.product import Product
+from app.models.coupon import coupon_categories
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,10 @@ async def delete_category(db: AsyncSession, category_uuid: str) -> None:
     has_products = await db.scalar(select(product_categories.c.product_id).where(product_categories.c.category_uuid == category_uuid).limit(1))
     if has_products:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta categoria tiene productos asignados; quitalos primero.")
+
+    has_coupons = await db.scalar(select(coupon_categories.c.coupon_id).where(coupon_categories.c.category_uuid == category_uuid).limit(1))
+    if has_coupons:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta categoria esta asignada al alcance de uno o mas cupones; quitala de ahi primero.")
 
     await db.delete(category)
     await db.commit()

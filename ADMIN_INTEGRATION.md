@@ -1000,7 +1000,13 @@ nuevo `code` ya lo usa otro cupón).
 órdenes que lo usaron. Para retirar un cupón que ya se usó, usa `PATCH {"isActive": false}`
 en vez de borrarlo.
 
-#### `PUT /v1/admin/coupons/{uuid}/categories` — reemplazar las categorías del alcance
+Borrar un cupón **sí elimina en cascada** sus propias filas de alcance/elegibilidad
+(`coupon_categories`/`coupon_products`/`coupon_assigned_clients`) — no hace falta vaciarlas
+a mano primero con los `PUT` de abajo. Esto es distinto de borrar una categoría/producto que
+un cupón todavía usa: eso sí se bloquea (`409`, ver `DELETE /v1/admin/categories/{uuid}`
+arriba) — quitarlo del alcance del cupón primero.
+
+#### `PUT`/`GET /v1/admin/coupons/{uuid}/categories` — alcance de categorías
 
 ```http
 PUT /v1/admin/coupons/b2e4b3f0-.../categories
@@ -1010,16 +1016,27 @@ Content-Type: application/json
 { "categoryUuids": ["3f9a1c2e-..."] }
 ```
 
-Solo válido si el cupón tiene `scopeType: "CATEGORY"` (`409` si no). Reemplazo completo del
-conjunto, no incremental (a diferencia de `PATCH .../products` en categorías/vehículos, aquí
-no hay una variante incremental). `404` si algún `categoryUuid` no existe.
+`PUT` — solo válido si el cupón tiene `scopeType: "CATEGORY"` (`409` si no). Reemplazo
+completo del conjunto, no incremental (a diferencia de `PATCH .../products` en
+categorías/vehículos, aquí no hay una variante incremental). `404` si algún `categoryUuid`
+no existe.
 
-#### `PUT /v1/admin/coupons/{uuid}/products` — reemplazar los productos del alcance
+`GET /v1/admin/coupons/{uuid}/categories` — lectura del alcance actual (sin paginar, acotada
+por naturaleza), para poblar la UI de edición antes de un `PUT`:
 
-Mismo comportamiento que el de categorías arriba, pero para `scopeType: "PRODUCT"` — recibe
-`productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe).
+```json
+{ "docs": [ { "uuid": "3f9a1c2e-...", "name": "Herramientas Eléctricas", "slug": "herramientas-electricas", "parentUuid": null, "updatedAt": "2026-08-01T12:00:00Z" } ] }
+```
 
-#### `PUT /v1/admin/coupons/{uuid}/clients` — reemplazar la lista de clientes elegibles
+#### `PUT`/`GET /v1/admin/coupons/{uuid}/products` — alcance de productos
+
+Mismo comportamiento que el de categorías arriba, pero para `scopeType: "PRODUCT"` — el `PUT`
+recibe `productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe). A diferencia
+del `GET` de categorías, `GET /v1/admin/coupons/{uuid}/products` **sí está paginado**
+(`limit`/`offset`, respuesta `{total, docs}`) — un cupón `PRODUCT` puede tener muchos
+productos asignados.
+
+#### `PUT`/`GET /v1/admin/coupons/{uuid}/clients` — lista de clientes elegibles
 
 ```http
 PUT /v1/admin/coupons/b2e4b3f0-.../clients
@@ -1029,10 +1046,17 @@ Content-Type: application/json
 { "clientEmails": ["vip@example.com"] }
 ```
 
-Resuelto por **email**, no por `uuid` de cliente — es lo que un admin tiene a mano. Lista
-vacía = cupón público (cualquier cliente puede intentar redimirlo, sujeto a las demás
+`PUT` — resuelto por **email**, no por `uuid` de cliente — es lo que un admin tiene a mano.
+Lista vacía = cupón público (cualquier cliente puede intentar redimirlo, sujeto a las demás
 reglas); no vacía = solo esos clientes. `404` si algún email no corresponde a una cuenta
 existente.
+
+`GET /v1/admin/coupons/{uuid}/clients` — lectura paginada de los clientes elegibles
+actuales (una campaña puede apuntar a muchos clientes):
+
+```json
+{ "total": 1, "docs": [ { "uuid": "a1b2c3-...", "email": "vip@example.com", "name": "Juan Pérez" } ] }
+```
 
 #### `GET /v1/admin/coupons/{uuid}/redemptions` — historial de usos
 
