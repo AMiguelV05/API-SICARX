@@ -23,6 +23,9 @@ from app.schemas.admin import (
     ShippingQuoteResponse,
     ShippingGenerateRequest,
     ShippingGenerateResponse,
+    ShippingCancelRequest,
+    ShippingCancelResponse,
+    ShippingCancelRefund,
 )
 from app.services import admin_service
 
@@ -179,4 +182,21 @@ async def admin_generate_shipping_label(order_uuid: str, db: DbDep, data: Shippi
         order_uuid=order.uuid,
         dispatch_status=order.dispatch_status,
         shipping_label=order.shipping_label,
+    )
+
+
+@router.post("/orders/{order_uuid}/shipping/cancel", response_model=ShippingCancelResponse, summary="Cancelar ante envia.com una guia de envio ya generada")
+async def admin_cancel_shipping_label(order_uuid: str, db: DbDep, data: ShippingCancelRequest = Body()):
+    """Cancela la guia real ante envia.com (identificada solo por `carrier`/`trackingNumber`,
+    ya persistidos en `shippingLabel`) y, si tiene exito, limpia `shippingLabel` y revierte
+    `dispatchStatus` de `DISPATCHED` a `COMPLETE` en la misma transaccion - la unica forma de
+    reabrir una orden a `/shipping/quote`/`/shipping/generate` despues de un error. `409` si
+    la orden no tiene guia. `502` si envia.com rechaza la cancelacion (p. ej. guia ya recogida
+    por el carrier o fuera de la ventana de cancelacion) - incluye el mensaje real de envia.com."""
+    order, refund = await admin_service.cancel_shipping_label(db, order_uuid, data.reason)
+    return ShippingCancelResponse(
+        order_uuid=order.uuid,
+        dispatch_status=order.dispatch_status,
+        shipping_label=None,
+        refund=ShippingCancelRefund(**refund),
     )

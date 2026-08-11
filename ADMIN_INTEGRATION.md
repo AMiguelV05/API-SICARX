@@ -638,23 +638,71 @@ buscar ahí para confirmar que el envío existe del lado de envia.com.
   válidas (mismo `Field(gt=0)` que `/quote`). `502` si envia.com falla (auth, `service` inválido,
   problema de cuenta con el carrier) — incluye el mensaje real de envia.com entre paréntesis.
 
-Este endpoint **también avanza el estado en Sicar X de forma asíncrona vía `sicar_sync_outbox`**
-(`action: "DISPATCH"`), igual que `ACCEPT`/`advance-status` — `dispatchStatus` se pone en
-`"DISPATCHED"` **de inmediato** en Postgres, en la misma transacción que persiste `shippingLabel`
-— el hecho real (guía generada, envia.com ya cobró) ya ocurrió en el momento en que este endpoint
-responde `200`, mismo principio "Postgres local autoritativo de inmediato" que ya usa la
-cancelación de pedidos y la confirmación de pago con Mercado Pago (ver `CLAUDE.md`). Avisarle a
-Sicar X es la parte que queda asíncrona/best-effort — revisa `GET /v1/admin/sync/outbox?status=FAILED`
-si sospechas que no se sincronizó. También dispara la misma notificación `order-dispatched` al
-storefront que `/advance-status` dispara para un `DISPATCHED` alcanzado manualmente (ver
-`FRONTEND_INTEGRATION.md`) — el cliente recibe el mismo mensaje sin importar cuál de los dos
-caminos se usó.
+**Corrección (2026-08-11): a diferencia de lo que este párrafo afirmaba antes, este endpoint
+NO encola nada en `sicar_sync_outbox`.** Confirmado contra el código real: `admin_service.
+generate_shipping_label` no crea ninguna fila de outbox, y `sicar_sync_worker.py` solo tiene
+ramas para `action == "ACCEPT"`/`"CANCEL"` (ambas atadas al espejo de inventario, no a envío) —
+no existe ni ha existido un `action: "DISPATCH"`. `dispatchStatus` se pone en `"DISPATCHED"`
+**de inmediato** en Postgres, en la misma transacción que persiste `shippingLabel`, y ahí
+termina — Sicar X nunca se entera de que existe una guía de envío, ni de forma síncrona ni
+asíncrona (mismo espíritu "Sicar X es solo ERP de inventario" de `CLAUDE.md`, llevado un paso
+más allá aquí). Si se necesita reflejar el envío en Sicar X, es un proceso manual fuera de este
+backend. Sí dispara la misma notificación `order-dispatched` al storefront que `/advance-status`
+dispara para un `DISPATCHED` alcanzado manualmente (ver `FRONTEND_INTEGRATION.md`) — el cliente
+recibe el mismo mensaje sin importar cuál de los dos caminos se usó.
 
 **Advertencia de confiabilidad** (mismo espíritu que la nota de "no hay reintentos automáticos"
 más abajo): esta llamada tiene un efecto real con costo — un timeout del lado del dashboard que
 compite con un éxito del lado del servidor mostraría un error al admin mientras envia.com ya
 generó (y cobró) una guía. Documentar esto como riesgo conocido, no agregar reintento automático
 sobre timeout para "resolverlo".
+
+#### `POST /v1/admin/orders/{orderUuid}/shipping/cancel` — cancelar la guía
+
+```http
+POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/cancel
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "reason": "Dirección incorrecta, se regenerará la guía" }
+```
+
+El backend reconstruye la petición a envia.com a partir del `shippingLabel` ya persistido —
+solo necesita `carrier`/`trackingNumber` (los únicos campos que envia.com exige para
+`POST /ship/cancel/`), el admin nunca los vuelve a capturar. Llama a envia.com y, si tiene
+éxito, en una sola transacción: `shippingLabel` vuelve a `null` y `dispatchStatus` revierte de
+`DISPATCHED` a `COMPLETE` — es la **única** forma de desbloquear ese camino, ya que
+`/advance-status` se niega explícitamente a revertir `DISPATCHED → COMPLETE` mientras
+`shippingLabel` siga poblado. Con la orden de vuelta en `COMPLETE`, `/shipping/quote` y
+`/shipping/generate` vuelven a estar disponibles normalmente sobre la misma orden.
+
+`reason` se persiste (`Order.shipping_cancellation_reason`/`shippingLabelCancelledAt`, visibles
+en `GET /admin/orders/{uuid}`) — mismo patrón que `AdminOrderCancelRequest.reason` en
+`POST /orders/{uuid}/cancel` — pero, a diferencia de ese, **no** se le notifica al cliente ni se
+manda en ningún webhook: es una corrección administrativa interna, no un evento de cara al
+cliente. Igual que `/shipping/generate`, esta cancelación es puramente local — no toca
+`sicar_sync_outbox` ni avisa nada a Sicar X.
+
+Respuesta `200`:
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "dispatchStatus": "COMPLETE",
+  "shippingLabel": null,
+  "refund": { "balanceReturned": true, "balanceReturnDate": "2026-08-15T00:00:00Z" }
+}
+```
+
+`refund` es la respuesta cruda de envia.com al cancelar, pasada tal cual para que el admin sepa
+si hay devolución de saldo y cuándo — no se persiste en ningún lado (no hay dónde, una vez que
+`shippingLabel` queda en `null`).
+
+- `404` si el pedido no existe. `409` si el pedido no tiene `shippingLabel` (nada que cancelar) —
+  espejo del `409` inverso de `/shipping/generate`. `422` si `reason` falta o está vacío. `502` si
+  envia.com rechaza la cancelación — el caso real más probable según su documentación es que la
+  guía ya fue recogida por el carrier o entró a su red (`"the shipment must not have been picked
+  up or entered the carrier network"`) — incluye el mensaje real de envia.com entre paréntesis,
+  mismo tratamiento de `meta:"error"` que `/shipping/generate`.
 
 ### Categorías (taxonomía)
 

@@ -371,3 +371,36 @@ async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: Shipp
         logger.error(f"Fallo inesperado notificando 'orden enviada' para la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     return order
+
+
+async def cancel_shipping_label(db: AsyncSession, order_uuid: str, reason: str) -> tuple[Order, dict]:
+    """Cancela ante envia.com la guia real ya generada para esta orden y, si tiene exito, en
+    una sola transaccion limpia shipping_label y revierte dispatch_status de DISPATCHED a
+    COMPLETE - el hecho fisico (el envio real ya no existe) ya ocurrio en el momento en que
+    envia.com confirma, mismo principio "Postgres local autoritativo de inmediato" que
+    generate_shipping_label. Esto es lo unico que desbloquea /advance-status (que se niega a
+    revertir DISPATCHED -> COMPLETE mientras shipping_label siga poblado) y vuelve a dejar la
+    orden en el estado que /shipping/quote y /shipping/generate esperan.
+
+    `reason` se persiste (mismo patron que Order.cancellation_reason en cancel_order_admin) -
+    no se le notifica al cliente, es auditoria interna."""
+    order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    if not order.shipping_label:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden no tiene una guía de envío para cancelar.")
+
+    carrier = order.shipping_label.get("carrier")
+    tracking_number = order.shipping_label.get("trackingNumber")
+    refund = await shipping_service.cancel_shipping_label(order, carrier, tracking_number)
+
+    order.shipping_label = None
+    order.dispatch_status = "COMPLETE"
+    order.shipping_cancellation_reason = reason
+    order.shipping_label_cancelled_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(order)
+    logger.info(f"Guía de envío cancelada para la orden {order.uuid} (reason={reason!r}) via /admin.")
+
+    return order, refund

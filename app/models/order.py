@@ -42,6 +42,12 @@ class Order(Base):
     # Guia de envio via envia.com; None hasta generarse, sin regeneracion (409 si ya existe).
     shipping_label = Column(JSON, nullable=True)
 
+    # Auditoria de POST /admin/orders/{uuid}/shipping/cancel - mismo patron que cancellation_reason
+    # (texto libre, no hay modelo de usuarios admin). NULL si nunca se cancelo una guia en esta orden;
+    # no se sobrescriben si se genera y cancela una guia mas de una vez, solo reflejan la ultima vez.
+    shipping_cancellation_reason = Column(Text, nullable=True)
+    shipping_label_cancelled_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 

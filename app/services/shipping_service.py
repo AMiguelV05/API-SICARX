@@ -16,6 +16,7 @@ from app.models.order import Order
 ENVIA_BASE_URL = "https://api-test.envia.com" if settings.ENVIA_ENVIRONMENT == "sandbox" else "https://api.envia.com"
 RATE_URL = f"{ENVIA_BASE_URL}/ship/rate/"
 GENERATE_URL = f"{ENVIA_BASE_URL}/ship/generate/"
+CANCEL_URL = f"{ENVIA_BASE_URL}/ship/cancel/"
 # Queries API - catalogo de referencia de envia.com, dominio distinto al de envios, tambien separado por ambiente.
 QUERIES_BASE_URL = "https://queries-test.envia.com" if settings.ENVIA_ENVIRONMENT == "sandbox" else "https://queries.envia.com"
 SHIPPING_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
@@ -367,4 +368,47 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
         "width": width,
         "height": height,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def cancel_shipping_label(order: Order, carrier: str, tracking_number: str) -> dict:
+    """Cancela ante envia.com una guia ya generada (`POST /ship/cancel/`), identificada solo
+    por `carrier`/`trackingNumber` - los unicos campos que envia.com exige para esto, ambos ya
+    persistidos en `Order.shipping_label` desde que se genero. El llamador (admin_service) es
+    quien limpia `shipping_label`/`dispatch_status` en Postgres tras un exito aqui.
+
+    Mismo tratamiento de `meta:"error"` que `generate_shipping_label` - envia.com no documenta
+    un shape de error distinto para los casos de rechazo (guia ya recogida por el carrier,
+    ventana de cancelacion vencida), asi que llegan como el mismo 200 con `meta:"error"` y se
+    levantan igual como 502 real, nunca confundidos con exito."""
+    payload = {"carrier": carrier, "trackingNumber": tracking_number}
+
+    async with httpx.AsyncClient(timeout=SHIPPING_TIMEOUT) as client:
+        response = await client.post(CANCEL_URL, json=payload, headers=_envia_headers())
+
+    if response.status_code not in (200, 201):
+        raise_upstream_error(
+            response,
+            f"envia.com rechazo la cancelacion de guia para la orden {order.uuid}",
+            "No se pudo cancelar la guía de envío con envia.com.",
+        )
+
+    body = response.json()
+    if isinstance(body, dict) and body.get("meta") == "error":
+        message = (body.get("error") or {}).get("message")
+        logger.error(f"envia.com rechazo la cancelacion de guia para la orden {order.uuid}: {message}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"No se pudo cancelar la guía de envío con envia.com (envia respondió: {(message or '')[:300]}).",
+        )
+
+    data = body.get("data") if isinstance(body, dict) else body
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    return {
+        "balanceReturned": bool(data.get("balanceReturned")),
+        "balanceReturnDate": data.get("balanceReturnDate"),
     }

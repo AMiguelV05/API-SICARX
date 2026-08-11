@@ -74,6 +74,9 @@ class AdminOrderPublic(CamelModel):
     # None hasta que POST .../shipping/generate tenga exito una vez - ver Order.shipping_label.
     shipping_label: Optional[ShippingLabelInfo] = None
     cancellation_reason: Optional[str] = None
+    # Poblados solo si POST .../shipping/cancel se uso alguna vez sobre esta orden - ver Order.shipping_cancellation_reason.
+    shipping_cancellation_reason: Optional[str] = None
+    shipping_label_cancelled_at: Optional[datetime] = None
 
 class AdminOrderListResponse(CamelModel):
     total: int
@@ -165,3 +168,17 @@ class ShippingGenerateResponse(CamelModel):
     order_uuid: str
     dispatch_status: str
     shipping_label: ShippingLabelInfo
+
+class ShippingCancelRequest(CamelModel):
+    reason: str = Field(min_length=1, description="Motivo de la cancelación de la guía - auditoría interna, no se le notifica al cliente")
+
+class ShippingCancelRefund(CamelModel):
+    """Respuesta cruda de envia.com al cancelar - efímera, no se persiste (no hay donde, una vez que shipping_label queda en null)."""
+    balance_returned: bool
+    balance_return_date: Optional[datetime] = None
+
+class ShippingCancelResponse(CamelModel):
+    order_uuid: str
+    dispatch_status: str
+    shipping_label: Optional[ShippingLabelInfo] = None
+    refund: ShippingCancelRefund
