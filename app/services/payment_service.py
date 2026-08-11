@@ -57,7 +57,21 @@ async def create_preference(order: Order) -> dict | None:
         return None
 
 async def create_payment(order: Order, submit_data: dict) -> dict:
-    """Cobra via MP. `transaction_amount` siempre viene de `order.total` en Postgres, nunca de submit_data. Usa order.uuid como X-Idempotency-Key para deduplicar reintentos."""
+    """Cobra via MP. `transaction_amount` siempre viene de `order.total` en Postgres, nunca de submit_data. Usa order.uuid como X-Idempotency-Key para deduplicar reintentos.
+
+    `payer.email` es requerido por MP para pagos con tarjeta - si el Brick no lo trae en
+    `formData` (p. ej. solo se paso en `initialization.payer.email` y el Brick no lo
+    reenvia), MP responde un 500 `internal_error` opaco en vez de un 400 claro. Por eso
+    aqui se cae de vuelta al correo de contacto del checkout / de la cuenta, mismo
+    fallback que `order_notification_service.notify_order_confirmed`, en vez de mandar
+    `payer.email: null`.
+    """
+    payer_email = (submit_data.get("payer") or {}).get("email")
+    if not payer_email:
+        contact_email = ((order.delivery_info or {}).get("contactInfo") or {}).get("email")
+        client_account = await order.awaitable_attrs.client_account
+        payer_email = contact_email or (client_account.email if client_account else None)
+
     payload = {
         "transaction_amount": float(order.total),
         "description": f"Pedido Ferretería Charly #{order.uuid}",
@@ -65,7 +79,7 @@ async def create_payment(order: Order, submit_data: dict) -> dict:
         "external_reference": order.uuid,
         "notification_url": f"{settings.API_BASE_URL.rstrip('/')}/v1/payments/webhook",
         "payer": {
-            "email": (submit_data.get("payer") or {}).get("email"),
+            "email": payer_email,
         },
     }
 
