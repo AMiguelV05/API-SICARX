@@ -651,6 +651,15 @@ backend. Sí dispara la misma notificación `order-dispatched` al storefront que
 dispara para un `DISPATCHED` alcanzado manualmente (ver `FRONTEND_INTEGRATION.md`) — el cliente
 recibe el mismo mensaje sin importar cuál de los dos caminos se usó.
 
+**Actualización (2026-08-11)**: este mismo `shippingLabel` (el objeto de arriba, con
+`trackUrl` incluido) ahora también se expone directamente al cliente vía `OrderPublic` —
+`GET /v1/auth/me/orders/{orderUuid}` y el body del webhook `order-dispatched` que se acaba de
+mencionar, ambos reusan ese schema. No hubo que agregar un webhook nuevo ni una columna nueva:
+solo se agregó el campo a `OrderPublic` (antes solo vivía en `AdminOrderPublic`, admin-only) —
+la notificación ya se disparaba en el momento correcto, solo le faltaba el dato. Cuando el
+`DISPATCHED` se alcanzó manualmente (sin guía real de por medio), `shippingLabel` sigue siendo
+`null` tanto para el admin como para el cliente.
+
 **Advertencia de confiabilidad** (mismo espíritu que la nota de "no hay reintentos automáticos"
 más abajo): esta llamada tiene un efecto real con costo — un timeout del lado del dashboard que
 compite con un éxito del lado del servidor mostraría un error al admin mientras envia.com ya

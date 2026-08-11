@@ -514,7 +514,8 @@ Respuesta `200`:
       "cancellationReason": null,
       "couponCode": "WELCOME10",
       "discountAmount": 13.00,
-      "subtotal": 142.99
+      "subtotal": 142.99,
+      "shippingLabel": null
     }
   ]
 }
@@ -532,6 +533,12 @@ a esta funcionalidad — trátalo igual que `null`). Cuando sí hay cupón, `tot
 descuento aplicado (`total = subtotal - discountAmount`) — es el mismo `total` que se cobró vía
 Mercado Pago, no hace falta restar nada del lado del frontend.
 
+`shippingLabel` es `null` hasta que un admin genera una guía real con envia.com
+(`POST /v1/admin/orders/{uuid}/shipping/generate`, ver `ADMIN_INTEGRATION.md`) — solo aplica a
+pedidos `deliveryType: "DELIVERYMAN"`. Cuando existe, trae `carrier`/`service`/`trackingNumber`/
+`labelUrl`/etc.; usa `shippingLabel.trackUrl` como la liga de "sigue tu paquete" — viene
+directamente de envia.com, no hay que construirla.
+
 ### `GET /v1/auth/me/orders/{orderUuid}` — detalle de un pedido
 
 ```http
@@ -547,7 +554,9 @@ autenticada. `status` (`PAID`/`CANCELLED`) es el estado de pago/cancelación pro
 de cumplimiento/entrega, decidido enteramente por el dashboard admin (ver `ADMIN_INTEGRATION.md`)
 — son dos cosas distintas, no las confundas al mostrar el seguimiento del pedido. Para enterarte de
 un cambio de `dispatchStatus` en tiempo casi real (en vez de solo al volver a pedir este endpoint),
-ver el webhook `order-status-changed` más abajo.
+ver el webhook `order-status-changed` más abajo. `shippingLabel`/`shippingLabel.trackUrl` (ver nota
+arriba) es la fuente para un link de "sigue tu paquete" una vez que `dispatchStatus` llega a
+`DISPATCHED` vía una guía real.
 
 ### `POST /v1/products` — catálogo local (paginado, sin llamadas a Sicar X)
 
@@ -1467,6 +1476,7 @@ token de auth — aquí no hay token, así que van explícitos en el body:
   "couponCode": null,
   "discountAmount": null,
   "subtotal": null,
+  "shippingLabel": null,
   "clientEmail": "juan@example.com",
   "clientName": "Juan Pérez"
 }
@@ -1558,12 +1568,43 @@ más `clientEmail`/`clientName`), más dos campos nuevos:
 si prefieres tu propio texto por idioma/canal; `statusMessage` es el texto en español ya armado,
 listo para usar directamente si no necesitas personalizarlo.
 
+**`event: "order-dispatched"` puede traer una guía real de envia.com** — mismo campo `shippingLabel`
+documentado arriba en `GET /v1/auth/me/orders/{orderUuid}`, poblado cuando este evento se disparó
+porque un admin generó una guía real (`POST /v1/admin/orders/{uuid}/shipping/generate`), y `null`
+cuando fue un avance manual del dashboard sin guía física de por medio:
+
+```json
+{
+  "...": "... (mismos campos que order-confirmed)",
+  "shippingLabel": {
+    "carrier": "fedex",
+    "service": "ground",
+    "shipmentId": 987654,
+    "serviceDescription": "Fedex Ground",
+    "trackingNumber": "794658125486",
+    "trackUrl": "https://www.fedex.com/fedextrack/?trknbr=794658125486",
+    "labelUrl": "https://envia.com/labels/abc123.pdf",
+    "totalPrice": 145.00,
+    "currency": "MXN",
+    "weight": 1.5,
+    "length": 20,
+    "width": 15,
+    "height": 10,
+    "generatedAt": "2026-08-11T18:02:11Z"
+  },
+  "clientEmail": "juan@example.com",
+  "clientName": "Juan Pérez",
+  "event": "order-dispatched",
+  "statusMessage": "Tu pedido está listo y ha sido enviado"
+}
+```
+
+Usa `shippingLabel.trackUrl` como la liga de "sigue tu paquete" en el correo de envío — viene
+directamente de la respuesta de envia.com, no hace falta construirla a partir del `carrier`/
+`trackingNumber`.
+
 **Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde `200`
 rápido, no hay reintento automático si tu endpoint falla o tarda.
-
-**Nota**: este webhook no incluye seguimiento de paquete en tránsito (ubicación en vivo, ETA,
-etc.) — eso depende de una integración futura con el webhook de envia.com, todavía no construida.
-Este webhook solo cubre los 3 momentos puntuales de arriba.
 
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/verification-requested`
 

@@ -3,6 +3,7 @@ from datetime import datetime
 from pydantic import Field
 from app.schemas.base import CamelModel
 from app.schemas.client import ClientAddressPublic
+from app.schemas.shipping import ShippingLabelInfo
 
 class AdminHealthResponse(CamelModel):
     database_ok: bool = Field(description="True si SELECT 1 respondio contra Postgres")
@@ -31,24 +32,6 @@ class OutboxRowPublic(CamelModel):
 class OutboxListResponse(CamelModel):
     total: int
     docs: List[OutboxRowPublic]
-
-# Definida antes de AdminOrderPublic para que su campo shipping_label pueda referenciarla directamente.
-
-class ShippingLabelInfo(CamelModel):
-    carrier: str
-    service: str
-    shipment_id: Optional[int] = Field(default=None, description="ID del envio en envia.com - buscar por este valor en su dashboard")
-    service_description: Optional[str] = None
-    tracking_number: Optional[str] = None
-    track_url: Optional[str] = None
-    label_url: Optional[str] = None
-    total_price: float
-    currency: str
-    weight: float
-    length: float
-    width: float
-    height: float
-    generated_at: datetime
 
 class AdminOrderPublic(CamelModel):
     """Superconjunto de OrderPublic para uso admin: agrega clientEmail/clientName, deletedAt (admins ven soft-deleted) y campos de aceptacion/mensajeria."""

@@ -4,6 +4,7 @@ from typing import Any, List, Literal, Optional
 from datetime import datetime
 from app.core.config import settings
 from app.schemas.base import CamelModel
+from app.schemas.shipping import ShippingLabelInfo
 
 COUPON_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
@@ -126,6 +127,7 @@ class OrderPublic(CamelModel):
     coupon_code: Optional[str] = Field(default=None, description="Código del cupón aplicado, si hubo uno.")
     discount_amount: Optional[float] = Field(default=None, description="Monto descontado por el cupón. Null si no se usó cupón.")
     subtotal: Optional[float] = Field(default=None, description="Total antes del descuento del cupón. Null en órdenes anteriores a esta funcionalidad - tratar como igual a `total` en ese caso.")
+    shipping_label: Optional[ShippingLabelInfo] = Field(default=None, description="Guía de envío real (envia.com) si un admin ya la generó - incluye trackUrl para que el cliente siga su paquete. Null hasta entonces; solo aplica a pedidos DELIVERYMAN.")
 
 class OrderListResponse(CamelModel):
     total: int
