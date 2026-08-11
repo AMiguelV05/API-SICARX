@@ -334,6 +334,25 @@ de cualquier cliente siempre resuelve. `cancellationReason` (también expuesto e
 haya sido cancelada vía `POST .../cancel` de abajo — una cancelación hecha por el propio cliente
 deja este campo en `null`.
 
+**Cambio a `GET /v1/admin/orders`/`GET .../{orderUuid}` (2026-08-11 — checkout de
+invitado)**: `POST /v1/orders` en el storefront ya no requiere cuenta (ver
+`FRONTEND_INTEGRATION.md`, "Checkout de invitado") — un pedido de invitado aparece aquí igual
+que cualquier otro, con dos diferencias:
+- Dos campos nuevos en la respuesta: `isGuest: boolean` (`true` mientras el pedido no tenga
+  cuenta asociada) y `guestEmail: string | null` (el correo capturado en el checkout de
+  invitado; `null` para un pedido de cuenta, o una vez que el pedido se vincula
+  retroactivamente a una cuenta — ver más abajo).
+- `clientEmail`/`clientName` siguen viniendo poblados igual para un pedido de invitado
+  (resueltos vía `deliveryInfo.contactInfo`, mismo mecanismo que ya usa el webhook
+  `order-confirmed`) — no hace falta revisar `isGuest` solo para mostrar esos dos campos.
+- Los filtros `clientEmail`/`clientUuid` de `GET /v1/admin/orders` hacen `JOIN` contra
+  `ClientAccount` y por lo tanto **nunca** encuentran un pedido todavía sin cuenta — para
+  ubicar pedidos de invitado hoy hay que buscar sin esos filtros y revisar `isGuest`/
+  `guestEmail` en los resultados; no existe un filtro dedicado `guestEmail`/`isGuest` todavía.
+- Si el invitado luego crea una cuenta con el mismo correo y la verifica, el pedido se
+  vincula solo (`isGuest` pasa a `false`, `guestEmail` a `null`, y a partir de ahí sí aparece
+  en los filtros `clientEmail`/`clientUuid`) — no requiere ninguna acción desde este panel.
+
 ### `POST /v1/admin/orders/{orderUuid}/accept` — aceptar un pedido
 
 ```http

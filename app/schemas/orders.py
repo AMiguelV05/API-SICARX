@@ -40,17 +40,51 @@ class ContactInfo(CamelModel):
             return None
         return v
 
+_ZIP_CODE_RE = re.compile(r"^\d{5}$")
+
+class GuestDeliveryAddress(CamelModel):
+    """Direccion de entrega inline para checkout de invitado (sin cuenta, sin address book).
+    Definida aqui (no en schemas/client.py, que ya importa de este modulo via schemas/cart.py)
+    para evitar un import circular - mismo set de campos que ClientAddressBase, pero los que
+    routes/orders.py ya valida en runtime contra una direccion guardada (ver el chequeo
+    `missing` del camino de cuenta) aqui son obligatorios a nivel de schema, asi que un envio
+    incompleto es un 422 limpio en vez de un 400 armado a mano."""
+    street: str = Field(min_length=1)
+    ext_number: str = Field(min_length=1)
+    int_number: Optional[str] = None
+    neighborhood: str = Field(min_length=1)
+    city: str = Field(min_length=1)
+    county: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+    zip_code: str
+    references: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+
+    @field_validator("zip_code")
+    @classmethod
+    def validate_zip_code(cls, v):
+        if v is not None and not _ZIP_CODE_RE.match(v):
+            raise ValueError("El código postal debe tener 5 dígitos.")
+        return v
+
 class DeliveryInfo(CamelModel):
     contactInfo: ContactInfo
-    deliveryType: Literal["PICKUP", "DELIVERYMAN"] = Field(description="PICKUP: recoger en tienda. DELIVERYMAN: entrega a domicilio, requiere addressUuid.")
-    addressUuid: Optional[str] = Field(default=None, description="UUID de una direccion guardada del cliente (GET /auth/me/addresses) - obligatorio si deliveryType es DELIVERYMAN, no debe enviarse si es PICKUP")
+    deliveryType: Literal["PICKUP", "DELIVERYMAN"] = Field(description="PICKUP: recoger en tienda. DELIVERYMAN: entrega a domicilio, requiere addressUuid (cuenta) o address (invitado).")
+    addressUuid: Optional[str] = Field(default=None, description="UUID de una direccion guardada del cliente (GET /auth/me/addresses) - solo para cuentas autenticadas. Exactamente uno de addressUuid/address es obligatorio si deliveryType es DELIVERYMAN; ninguno debe enviarse si es PICKUP.")
+    address: Optional[GuestDeliveryAddress] = Field(default=None, description="Direccion de entrega inline - solo para checkout de invitado (sin X-Client-Token). Exactamente uno de addressUuid/address es obligatorio si deliveryType es DELIVERYMAN.")
 
     @model_validator(mode="after")
-    def validate_address_uuid_matches_delivery_type(self):
-        if self.deliveryType == "DELIVERYMAN" and not self.addressUuid:
-            raise ValueError("addressUuid es obligatorio cuando deliveryType es DELIVERYMAN.")
-        if self.deliveryType == "PICKUP" and self.addressUuid is not None:
-            raise ValueError("addressUuid no debe enviarse cuando deliveryType es PICKUP.")
+    def validate_address_matches_delivery_type(self):
+        # Cual de los dos es legal para ESTE llamador (cuenta vs. invitado) se decide en la
+        # ruta, que si conoce el estado de auth - este validador de schema solo puede
+        # exigir "exactamente uno de los dos" para DELIVERYMAN.
+        if self.deliveryType == "DELIVERYMAN":
+            if bool(self.addressUuid) == bool(self.address):
+                raise ValueError("Para DELIVERYMAN, envía addressUuid (cuenta) o address (invitado), pero no ambos ni ninguno.")
+        else:
+            if self.addressUuid is not None or self.address is not None:
+                raise ValueError("addressUuid/address no deben enviarse cuando deliveryType es PICKUP.")
         return self
 
 class OrderCreate(CamelModel):

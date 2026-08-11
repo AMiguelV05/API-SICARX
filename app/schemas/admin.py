@@ -48,6 +48,10 @@ class AdminOrderPublic(CamelModel):
     deleted_at: Optional[datetime] = None
     client_email: Optional[str] = None
     client_name: Optional[str] = None
+    # True si la orden se creo sin cuenta (checkout de invitado) y todavia no fue vinculada
+    # a una cuenta - ver client_service.link_guest_orders_by_email.
+    is_guest: bool = False
+    guest_email: Optional[str] = None
     accepted_at: Optional[datetime] = None
     accepted_by: Optional[str] = None
     delivery_company: Optional[str] = None

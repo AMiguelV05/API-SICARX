@@ -3,7 +3,7 @@ import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.order import Order, SicarSyncOutbox
@@ -21,8 +21,9 @@ MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
 
 async def create_local_order(
-    db: AsyncSession, client_account_id: int, order_payload_dict: dict, local_products: dict | None = None,
+    db: AsyncSession, client_account_id: int | None, order_payload_dict: dict, local_products: dict | None = None,
     delivery_address_snapshot: dict | None = None, coupon_id: int | None = None, coupon_code: str | None = None,
+    guest_email: str | None = None,
 ) -> Order:
     """Persiste la orden localmente (status siempre "TO_PAY" en este punto; ver
     finalize_order_payment). `sicar_order_id` se genera aqui con `uuid.uuid4()` - ya no
@@ -30,6 +31,10 @@ async def create_local_order(
     `local_products` solo se usa para agregar `imageUrl` a cada item guardado.
     `coupon_id`/`coupon_code` (opcionales) ya vienen validados/bloqueados por el llamador
     (routes/orders.py, via coupon_service.lock_and_validate_coupon) - aqui solo se persisten.
+
+    Checkout de invitado: `client_account_id=None` + `guest_email` (ya en minuscula, ver
+    routes/orders.py). Exactamente uno de los dos debe venir poblado - lo exige
+    `ck_orders_has_identity` a nivel de base de datos, no se revalida aqui.
 
     NO hace commit, solo `flush()` (para que `order.id`/`order.uuid` esten disponibles al
     llamador) - `routes/orders.py::create_order` hace el unico commit junto con el
@@ -46,6 +51,7 @@ async def create_local_order(
 
     order = Order(
         client_account_id=client_account_id,
+        guest_email=guest_email,
         sicar_order_id=str(uuid.uuid4()),
         status="TO_PAY",
         # Estado inicial local del tablero de despacho - Sicar X todavia no sabe de la orden.
@@ -64,7 +70,8 @@ async def create_local_order(
     db.add(order)
     await db.flush()
 
-    logger.info(f"Orden local {order.uuid} creada (TO_PAY, pendiente de commit) para cliente {client_account_id} (sicar_order_id={order.sicar_order_id}).")
+    identity = f"cliente {client_account_id}" if client_account_id is not None else f"invitado {guest_email}"
+    logger.info(f"Orden local {order.uuid} creada (TO_PAY, pendiente de commit) para {identity} (sicar_order_id={order.sicar_order_id}).")
     return order
 
 async def list_client_orders(db: AsyncSession, client_account_id: int, limit: int, offset: int) -> tuple[int, list[Order]]:
@@ -99,6 +106,34 @@ async def get_owned_order_by_sicar_id(db: AsyncSession, client_account_id: int, 
         select(Order).where(
             Order.sicar_order_id == sicar_order_id,
             Order.client_account_id == client_account_id,
+            Order.deleted_at.is_(None),
+        )
+    )
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    return order
+
+async def get_order_for_action(db: AsyncSession, client: "ClientAccount | None", order_id: str) -> Order:
+    """Punto unico de resolucion para /pay, /cancel, DELETE y el status de invitado.
+
+    Cuenta (`client` no None): sin cambios - `order_id` es `sicar_order_id`, ownership por
+    `client_account_id`, via `get_owned_order_by_sicar_id`.
+
+    Invitado (`client is None`): no hay sesion que demuestre pertenencia, asi que la prueba
+    es poseer el identificador de la orden en si - `order_id` puede ser `sicar_order_id` O
+    `uuid` (ambos alta entropia, ambos ya devueltos como `id`/`orderUuid` al hacer checkout),
+    y debe seguir sin cuenta (`client_account_id IS NULL`). Esto deja que el frontend
+    reutilice el mismo campo `id` que ya usa para cuentas, sin distinguir por estado de
+    login. 404 (no 403) si no existe o si la orden ya fue vinculada a una cuenta (ver
+    client_service.link_guest_orders_by_email) - mismo patron "no confirmar existencia" que
+    el resto de este archivo; una vez vinculada, el cliente ya debe usar la ruta autenticada."""
+    if client is not None:
+        return await get_owned_order_by_sicar_id(db, client.id, order_id)
+
+    order = await db.scalar(
+        select(Order).where(
+            or_(Order.sicar_order_id == order_id, Order.uuid == order_id),
+            Order.client_account_id.is_(None),
             Order.deleted_at.is_(None),
         )
     )

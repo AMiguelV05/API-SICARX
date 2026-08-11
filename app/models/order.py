@@ -1,18 +1,29 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Text, Numeric, JSON, DateTime, ForeignKey, Index, UniqueConstraint, func, text
+from sqlalchemy import Column, Integer, String, Text, Numeric, JSON, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint, func, text
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
 class Order(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        # Toda orden tiene alguna identidad (cuenta o invitado) - ver checkout de invitado.
+        CheckConstraint("client_account_id IS NOT NULL OR guest_email IS NOT NULL", name="ck_orders_has_identity"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     uuid = Column(String, unique=True, index=True, nullable=False, default=lambda: str(uuid.uuid4()))
 
     # Sin ondelete=CASCADE (a diferencia de ClientAddress): orden es registro financiero, no debe borrarse en cascada.
+    # Nullable: una orden de invitado (sin cuenta) no tiene client_account_id - ver guest_email.
     client_account_id = Column(
-        Integer, ForeignKey("client_accounts.id"), nullable=False, index=True
+        Integer, ForeignKey("client_accounts.id"), nullable=True, index=True
     )
+    # Unica identidad de un checkout de invitado (client_account_id IS NULL) - siempre
+    # minuscula (misma convencion de lowercase que ClientAccount.email en todo el codigo).
+    # Sirve para: probar propiedad al hacer /pay, /cancel, DELETE y el status de invitado
+    # (junto con sicar_order_id/uuid), y para la vinculacion retroactiva por email cuando la
+    # cuenta creada despues se verifica (ver client_service.link_guest_orders_by_email).
+    guest_email = Column(String, nullable=True, index=True)
 
     # Identificador publico, generado localmente (uuid4()) - nombre historico de cuando venia de Sicar X; se conserva por el contrato de URL con el frontend.
     sicar_order_id = Column(String, unique=True, index=True, nullable=False)
@@ -92,10 +103,19 @@ class OrderIdempotencyKey(Base):
     __tablename__ = "order_idempotency_keys"
     __table_args__ = (
         UniqueConstraint("client_account_id", "idempotency_key", name="ux_order_idempotency_client_key"),
+        # Camino de invitado: client_account_id siempre NULL ahi, y Postgres trata NULL !=
+        # NULL en un unique constraint normal, asi que la restriccion de arriba nunca
+        # detectaria una colision entre invitados - este indice parcial la reemplaza para ese caso.
+        Index(
+            "ux_order_idempotency_guest_key", "guest_email", "idempotency_key",
+            unique=True, postgresql_where=text("client_account_id IS NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    client_account_id = Column(Integer, ForeignKey("client_accounts.id"), nullable=False, index=True)
+    # Nullable: un reclamo de invitado no tiene cuenta - ver guest_email y el indice parcial arriba.
+    client_account_id = Column(Integer, ForeignKey("client_accounts.id"), nullable=True, index=True)
+    guest_email = Column(String, nullable=True)
     idempotency_key = Column(String, nullable=False)
     # NULL mientras la orden se sigue creando o si un intento previo se abandono a medio camino.
     order_uuid = Column(String, nullable=True)

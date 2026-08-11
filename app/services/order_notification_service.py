@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.models.order import Order
 from app.schemas.orders import OrderPublic
 from app.core.webhook_signing import sign_hmac_sha256
+from app.services.order_display_service import resolve_client_name
 
 ORDER_CONFIRMED_WEBHOOK_PATH = "/api/webhooks/order-confirmed"
 WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
@@ -26,7 +27,7 @@ async def notify_order_confirmed(order: Order) -> None:
 
         body = OrderPublic.model_validate(order).model_dump(by_alias=True, mode="json")
         body["clientEmail"] = client_email
-        body["clientName"] = client_account.name if client_account else None
+        body["clientName"] = resolve_client_name(order, client_account)
 
         raw_body = json.dumps(body, separators=(",", ":")).encode()
         ts = str(int(time.time()))

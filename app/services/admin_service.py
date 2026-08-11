@@ -21,6 +21,7 @@ from app.services import order_status_notification_service
 from app.services import payment_service
 from app.services.order_history_service import prepare_local_cancellation
 from app.services.order_cancellation_notification_service import notify_order_cancelled
+from app.services.order_display_service import resolve_client_name
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,9 @@ async def _to_admin_order_public(order: Order) -> AdminOrderPublic:
 
     public = AdminOrderPublic.model_validate(order)
     public.client_email = client_email
-    public.client_name = client_account.name if client_account else None
+    public.client_name = resolve_client_name(order, client_account)
+    public.is_guest = client_account is None
+    public.guest_email = order.guest_email
     # delivery_address_snapshot no coincide de nombre con AdminOrderPublic.delivery_address - se mapea a mano.
     if order.delivery_address_snapshot:
         public.delivery_address = ClientAddressPublic.model_validate(order.delivery_address_snapshot)

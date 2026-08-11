@@ -5,6 +5,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.client import ClientAccount
+from app.models.order import Order
 from app.models.password_reset import PasswordResetToken
 from app.schemas.client import ClientRegister, ClientLogin, ClientUpdate
 from app.core.security import (
@@ -117,6 +118,9 @@ async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity
         email_verified_at=datetime.now(timezone.utc) if identity["email_verified"] else None,
     )
     db.add(client)
+    await db.flush()
+    if identity["email_verified"]:
+        await link_guest_orders_by_email(db, client)
     await db.commit()
     await db.refresh(client)
     await client.awaitable_attrs.addresses
@@ -125,6 +129,25 @@ async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity
     if not identity["email_verified"]:
         await notify_verification_requested(client)
     return client
+
+async def link_guest_orders_by_email(db: AsyncSession, client: ClientAccount) -> int:
+    """Vincula retroactivamente los pedidos de invitado (client_account_id IS NULL) cuyo
+    guest_email coincide (ambos ya en minuscula, ver routes/orders.py y register_client
+    arriba) con el correo de esta cuenta YA VERIFICADA. Debe llamarse dentro de la misma
+    transaccion que el commit que marca is_verified=True (o la creacion de una cuenta de
+    Google ya verificada) - deliberadamente NUNCA disparado por un registro/login sin
+    verificar, para que nadie pueda reclamar el historial de pedidos de otra persona
+    registrandose con su correo antes que ella (ver CLAUDE.md/plan de checkout de
+    invitado). No hace commit - el llamador es responsable de un unico commit."""
+    result = await db.execute(
+        update(Order)
+        .where(Order.client_account_id.is_(None), Order.guest_email == client.email)
+        .values(client_account_id=client.id, guest_email=None)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount:
+        logger.info(f"{result.rowcount} pedido(s) de invitado vinculado(s) a la cuenta {client.email} tras verificacion de correo.")
+    return result.rowcount or 0
 
 async def verify_client_email(db: AsyncSession, token: str) -> ClientAccount:
     client_uuid = decode_email_verification_token(token)
@@ -135,6 +158,7 @@ async def verify_client_email(db: AsyncSession, token: str) -> ClientAccount:
     if not client.is_verified:
         client.is_verified = True
         client.email_verified_at = datetime.now(timezone.utc)
+        await link_guest_orders_by_email(db, client)
         await db.commit()
         await db.refresh(client)
         logger.info(f"Correo verificado: {client.email}")

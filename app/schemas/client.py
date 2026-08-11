@@ -81,7 +81,10 @@ class ClientAddressUpdate(CamelModel):
     _validate_zip_code = field_validator("zip_code")(_validate_zip_code)
 
 class ClientAddressPublic(ClientAddressBase):
-    uuid: str
+    # Optional: la foto fija de una direccion inline de invitado (ver
+    # schemas.orders.GuestDeliveryAddress) no tiene fila real en el address book, asi que
+    # no hay uuid que asignarle.
+    uuid: Optional[str] = None
 
 class ClientPublic(CamelModel):
     uuid: str

@@ -36,13 +36,19 @@ Sin este header, cualquier ruta responde `403`. La única excepción en todo el 
 header; se autentica distinto, ver esa sección más abajo) — no es una ruta que el frontend
 necesite llamar nunca.
 
-### 2. Token de cuenta de cliente (`X-Client-Token`) — obligatorio para `POST /v1/orders` y `POST /v1/orders/{order_id}/cancel`
+### 2. Token de cuenta de cliente (`X-Client-Token`) — opcional para `POST /v1/orders` (checkout de invitado, 2026-08-11)
 
-**Login ahora es obligatorio para comprar — ya no existe checkout anónimo.** Un segundo JWT,
-distinto del `x-api-key`, obtenido de `POST /v1/auth/register` o `POST /v1/auth/login` y reenviado
-en una cabecera aparte, `X-Client-Token`. Identifica qué cuenta queda dueña del pedido, para que
-después pueda verlo en `GET /v1/auth/me/orders`. Sin este header, `POST /v1/orders` y
-`POST /v1/orders/{order_id}/cancel` responden `401`.
+**Actualización (2026-08-11): ya no es obligatorio tener cuenta para comprar** — existe
+checkout de invitado, ver la sección "Checkout de invitado" más abajo antes de asumir que
+falta este header siempre significa `401`. Cuando SÍ se manda, es un segundo JWT, distinto
+del `x-api-key`, obtenido de `POST /v1/auth/register` o `POST /v1/auth/login` y reenviado en
+una cabecera aparte, `X-Client-Token`. Identifica qué cuenta queda dueña del pedido, para que
+después pueda verlo en `GET /v1/auth/me/orders`. En `POST /v1/orders`,
+`POST /v1/orders/{order_id}/pay`, `POST /v1/orders/{order_id}/cancel` y
+`DELETE /v1/orders/{order_id}`, omitir este header por completo ya no es un error — es la
+señal de "este es un checkout de invitado". Si SÍ se manda pero es inválido/expiró, sigue
+siendo `401` (a diferencia de omitirlo, que ahora es un camino soportado, no un fallback
+silencioso).
 
 (Antes existía un tercer token, el de sesión de Sicar X obtenido de `POST /v1/session/init` y
 reenviado en `Authorization` — esa ruta y ese requisito fueron eliminados por completo: la
@@ -81,13 +87,14 @@ después de armar el carrito sin sesión, por si el visitante inicia sesión o s
 
 ```
 1. POST /v1/auth/register o /v1/auth/login          → obtener token de cuenta (X-Client-Token), una vez
+   (opcional desde 2026-08-11 — se puede saltar este paso por completo, ver "Checkout de invitado")
 2. POST /v1/products                                 → mostrar catálogo / resultados de filtro
 3. GET  /v1/products/{uuid}                          → detalle al abrir una ficha de producto
 4. POST /v1/orders                                   → reservar el pedido localmente (queda TO_PAY) + preparar el cobro
 5. Renderizar el Payment Brick (Mercado Pago) con `amount`/`preferenceId` del paso 4
 6. POST /v1/orders/{order_id}/pay                    → cobrar (tarjeta/OXXO — el Brick llama a esto en su onSubmit)
    (el método Wallet de Mercado Pago NO llama a este paso — redirige directo a Mercado Pago)
-7. (si aplica) POST /v1/orders/{order_id}/cancel     → cancelar el pedido (usa el token del paso 1)
+7. (si aplica) POST /v1/orders/{order_id}/cancel     → cancelar el pedido (usa el token del paso 1, o el `id`/`orderUuid` del paso 4 si fue invitado)
 ```
 
 **Importante — esto es un cambio incompatible sobre el flujo anterior**: `POST /v1/orders`
@@ -108,7 +115,9 @@ más abajo.
 Ver "Pagos con Mercado Pago" más abajo.
 
 Guarda el token de `/v1/auth/login`/`/v1/auth/register` para reenviarlo en `X-Client-Token` en
-`/v1/orders` y `/v1/orders/{order_id}/cancel` — es el único token que necesita ese flujo.
+`/v1/orders` y `/v1/orders/{order_id}/cancel` — es el único token que necesita ese flujo. Si el
+comprador no tiene cuenta, omite `X-Client-Token` por completo y sigue el flujo de invitado —
+ver "Checkout de invitado" más abajo.
 
 `/v1/cart` es independiente de este flujo — es persistencia opcional del carrito (ver referencia
 abajo), no un paso obligatorio antes de `/v1/orders`. `POST /v1/orders` sigue recibiendo el
@@ -1150,8 +1159,10 @@ como el de login.
 
 Contrato mínimo: solo el carrito y los datos de entrega. **Todo lo demás (precios, sku, totales)
 lo calcula el backend a partir del catálogo local — sin ninguna llamada en vivo a Sicar X.**
-Requiere **login** (ver punto 2 de "Dos capas de autenticación" arriba): `X-Client-Token` es
-obligatorio.
+`X-Client-Token` es **opcional** (ver punto 2 de "Dos capas de autenticación" arriba) desde
+2026-08-11 — mándalo para un pedido de cuenta, o omítelo por completo para checkout de
+invitado (contrato distinto para `deliveryInfo`/`contactInfo.email`, ver "Checkout de
+invitado" más abajo).
 
 ```http
 POST /v1/orders
@@ -1175,10 +1186,12 @@ Content-Type: application/json
 ```
 
 `deliveryType` acepta `"PICKUP"` (recoger en tienda) o `"DELIVERYMAN"` (entrega a domicilio) —
-cualquier otro valor responde `422`. `contactInfo.email` es opcional, pero si se envía debe ser
-un correo válido (también `422` si no lo es) — **excepto** que ahora un string vacío (`""`, lo
-típico de un campo opcional sin tocar en un formulario) se trata como si no se hubiera mandado,
-en vez de rechazarse.
+cualquier otro valor responde `422`. `contactInfo.email` es opcional **a nivel de schema**,
+pero si se envía debe ser un correo válido (también `422` si no lo es) — **excepto** que ahora
+un string vacío (`""`, lo típico de un campo opcional sin tocar en un formulario) se trata como
+si no se hubiera mandado, en vez de rechazarse. **Para checkout de invitado (sin
+`X-Client-Token`) es obligatorio en la práctica** — `400` si falta — ver "Checkout de
+invitado" más abajo.
 
 `contactInfo.phone` acepta hasta 10 dígitos — Sicar X no quiere más. El backend ahora limpia el
 valor antes de validar (quita espacios, guiones, paréntesis, `+52`, etc., y si aun así sobran
@@ -1213,7 +1226,9 @@ su propio valor por defecto si se omiten (o se mandan como `null`):
 
 En la práctica casi nunca hace falta enviarlos explícitamente.
 
-**`couponCode` (opcional)** — reenvía aquí el mismo código que se aplicó en
+**`couponCode` (opcional, solo pedidos de cuenta)** — no disponible para checkout de
+invitado (`400` si se envía sin `X-Client-Token`, ver "Checkout de invitado" más abajo).
+Reenvía aquí el mismo código que se aplicó en
 `POST /v1/cart/coupon` (ver esa sección arriba) si el shopper tiene uno aplicado; **el
 descuento del carrito es solo un preview, este campo es lo que realmente se valida y
 bloquea**. `409` si el código ya no aplica al momento de pagar (expiró, alguien más agotó
@@ -1222,8 +1237,10 @@ inactivo — en cualquiera de los dos casos, ningún pedido se crea; muestra el 
 quitar el cupón o reintentar. Omitir el campo (o mandar `null`) es exactamente igual que no
 tener cupón.
 
-Para entrega a domicilio, manda `addressUuid` (el `uuid` de una dirección ya guardada — ver
-`POST /v1/auth/me/addresses` arriba) en vez de una dirección escrita a mano en cada pedido:
+Para entrega a domicilio **en un pedido de cuenta**, manda `addressUuid` (el `uuid` de una
+dirección ya guardada — ver `POST /v1/auth/me/addresses` arriba) en vez de una dirección
+escrita a mano en cada pedido. (Para invitado, `addressUuid` está prohibido — usa `address`
+inline en su lugar, ver "Checkout de invitado" más abajo.)
 
 ```json
 {
@@ -1292,15 +1309,104 @@ soportando tarjeta/OXXO, solo no tendrá la opción de pagar con cuenta/Wallet d
 del Payment Brick, no un total calculado en el frontend.
 
 Errores esperables:
-- `401` — falta o es inválido `X-Client-Token` (llama de nuevo a `/v1/auth/login`)
-- `400` — carrito vacío, datos de entrega inválidos, o (para `DELIVERYMAN`) la dirección
-  seleccionada existe pero le faltan campos necesarios para la entrega
-- `404` — (para `DELIVERYMAN`) `addressUuid` no existe o no pertenece a la cuenta autenticada,
-  **o** `couponCode` no existe/está inactivo (mismo mensaje genérico para ambos casos)
+- `401` — se mandó `X-Client-Token` pero es inválido/expiró (llama de nuevo a
+  `/v1/auth/login`) — **omitirlo por completo ya no es un `401`**, ver "Checkout de
+  invitado" abajo
+- `400` — carrito vacío, datos de entrega inválidos, (para `DELIVERYMAN`) la dirección
+  seleccionada existe pero le faltan campos necesarios para la entrega, o (checkout de
+  invitado) falta `contactInfo.email`, se mandó `addressUuid`, o se mandó `couponCode`
+- `404` — (para `DELIVERYMAN` de cuenta) `addressUuid` no existe o no pertenece a la cuenta
+  autenticada, **o** `couponCode` no existe/está inactivo (mismo mensaje genérico para ambos
+  casos)
 - `409` — uno o más productos sin disponibilidad suficiente (sin stock, o precio local
   inconsistente — ver nota abajo), **o** el `couponCode` enviado ya no aplica (expiró, no
   alcanza el mínimo, alcanzó su límite de usos, etc.) — validación 100% local contra Postgres,
   sin ninguna llamada en vivo a Sicar X en este paso.
+
+### Checkout de invitado (2026-08-11) — comprar sin cuenta
+
+Omite `X-Client-Token` por completo en `POST /v1/orders` (y en `/pay`/`/cancel`/`DELETE`
+después) para un pedido de invitado. Tres diferencias respecto al contrato de cuenta de
+arriba:
+
+1. **`contactInfo.email` es obligatorio** — es la única identidad del invitado; `400` si
+   falta. Úsalo también para mostrarle al comprador un resumen/confirmación en pantalla, ya
+   que no tiene "Mi cuenta" donde consultarlo después (salvo que luego se registre, ver más
+   abajo).
+2. **`couponCode` no se acepta** — `400` si se envía. Los cupones requieren cuenta.
+3. **Para `DELIVERYMAN`, manda `address` en vez de `addressUuid`** — un objeto con la
+   dirección completa escrita a mano (no hay address book sin cuenta):
+
+```json
+{
+  "products": [
+    { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "quantity": 1 }
+  ],
+  "deliveryInfo": {
+    "contactInfo": {
+      "name": "Juan Pérez",
+      "phone": "3151234567",
+      "email": "juan@example.com"
+    },
+    "deliveryType": "DELIVERYMAN",
+    "address": {
+      "street": "Av Siempre Viva",
+      "extNumber": "123",
+      "intNumber": null,
+      "neighborhood": "Centro",
+      "city": "Guadalajara",
+      "county": "Guadalajara",
+      "state": "Jalisco",
+      "zipCode": "44100",
+      "references": null,
+      "latitude": null,
+      "longitude": null
+    }
+  }
+}
+```
+
+`street`/`extNumber`/`neighborhood`/`city`/`county`/`state`/`zipCode` son obligatorios dentro
+de `address` (`422` si falta alguno) — es el mismo conjunto de campos que ya se exige en
+runtime para una dirección guardada de cuenta, solo que aquí se valida a nivel de schema.
+`intNumber`/`references`/`latitude`/`longitude` son opcionales. Para `DELIVERYMAN`, manda
+exactamente uno de `addressUuid`/`address` — ambos o ninguno responde `422`; el que no
+corresponde a tu caso (`addressUuid` sin sesión, `address` con sesión) responde `400`.
+
+La respuesta `200` es idéntica a la de un pedido de cuenta (mismo shape, ver arriba) — sigue
+trayendo `id`/`orderUuid`. **Guárdalos**: como no hay `X-Client-Token`, cualquiera de los dos
+(`id` o `orderUuid`, indistinto — usa el mismo campo que ya usas para pedidos de cuenta) sirve
+como prueba de pertenencia para `POST /v1/orders/{order_id}/pay`, `/cancel`,
+`DELETE /v1/orders/{order_id}` y `GET /v1/orders/guest/{order_id}` (ver esa sección más
+abajo) — **sin ellos, el pedido es irrecuperable** (no hay login con el que reconstruir el
+acceso), así que persístelos en el navegador (p. ej. `localStorage`, o en la URL de la página
+de confirmación) antes de navegar fuera del flujo de checkout.
+
+**Si el invitado se registra o inicia sesión después con el mismo correo usado en el
+pedido, y verifica su correo** (clic en el enlace de verificación que llega por
+`verification-requested`, o login con Google si Google ya reportó el correo verificado), el
+pedido de invitado se vincula automáticamente a esa cuenta y aparece en
+`GET /v1/auth/me/orders` — no hace falta ningún paso extra del lado del frontend para esto,
+ocurre solo. **Ojo**: la vinculación pasa solo al verificarse, no al simplemente
+registrarse/iniciar sesión — si el frontend muestra "revisa tu pedido en Mi cuenta" justo
+después de un registro, aclara que el pedido de invitado aparecerá ahí una vez confirmado el
+correo, no antes. Una vez vinculado, `GET /v1/orders/guest/{order_id}` deja de funcionar para
+ese pedido (`404`) — a partir de ahí, usa `GET /v1/auth/me/orders/{orderUuid}` con sesión.
+
+### `GET /v1/orders/guest/{order_id}` — consultar estado de un pedido de invitado
+
+Sin `X-Client-Token` (no aplica — es la ruta de invitado). `{order_id}` es el mismo `id` u
+`orderUuid` que devolvió `POST /v1/orders`. Responde el mismo shape que un item de
+`GET /v1/auth/me/orders` (`OrderPublic`) — útil para una página de "sigue tu pedido" sin
+necesidad de cuenta.
+
+```http
+GET /v1/orders/guest/d65b89dc-9690-40b3-8dfb-aa2cdde18cc0
+x-api-key: <api-key>
+```
+
+`404` si el pedido no existe, o si ya fue vinculado a una cuenta (ver arriba) — en ese caso
+no es un error real, solo indica que hay que usar la ruta autenticada en su lugar.
 
 ## Reseñas y calificaciones de productos
 
@@ -1489,7 +1595,10 @@ quieres mostrar "ahorraste $X" en el correo de confirmación.
 `clientEmail` es el destinatario a usar — se toma de `deliveryInfo.contactInfo.email` cuando la
 orden trae uno, y solo cae de vuelta al email de la cuenta (`ClientAccount.email`) si la orden se
 creó sin ese campo (órdenes viejas, u otro caller de `POST /v1/orders` que lo omita). Esto
-garantiza que `clientEmail` nunca llegue vacío. `clientName` sigue viniendo siempre de la cuenta.
+garantiza que `clientEmail` nunca llegue vacío. `clientName` viene de la cuenta cuando el pedido
+es de cuenta — **(2026-08-11)** para un pedido de invitado (sin cuenta, ver "Checkout de
+invitado" arriba) cae de vuelta a `deliveryInfo.contactInfo.name`, el mismo nombre capturado en
+el checkout.
 
 **Sin reintentos de este lado** — a diferencia del webhook de Mercado Pago hacia este
 backend (que sí reintenta agresivamente), este backend **no** reintenta si tu endpoint
@@ -1682,9 +1791,11 @@ No la repetimos aquí — consulta la sección de `order-confirmed` arriba.
 
 ### `POST /v1/orders/{order_id}/pay` — cobrar pedido (tarjeta/OXXO)
 
-Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada (mismo patrón
-de `404` que `/cancel`, no confirma si el pedido existe pero es de otra cuenta). `{order_id}`
-es el `id` que devolvió `POST /v1/orders`.
+Cuenta: requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada (mismo
+patrón de `404` que `/cancel`, no confirma si el pedido existe pero es de otra cuenta).
+Invitado: omite `X-Client-Token` — `{order_id}` (el `id` o el `orderUuid` que devolvió
+`POST /v1/orders`, cualquiera de los dos) es en sí mismo la prueba de pertenencia, `404` si
+no existe/ya no es de invitado (ver "Checkout de invitado" arriba).
 
 ```http
 POST /v1/orders/d65b89dc-9690-40b3-8dfb-aa2cdde18cc0/pay
@@ -1733,18 +1844,20 @@ Respuesta `200`:
   `POST /v1/orders/{order_id}/cancel` aparte.
 
 Errores esperables:
-- `401` — falta o es inválido `X-Client-Token`
-- `404` — el pedido no existe o no pertenece a la cuenta autenticada
+- `401` — se mandó `X-Client-Token` pero es inválido/expiró
+- `404` — el pedido no existe, no pertenece a la cuenta autenticada, o (invitado) ya fue
+  vinculado a una cuenta
 - `409` — el pedido ya fue pagado o cancelado antes (no se puede volver a cobrar)
 - `502` — Mercado Pago rechazó la solicitud de cobro (reintenta más tarde)
 
 ### `POST /v1/orders/{order_id}/cancel` — cancelar pedido
 
-Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
-(sin revelar si el pedido existe pero es de otra cuenta). Si el pedido ya tenía un pago de
-Mercado Pago asociado, esta llamada también lo reembolsa (si ya estaba aprobado) o lo cancela
-(si seguía pendiente) automáticamente — no hace falta ningún paso aparte del lado del frontend
-para eso.
+Cuenta: requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o
+responde `404` (sin revelar si el pedido existe pero es de otra cuenta). Invitado: omite
+`X-Client-Token` — `{order_id}` (`id` u `orderUuid`) prueba la pertenencia por sí mismo, ver
+"Checkout de invitado" arriba. Si el pedido ya tenía un pago de Mercado Pago asociado, esta
+llamada también lo reembolsa (si ya estaba aprobado) o lo cancela (si seguía pendiente)
+automáticamente — no hace falta ningún paso aparte del lado del frontend para eso.
 
 ```http
 POST /v1/orders/d65b89dc-9690-40b3-8dfb-aa2cdde18cc0/cancel
@@ -1813,8 +1926,9 @@ es que, solo en ese caso puntual, el producto puede tardar un poco en volver a m
 stock disponible en el catálogo.
 
 Errores esperables:
-- `401` — falta o es inválido `X-Client-Token`
-- `404` — el pedido no existe o no pertenece a la cuenta autenticada
+- `401` — se mandó `X-Client-Token` pero es inválido/expiró
+- `404` — el pedido no existe, no pertenece a la cuenta autenticada, o (invitado) ya fue
+  vinculado a una cuenta
 - `409` — el pedido ya fue cancelado antes
 - `409` — el pedido ya fue **enviado** (`dispatchStatus: "DISPATCHED"`) — a partir de ese
   punto ya no se puede cancelar por este medio. `"COMPLETE"` no cuenta como enviado para
@@ -1831,8 +1945,10 @@ frontend no cambia con el cambio de `/cancel` de arriba (misma sincronización a
 Sicar X de fondo, ver esa sección) — esta ruta sigue devolviendo `204` de inmediato y el pedido
 sigue desapareciendo de `GET /v1/auth/me/orders` en el acto.
 
-Requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o responde `404`
-(mismo criterio que `/cancel`). Solo funciona sobre pedidos en `status: "TO_PAY"` — `409` si el
+Cuenta: requiere `X-Client-Token` — el pedido debe pertenecer a la cuenta autenticada, o
+responde `404` (mismo criterio que `/cancel`). Invitado: omite `X-Client-Token` — `{order_id}`
+(`id` u `orderUuid`) prueba la pertenencia por sí mismo, ver "Checkout de invitado" arriba.
+Solo funciona sobre pedidos en `status: "TO_PAY"` — `409` si el
 pedido ya está `PAID` o `CANCELLED` (esos no se pueden borrar). No lleva body: el stock a
 restaurar ya se toma de lo guardado al crear el pedido, y si había un pago de Mercado Pago
 pendiente (OXXO sin pagar, tarjeta en revisión) se cancela automáticamente, igual que en
@@ -1934,12 +2050,18 @@ async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
 
 // Ya NO cobra -- solo reserva el pedido localmente (TO_PAY) y prepara el cobro con
 // Mercado Pago. Renderiza el Payment Brick con el `amount`/`preferenceId` de la respuesta.
-async function createOrder(clientToken: string, products: { uuid: string; quantity: number }[], contactInfo: { name: string; phone: string; email?: string }) {
+// clientToken es opcional (2026-08-11) -- omitelo (undefined) para checkout de invitado;
+// en ese caso contactInfo.email es obligatorio y no se puede mandar couponCode.
+async function createOrder(
+  clientToken: string | undefined,
+  products: { uuid: string; quantity: number }[],
+  contactInfo: { name: string; phone: string; email?: string },
+) {
   const res = await fetch(`${API_URL}/v1/orders`, {
     method: "POST",
     headers: {
       "x-api-key": API_KEY,
-      "X-Client-Token": clientToken,
+      ...(clientToken ? { "X-Client-Token": clientToken } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -1952,16 +2074,20 @@ async function createOrder(clientToken: string, products: { uuid: string; quanti
     throw new Error(err.detail ?? "No se pudo crear el pedido");
   }
   return res.json(); // { id, serieFolio, date, status, orderUuid, preferenceId, amount }
+  // Guarda `id`/`orderUuid` -- si fue checkout de invitado (sin clientToken), son la unica
+  // forma de reclamar el pedido despues en payOrder/cancel/DELETE/GET /orders/guest/{id}.
 }
 
 // Llamado desde el onSubmit del Payment Brick (tarjeta/OXXO) -- NO se llama para el
 // metodo Wallet, que redirige directo a Mercado Pago (ver "Pagos con Mercado Pago").
-async function payOrder(orderId: string, clientToken: string, formData: Record<string, unknown>) {
+// clientToken es opcional -- omitelo para un pedido de invitado (el propio orderId ya
+// prueba pertenencia en ese caso).
+async function payOrder(orderId: string, clientToken: string | undefined, formData: Record<string, unknown>) {
   const res = await fetch(`${API_URL}/v1/orders/${orderId}/pay`, {
     method: "POST",
     headers: {
       "x-api-key": API_KEY,
-      "X-Client-Token": clientToken,
+      ...(clientToken ? { "X-Client-Token": clientToken } : {}),
       "Content-Type": "application/json",
     },
     body: JSON.stringify(formData), // token/paymentMethodId/issuerId/installments/payer, tal cual del Brick
@@ -1980,10 +2106,14 @@ async function payOrder(orderId: string, clientToken: string, formData: Record<s
   disponibilidad contra el catálogo local (sincronizado desde Sicar X cada 5 minutos, sin
   ninguna llamada en vivo en este paso) antes de confirmar; un `409` en checkout es normal y
   esperado, no un bug.
-- **`X-Client-Token` expira** — si `/v1/orders` responde `401`, vuelve a llamar `/v1/auth/login`.
-- **Login es obligatorio para comprar** — no existe checkout anónimo; sin una cuenta autenticada
-  (`X-Client-Token` válido) `/v1/orders`, `/v1/orders/{order_id}/pay` y
-  `/v1/orders/{order_id}/cancel` responden `401`.
+- **`X-Client-Token` expira** — si `/v1/orders` responde `401` cuando sí se mandó el header,
+  vuelve a llamar `/v1/auth/login`.
+- **(2026-08-11) Login ya NO es obligatorio para comprar** — existe checkout de invitado:
+  omitir `X-Client-Token` por completo en `/v1/orders`, `/v1/orders/{order_id}/pay`,
+  `/v1/orders/{order_id}/cancel` y `DELETE /v1/orders/{order_id}` ya no es un `401`, es la
+  señal de "este pedido es de invitado" — ver "Checkout de invitado" arriba para el contrato
+  completo (email obligatorio, dirección inline en vez de `addressUuid`, sin cupones, y cómo
+  se prueba pertenencia sin sesión).
 - **`POST /v1/orders` ya no cobra ni confirma el pedido de inmediato** — solo lo reserva
   (`status: "TO_PAY"`). El cobro real ocurre en `POST /v1/orders/{order_id}/pay` (tarjeta/OXXO) o,
   para el método Wallet de Mercado Pago, nunca pasa por este backend — se confirma por webhook.
