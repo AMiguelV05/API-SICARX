@@ -10,7 +10,9 @@ def raise_upstream_error(response: httpx.Response, log_context: str, user_messag
     si lo hay, un mensaje legible del upstream entre parentesis (solo `message`/`error`/
     `detail` de un body JSON, truncado a 300 chars) - nunca `response.text` crudo, que
     podria traer HTML o detalles internos de Sicar."""
-    logger.error(f"{log_context}: {response.status_code} - {response.text}")
+    request_id = response.headers.get("x-request-id")
+    request_id_suffix = f" (x-request-id: {request_id})" if request_id else ""
+    logger.error(f"{log_context}: {response.status_code}{request_id_suffix} - {response.text}")
 
     upstream_message = None
     try:
