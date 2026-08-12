@@ -9,13 +9,36 @@ from app.models.product import Product
 logger = logging.getLogger(__name__)
 
 async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantities: dict) -> dict[str, Product]:
-    """Valida stock/disponibilidad/precio contra Postgres local, sin llamada a Sicar X. `price <= 0` se trata como no disponible - evita que un producto sincronizado con precio 0.00 se compre gratis."""
+    """Valida stock/disponibilidad/precio contra Postgres local, sin llamada a Sicar X.
+    `price <= 0` se trata como no disponible - evita que un producto sincronizado con precio
+    0.00 se compre gratis.
+
+    `SELECT...FOR UPDATE` sobre las filas de Product involucradas serializa checkouts
+    concurrentes del mismo producto - sin esto, dos POST /orders para la ultima unidad
+    disponible pueden leer `available_stock` ANTES de que cualquiera de los dos escriba su
+    reserva (`apply_reserved_deltas` es un UPDATE incondicional, sin re-chequeo contra stock),
+    dejando `reserved` > `stock` y ambas ordenes avanzan a pago real por la misma unidad. El
+    lock se sostiene hasta el unico commit de routes/orders.py::create_order (linea 266),
+    igual que coupon_service.lock_and_validate_coupon con Coupon - incluye la llamada a
+    Mercado Pago (create_preference), aceptable porque MP_TIMEOUT acota esa espera a ~20s y
+    ya es el trade-off aceptado hoy para el lock de Coupon en esta misma funcion. No bloquea
+    lecturas normales (GET /catalog, /search, GET /products/{uuid}, etc.): son SELECT sin
+    FOR UPDATE, que bajo MVCC de Postgres nunca esperan el lock de otra transaccion.
+
+    sorted(set(...)) + ORDER BY: un pedido puede tener varios productos - ordenar
+    consistentemente el conjunto de uuids antes de bloquear evita deadlock entre dos
+    checkouts concurrentes que comparten productos pero en orden de carrito distinto (mismo
+    criterio que coupon_service.replace_coupon_categories/replace_coupon_products)."""
+    sorted_uuids = sorted(set(uuids))
     result = await db.execute(
-        select(Product).where(
-            Product.sicar_uuid.in_(uuids),
+        select(Product)
+        .where(
+            Product.sicar_uuid.in_(sorted_uuids),
             Product.is_deleted == False,
             Product.is_active == True,
         )
+        .order_by(Product.sicar_uuid)
+        .with_for_update()
     )
     products_by_uuid = {p.sicar_uuid: p for p in result.scalars().all()}
 
