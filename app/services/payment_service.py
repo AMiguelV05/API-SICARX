@@ -1,4 +1,5 @@
 import logging
+from uuid import uuid4
 
 import httpx
 from fastapi import Request
@@ -57,7 +58,18 @@ async def create_preference(order: Order) -> dict | None:
         return None
 
 async def create_payment(order: Order, submit_data: dict) -> dict:
-    """Cobra via MP. `transaction_amount` siempre viene de `order.total` en Postgres, nunca de submit_data. Usa order.uuid como X-Idempotency-Key para deduplicar reintentos.
+    """Cobra via MP. `transaction_amount` siempre viene de `order.total` en Postgres, nunca de submit_data.
+
+    X-Idempotency-Key es un uuid4 fresco en cada llamada, NO order.uuid. MP guarda la
+    respuesta (incluyendo errores) asociada a cada key y la reproduce tal cual ante
+    cualquier reintento con la misma key, en vez de re-evaluar el payload nuevo - ver su
+    propia doc ("si el valor de idempotencia ya fue usado, reintenta con un valor nuevo").
+    Como local_order.status se queda en TO_PAY tras cualquier fallo (pay_order no lo
+    toca), un order.uuid fijo como key dejaba cualquier orden que fallara una vez
+    atascada repitiendo ese mismo error para siempre, sin importar que tan bien
+    formado estuviera un reintento posterior - confirmado en vivo el 2026-08-12: el
+    mismo internal_error 500 de MP persistio identico incluso despues de arreglar la
+    causa original (payer.email faltante, ver abajo).
 
     `payer.email` es requerido por MP para pagos con tarjeta - si el Brick no lo trae en
     `formData` (p. ej. solo se paso en `initialization.payer.email` y el Brick no lo
@@ -101,7 +113,7 @@ async def create_payment(order: Order, submit_data: dict) -> dict:
         }
 
     async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.post(PAYMENTS_URL, json=payload, headers=_mp_headers(idempotency_key=order.uuid))
+        response = await client.post(PAYMENTS_URL, json=payload, headers=_mp_headers(idempotency_key=str(uuid4())))
 
     if response.status_code not in (200, 201):
         raise_upstream_error(response, f"Mercado Pago rechazo el cobro de la orden {order.uuid}", "No se pudo procesar el pago con Mercado Pago. Intenta nuevamente.")
