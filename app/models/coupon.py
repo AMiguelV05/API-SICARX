@@ -18,6 +18,11 @@ coupon_categories = Table(
     "coupon_categories", Base.metadata,
     Column("coupon_id", Integer, ForeignKey("coupons.id", ondelete="CASCADE"), primary_key=True),
     Column("category_uuid", String, ForeignKey("categories.uuid"), primary_key=True),
+    # category_uuid es la columna NO lider de la PK compuesta - sin este indice,
+    # taxonomy_service.delete_category filtra solo por category_uuid (sin coupon_id) y
+    # seq-scanea esta tabla en cada DELETE /admin/categories/{uuid}. Mismo patron que
+    # ix_product_categories_product_id arriba.
+    Index("ix_coupon_categories_category_uuid", "category_uuid"),
 )
 
 # N:M cupon<->producto, solo relevante cuando scope_type == "PRODUCT". product_id (no

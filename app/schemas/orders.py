@@ -20,7 +20,7 @@ class ProductItem(CamelModel):
 
 class ContactInfo(CamelModel):
     name: str
-    phone: str = Field(max_length=10, description="Sicar X rechaza telefonos de mas de 10 caracteres")
+    phone: str = Field(min_length=10, max_length=10, description="Exactamente 10 digitos tras normalizar - Sicar X rechaza telefonos de mas de 10 caracteres, y un telefono vacio/incompleto no debe pasar validacion en silencio (termina mandandose a envia.com en la guia de envio si nadie lo atrapa antes)")
     email: Optional[EmailStr] = None
 
     @field_validator("phone", mode="before")

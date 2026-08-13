@@ -1,8 +1,10 @@
 import logging
 import uuid
 from contextvars import ContextVar
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -51,6 +53,23 @@ if not settings.ADMIN_API_KEY:
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI/Pydantic devuelven por defecto `detail=[{loc,msg,type}, ...]` en un 422 -
+    distinto a `detail=<string>`, que es lo que usa cada `HTTPException` explicito en este
+    codebase (confirmado por grep: ningun `HTTPException` manda un `detail` dict/lista).
+    Normaliza a la misma forma para que el frontend pueda tratar `error.detail` como texto
+    de forma uniforme, sin un caso especial solo para 422."""
+    messages = []
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err["loc"] if p != "body")
+        msg = err.get("msg", "Entrada inválida")
+        messages.append(f"{loc}: {msg}" if loc else msg)
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": "; ".join(messages) or "Entrada inválida."},
+    )
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):

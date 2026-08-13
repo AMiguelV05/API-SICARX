@@ -99,7 +99,7 @@ class Order(Base):
     # Cupon aplicado, si hubo uno - ver CouponRedemption para el ciclo de vida del uso.
     # coupon_code es una foto fija del texto usado (el Coupon puede editarse/borrarse despues).
     # subtotal es el total ANTES del descuento; NULL en ordenes historicas (tratar como == total).
-    coupon_id = Column(Integer, ForeignKey("coupons.id"), nullable=True)
+    coupon_id = Column(Integer, ForeignKey("coupons.id"), nullable=True, index=True)
     coupon_code = Column(String, nullable=True)
     discount_amount = Column(Numeric(10, 2), nullable=True)
     subtotal = Column(Numeric(10, 2), nullable=True)

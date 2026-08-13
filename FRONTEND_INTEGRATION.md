@@ -1202,14 +1202,25 @@ si no se hubiera mandado, en vez de rechazarse. **Para checkout de invitado (sin
 `X-Client-Token`) es obligatorio en la práctica** — `400` si falta — ver "Checkout de
 invitado" más abajo.
 
-`contactInfo.phone` acepta hasta 10 dígitos — Sicar X no quiere más. El backend ahora limpia el
-valor antes de validar (quita espacios, guiones, paréntesis, `+52`, etc., y si aun así sobran
-dígitos por un prefijo de país/larga distancia se queda con los últimos 10), así que un input con
-máscara (`"315-123-4567"`, `"+52 315 123 4567"`) ya no revienta con `422` — pero sigue siendo buena
+`contactInfo.phone` debe tener **exactamente 10 dígitos** tras normalizar — Sicar X no quiere
+más, y desde **2026-08-13** tampoco menos. El backend limpia el valor antes de validar (quita
+espacios, guiones, paréntesis, `+52`, etc., y si aun así sobran dígitos por un prefijo de país/
+larga distancia se queda con los últimos 10), así que un input con máscara
+(`"315-123-4567"`, `"+52 315 123 4567"`) sigue sin reventar con `422` — pero sigue siendo buena
 idea mandar solo los 10 dígitos si el formulario ya los tiene separados. **Incidente (2026-07-30)**:
-antes de este cambio, cualquier teléfono con formato o un email vacío `""` producía un `422` genérico
+antes de ese cambio, cualquier teléfono con formato o un email vacío `""` producía un `422` genérico
 en `POST /v1/orders` sin explicación visible del lado del frontend — si ves checkouts fallando así
 con una versión más vieja de este backend, esta es la causa más probable.
+
+**Nuevo (2026-08-13) — un teléfono vacío/incompleto ahora sí es `422`, antes pasaba en
+silencio.** Antes de este cambio, un `phone` vacío (`""`) o con menos de 10 dígitos tras la
+limpieza de arriba (p. ej. un número de 9 dígitos por un typo, o un campo que el formulario
+mandó en blanco) pasaba la validación sin error — el problema solo aparecía después, si un
+admin intentaba generar una guía de envío con envia.com y el teléfono llegaba vacío/inválido
+a su API. Ahora `POST /v1/orders` responde `422` en el momento del checkout si `phone` no
+tiene exactamente 10 dígitos tras normalizar — si tu formulario no valida ya un teléfono
+completo antes de enviarlo, un usuario con un número incompleto ahora ve el error aquí, en
+checkout, en vez de que el pedido se cree con un dato malo.
 
 **`Idempotency-Key` (header, opcional, recomendado).** Un reintento de red o un doble-click en
 "pagar" puede reenviar el mismo `POST /v1/orders` — sin este header, cada intento crea una orden
@@ -2222,3 +2233,20 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
     segundo plano de este lado — no cambia nada del contrato que implementas, solo deja de
     ser una dependencia síncrona en la ruta crítica de checkout (ver la nota junto al webhook
     `order-confirmed` arriba).
+- **Nuevo (2026-08-13) — dos cambios de comportamiento que sí conviene revisar del lado del
+  frontend** (a diferencia de todo lo demás en esta fecha, que es aditivo/no-op):
+  - **Todo `422` ahora trae `detail` como string, nunca como lista.** Antes, un error de
+    validación de FastAPI (campo faltante, tipo inválido, etc. — en cualquier endpoint, no
+    solo checkout) devolvía `detail` como `[{loc, msg, type}, ...]`, distinto al `detail`
+    string que ya usaba cualquier otro error (`400`/`401`/`404`/`409`) de esta API. Si en
+    algún lado tu código hace algo como `Array.isArray(error.detail)` o
+    `error.detail[0].msg` para mostrar errores de validación campo por campo, eso ya no va a
+    funcionar — ahora `error.detail` es siempre un string legible (p. ej.
+    `"products: Field required; deliveryInfo: Field required"`), igual que cualquier otro
+    error de esta API. Si tu manejo de errores ya trata `detail` genéricamente como texto,
+    no hay nada que cambiar.
+  - **`contactInfo.phone` vacío o incompleto ahora es `422` en checkout, antes pasaba
+    silenciosamente** — ver el detalle completo en la sección de `POST /v1/orders` arriba.
+    Si tu formulario de checkout no exige ya un teléfono completo (10 dígitos) antes de
+    enviar, revisa que muestres bien este `422` nuevo en vez de dejar que se vea como un
+    error genérico sin explicación.
