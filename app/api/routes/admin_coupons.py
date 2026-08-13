@@ -11,13 +11,19 @@ from app.schemas.coupons import (
     CouponCategoriesResponse,
     ReplaceCouponCategoriesRequest,
     ReplaceCouponCategoriesResponse,
+    PatchCouponCategoriesRequest,
+    PatchCouponCategoriesResponse,
     CouponProductsResponse,
     ReplaceCouponProductsRequest,
     ReplaceCouponProductsResponse,
+    PatchCouponProductsRequest,
+    PatchCouponProductsResponse,
     CouponAssignedClientPublic,
     CouponClientsResponse,
     ReplaceCouponClientsRequest,
     ReplaceCouponClientsResponse,
+    PatchCouponClientsRequest,
+    PatchCouponClientsResponse,
     CouponRedemptionAdminPublic,
     CouponRedemptionListResponse,
 )
@@ -80,6 +86,23 @@ async def admin_replace_coupon_categories(coupon_uuid: str, db: DbDep, data: Rep
     return ReplaceCouponCategoriesResponse(coupon_uuid=coupon_uuid, category_uuids=category_uuids)
 
 
+@router.patch("/{coupon_uuid}/categories", response_model=PatchCouponCategoriesResponse, summary="Agregar/quitar categorías del alcance del cupón de forma incremental")
+async def admin_patch_coupon_categories(coupon_uuid: str, db: DbDep, data: PatchCouponCategoriesRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba): agrega/quita sin necesitar conocer
+    el conjunto completo asignado - seguro de usar aunque el cupón tenga más categorías
+    asignadas que el límite de `GET .../categories`. Solo válido para cupones con
+    `scopeType=CATEGORY` (`409` si no). `add` ya asignadas se ignoran (idempotente);
+    `remove` no asignadas o inexistentes también se ignoran (no-op tolerante). `422` si una
+    misma categoría aparece en `add` y `remove` a la vez. `404` si alguna de `add` no
+    resuelve a una categoría real."""
+    added, removed, added_count, removed_count = await coupon_service.patch_coupon_categories(
+        db, coupon_uuid, data.add, data.remove
+    )
+    return PatchCouponCategoriesResponse(
+        coupon_uuid=coupon_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
+    )
+
+
 @router.get("/{coupon_uuid}/categories", response_model=CouponCategoriesResponse, summary="Listar las categorías asignadas al alcance del cupón")
 async def admin_list_coupon_categories(coupon_uuid: str, db: DbDep):
     """Lectura del alcance CATEGORY actual, para poblar la UI de edición antes de un `PUT`
@@ -94,6 +117,18 @@ async def admin_replace_coupon_products(coupon_uuid: str, db: DbDep, data: Repla
     """Solo válido para cupones con `scopeType=PRODUCT` (`409` si no). Reemplazo completo."""
     product_uuids = await coupon_service.replace_coupon_products(db, coupon_uuid, data.product_uuids)
     return ReplaceCouponProductsResponse(coupon_uuid=coupon_uuid, product_uuids=product_uuids)
+
+
+@router.patch("/{coupon_uuid}/products", response_model=PatchCouponProductsResponse, summary="Agregar/quitar productos del alcance del cupón de forma incremental")
+async def admin_patch_coupon_products(coupon_uuid: str, db: DbDep, data: PatchCouponProductsRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba) - mismo patrón que el equivalente de
+    categorías. Solo válido para cupones con `scopeType=PRODUCT` (`409` si no)."""
+    added, removed, added_count, removed_count = await coupon_service.patch_coupon_products(
+        db, coupon_uuid, data.add, data.remove
+    )
+    return PatchCouponProductsResponse(
+        coupon_uuid=coupon_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
+    )
 
 
 @router.get("/{coupon_uuid}/products", response_model=CouponProductsResponse, summary="Listar los productos asignados al alcance del cupón")
@@ -116,6 +151,21 @@ async def admin_replace_coupon_clients(coupon_uuid: str, db: DbDep, data: Replac
     resuelve a una cuenta existente."""
     client_emails = await coupon_service.replace_coupon_clients(db, coupon_uuid, data.client_emails)
     return ReplaceCouponClientsResponse(coupon_uuid=coupon_uuid, client_emails=client_emails)
+
+
+@router.patch("/{coupon_uuid}/clients", response_model=PatchCouponClientsResponse, summary="Agregar/quitar clientes elegibles de un cupón asignado de forma incremental")
+async def admin_patch_coupon_clients(coupon_uuid: str, db: DbDep, data: PatchCouponClientsRequest = Body()):
+    """Incremental (a diferencia del `PUT` de arriba) - mismo patrón que el equivalente de
+    categorías/productos. Resuelto por email, igual que el `PUT`. `add` a un cupón que
+    todavía era público (sin nadie asignado) lo vuelve restringido a esos clientes, mismo
+    efecto que el `PUT` - la diferencia es que no hace falta reenviar a nadie más ya
+    asignado."""
+    added, removed, added_count, removed_count = await coupon_service.patch_coupon_clients(
+        db, coupon_uuid, data.add, data.remove
+    )
+    return PatchCouponClientsResponse(
+        coupon_uuid=coupon_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
+    )
 
 
 @router.get("/{coupon_uuid}/clients", response_model=CouponClientsResponse, summary="Listar los clientes elegibles para un cupón asignado")

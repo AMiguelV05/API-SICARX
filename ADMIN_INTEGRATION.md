@@ -510,7 +510,14 @@ paqueterías). Respuesta `200`:
 externa (no genera guía, no calcula tarifa, no notifica al repartidor). Es solo "quién quedó
 encargado de esta entrega", para que el dashboard lo muestre. `404` si el pedido no existe (o
 está soft-deleted). Se puede llamar varias veces sobre el mismo pedido (reasigna sin error) — a
-diferencia de `/accept`, no hay noción de "ya asignado, no se puede reasignar".
+diferencia de `/accept`, no hay noción de "ya asignado, no se puede reasignar" (corregir el
+nombre de la mensajería es un caso de uso legítimo).
+
+**Nuevo (2026-08-13)**: sí se agregaron dos guardas de estado, mismo criterio que
+`/accept`/`/cancel`/`advance-status` para un estado genuinamente inválido (no para "ya
+asignado", que sigue permitido): `409` si el pedido ya está `CANCELLED`, y `409` si el
+pedido es `PICKUP` (recolección en tienda no tiene mensajería que asignar — mismo chequeo
+que el `409` de `DISPATCHED` en `advance-status` para pedidos `PICKUP`).
 
 ### Guía de envío con envia.com
 
@@ -1085,7 +1092,7 @@ a mano primero con los `PUT` de abajo. Esto es distinto de borrar una categoría
 un cupón todavía usa: eso sí se bloquea (`409`, ver `DELETE /v1/admin/categories/{uuid}`
 arriba) — quitarlo del alcance del cupón primero.
 
-#### `PUT`/`GET /v1/admin/coupons/{uuid}/categories` — alcance de categorías
+#### `PUT`/`PATCH`/`GET /v1/admin/coupons/{uuid}/categories` — alcance de categorías
 
 ```http
 PUT /v1/admin/coupons/b2e4b3f0-.../categories
@@ -1096,26 +1103,48 @@ Content-Type: application/json
 ```
 
 `PUT` — solo válido si el cupón tiene `scopeType: "CATEGORY"` (`409` si no). Reemplazo
-completo del conjunto, no incremental (a diferencia de `PATCH .../products` en
-categorías/vehículos, aquí no hay una variante incremental). `404` si algún `categoryUuid`
-no existe.
+completo del conjunto, no incremental. `404` si algún `categoryUuid` no existe.
+
+**Nuevo (2026-08-13)**: `PATCH /v1/admin/coupons/{uuid}/categories` agrega/quita de forma
+incremental, mismo patrón que `PATCH /v1/admin/categories/{uuid}/products` — pensado para
+no arriesgar sobreescribir el alcance de un cupón con muchas categorías asignadas si el
+picker del dashboard nunca cargó el conjunto completo:
+
+```http
+PATCH /v1/admin/coupons/b2e4b3f0-.../categories
+X-Admin-Key: <admin-key>
+Content-Type: application/json
+
+{ "add": ["3f9a1c2e-..."], "remove": ["6a4fd308-..."] }
+```
+
+Respuesta `200`:
+```json
+{ "couponUuid": "b2e4b3f0-...", "added": ["3f9a1c2e-..."], "removed": ["6a4fd308-..."], "addedCount": 1, "removedCount": 1 }
+```
+
+Mismo `409` de `scopeType` que el `PUT`. `add` ya asignadas se ignoran (idempotente);
+`remove` no asignadas o inexistentes también se ignoran (no-op tolerante). `422` si una
+misma categoría aparece en `add` y `remove` a la vez. `404` si alguna de `add` no resuelve a
+una categoría real.
 
 `GET /v1/admin/coupons/{uuid}/categories` — lectura del alcance actual (sin paginar, acotada
-por naturaleza), para poblar la UI de edición antes de un `PUT`:
+por naturaleza), para poblar la UI de edición antes de un `PUT`/`PATCH`:
 
 ```json
 { "docs": [ { "uuid": "3f9a1c2e-...", "name": "Herramientas Eléctricas", "slug": "herramientas-electricas", "parentUuid": null, "updatedAt": "2026-08-01T12:00:00Z" } ] }
 ```
 
-#### `PUT`/`GET /v1/admin/coupons/{uuid}/products` — alcance de productos
+#### `PUT`/`PATCH`/`GET /v1/admin/coupons/{uuid}/products` — alcance de productos
 
 Mismo comportamiento que el de categorías arriba, pero para `scopeType: "PRODUCT"` — el `PUT`
-recibe `productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe). A diferencia
-del `GET` de categorías, `GET /v1/admin/coupons/{uuid}/products` **sí está paginado**
-(`limit`/`offset`, respuesta `{total, docs}`) — un cupón `PRODUCT` puede tener muchos
-productos asignados.
+recibe `productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe), y el nuevo
+`PATCH` (2026-08-13) recibe `add`/`remove` con el mismo shape/semántica que el de categorías
+(mismo `409` de `scopeType`). A diferencia del `GET` de categorías, `GET
+/v1/admin/coupons/{uuid}/products` **sí está paginado** (`limit`/`offset`, respuesta
+`{total, docs}`) — un cupón `PRODUCT` puede tener muchos productos asignados.
 
-#### `PUT`/`GET /v1/admin/coupons/{uuid}/clients` — lista de clientes elegibles
+#### `PUT`/`PATCH`/`GET /v1/admin/coupons/{uuid}/clients` — lista de clientes elegibles
 
 ```http
 PUT /v1/admin/coupons/b2e4b3f0-.../clients
@@ -1129,6 +1158,13 @@ Content-Type: application/json
 Lista vacía = cupón público (cualquier cliente puede intentar redimirlo, sujeto a las demás
 reglas); no vacía = solo esos clientes. `404` si algún email no corresponde a una cuenta
 existente.
+
+**Nuevo (2026-08-13)**: `PATCH /v1/admin/coupons/{uuid}/clients` agrega/quita de forma
+incremental (`add`/`remove`, mismo shape que categorías/productos arriba, también resuelto
+por email) — a diferencia de esas dos, no tiene chequeo de `scopeType` (la elegibilidad por
+cliente es independiente del alcance de descuento). `add` sobre un cupón que todavía era
+público (sin nadie asignado) lo vuelve restringido a esos clientes, mismo efecto que el
+`PUT` — la diferencia es que no hace falta reenviar a nadie más ya asignado.
 
 `GET /v1/admin/coupons/{uuid}/clients` — lectura paginada de los clientes elegibles
 actuales (una campaña puede apuntar a muchos clientes):

@@ -306,9 +306,20 @@ async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, targe
 
 
 async def assign_delivery(db: AsyncSession, order_uuid: str, delivery_company: str) -> Order:
+    """Metadato local de mensajeria, texto libre - no llama a ninguna API de paqueteria.
+    A diferencia de accept_order/cancel_order_admin/advance_order_dispatch_status, esta
+    funcion SI permite reasignar sobre un valor ya existente sin 409 - corregir el nombre
+    de la mensajeria es un caso de uso legitimo, a diferencia de "ya se acepto"/"ya se
+    cancelo". Lo que si se bloquea es asignar mensajeria a un estado donde no tiene sentido:
+    una orden ya cancelada, o un pedido PICKUP (sin paso de envio - mismo criterio que el
+    guard de DISPATCHED en advance_order_dispatch_status)."""
     order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    if order.status == "CANCELLED":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue cancelada.")
+    if (order.delivery_info or {}).get("deliveryType") != "DELIVERYMAN":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Los pedidos de recolección en tienda no tienen mensajería que asignar.")
 
     order.delivery_company = delivery_company
     order.delivery_assigned_at = datetime.now(timezone.utc)

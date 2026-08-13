@@ -99,6 +99,30 @@ class ReplaceCouponCategoriesResponse(CamelModel):
     category_uuids: List[str]
 
 
+class PatchCouponCategoriesRequest(CamelModel):
+    """Incremental (a diferencia de ReplaceCouponCategoriesRequest): agrega/quita sin
+    necesitar reenviar el conjunto completo - mismo patron que PatchCategoryProductsRequest
+    en taxonomy, pensado para no arriesgar sobreescribir el alcance de un cupon con muchas
+    categorias asignadas si el picker del dashboard nunca cargo el conjunto completo."""
+    add: List[str] = Field(default_factory=list, max_length=5000, description="uuid de categorías a agregar al alcance; ya asignadas se ignoran (idempotente).")
+    remove: List[str] = Field(default_factory=list, max_length=5000, description="uuid de categorías a quitar del alcance; no asignadas o inexistentes se ignoran (no-op tolerante).")
+
+    @model_validator(mode="after")
+    def _no_overlap(self) -> "PatchCouponCategoriesRequest":
+        overlap = set(self.add) & set(self.remove)
+        if overlap:
+            raise ValueError(f"Una categoría no puede estar en 'add' y 'remove' a la vez: {', '.join(sorted(overlap))}")
+        return self
+
+
+class PatchCouponCategoriesResponse(CamelModel):
+    coupon_uuid: str
+    added: List[str]
+    removed: List[str]
+    added_count: int
+    removed_count: int
+
+
 class CouponProductsResponse(CamelModel):
     total: int
     docs: List[ProductAdminBasic]
@@ -111,6 +135,27 @@ class ReplaceCouponProductsRequest(CamelModel):
 class ReplaceCouponProductsResponse(CamelModel):
     coupon_uuid: str
     product_uuids: List[str]
+
+
+class PatchCouponProductsRequest(CamelModel):
+    """Incremental - mismo patron que PatchCouponCategoriesRequest arriba."""
+    add: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a agregar al alcance; ya asignados se ignoran (idempotente).")
+    remove: List[str] = Field(default_factory=list, max_length=5000, description="sicar_uuid de productos a quitar del alcance; no asignados o inexistentes se ignoran (no-op tolerante).")
+
+    @model_validator(mode="after")
+    def _no_overlap(self) -> "PatchCouponProductsRequest":
+        overlap = set(self.add) & set(self.remove)
+        if overlap:
+            raise ValueError(f"Un producto no puede estar en 'add' y 'remove' a la vez: {', '.join(sorted(overlap))}")
+        return self
+
+
+class PatchCouponProductsResponse(CamelModel):
+    coupon_uuid: str
+    added: List[str]
+    removed: List[str]
+    added_count: int
+    removed_count: int
 
 
 class CouponAssignedClientPublic(CamelModel):
@@ -134,6 +179,29 @@ class ReplaceCouponClientsRequest(CamelModel):
 class ReplaceCouponClientsResponse(CamelModel):
     coupon_uuid: str
     client_emails: List[str]
+
+
+class PatchCouponClientsRequest(CamelModel):
+    """Incremental - mismo patron que PatchCouponCategoriesRequest arriba. `remove` en un
+    cupón que ya era público (sin ningún cliente asignado) es un no-op tolerante, no un
+    error - no hay forma de "sacar" a alguien de un conjunto vacío."""
+    add: List[EmailStr] = Field(default_factory=list, description="Emails a agregar a la lista de elegibles; ya asignados se ignoran (idempotente).")
+    remove: List[EmailStr] = Field(default_factory=list, description="Emails a quitar de la lista de elegibles; no asignados o inexistentes se ignoran (no-op tolerante).")
+
+    @model_validator(mode="after")
+    def _no_overlap(self) -> "PatchCouponClientsRequest":
+        overlap = {e.lower() for e in self.add} & {e.lower() for e in self.remove}
+        if overlap:
+            raise ValueError(f"Un email no puede estar en 'add' y 'remove' a la vez: {', '.join(sorted(overlap))}")
+        return self
+
+
+class PatchCouponClientsResponse(CamelModel):
+    coupon_uuid: str
+    added: List[str]
+    removed: List[str]
+    added_count: int
+    removed_count: int
 
 
 class CouponRedemptionAdminPublic(CamelModel):

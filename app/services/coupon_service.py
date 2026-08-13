@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import HTTPException, status
 from sqlalchemy import select, func, delete, insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.coupon import Coupon, CouponRedemption, coupon_categories, coupon_products, coupon_assigned_clients
 from app.models.order import Order
@@ -366,6 +367,45 @@ async def replace_coupon_categories(db: AsyncSession, coupon_uuid: str, category
     return unique_uuids
 
 
+async def patch_coupon_categories(db: AsyncSession, coupon_uuid: str, add_uuids: list[str], remove_uuids: list[str]) -> tuple[list[str], list[str], int, int]:
+    """Incremental (a diferencia de replace_coupon_categories) - mismo patron que
+    taxonomy_service.patch_category_products. `remove_uuids` es tolerante (no valida
+    existencia)."""
+    coupon = await get_coupon_by_uuid(db, coupon_uuid)
+    if coupon.scope_type != "CATEGORY":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este cupón no tiene scopeType=CATEGORY.")
+
+    unique_add = sorted(set(add_uuids))
+    if unique_add:
+        result = await db.execute(select(Category.uuid).where(Category.uuid.in_(unique_add)))
+        found = {row[0] for row in result.all()}
+        missing = [u for u in unique_add if u not in found]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Categorías no encontradas: {', '.join(missing)}")
+
+    added_count = 0
+    if unique_add:
+        insert_stmt = pg_insert(coupon_categories).values(
+            [{"coupon_id": coupon.id, "category_uuid": u} for u in unique_add]
+        ).on_conflict_do_nothing(index_elements=["coupon_id", "category_uuid"]).returning(coupon_categories.c.category_uuid)
+        insert_result = await db.execute(insert_stmt)
+        added_count = len(insert_result.all())
+
+    unique_remove = sorted(set(remove_uuids))
+    removed_count = 0
+    if unique_remove:
+        delete_stmt = delete(coupon_categories).where(
+            coupon_categories.c.coupon_id == coupon.id,
+            coupon_categories.c.category_uuid.in_(unique_remove),
+        ).returning(coupon_categories.c.category_uuid)
+        delete_result = await db.execute(delete_stmt)
+        removed_count = len(delete_result.all())
+
+    await db.commit()
+    logger.info(f"Cupón {coupon_uuid}: {added_count} categoría(s) agregada(s), {removed_count} quitada(s) via PATCH /admin.")
+    return unique_add, unique_remove, added_count, removed_count
+
+
 async def replace_coupon_products(db: AsyncSession, coupon_uuid: str, product_uuids: list[str]) -> list[str]:
     coupon = await get_coupon_by_uuid(db, coupon_uuid)
     if coupon.scope_type != "PRODUCT":
@@ -391,6 +431,48 @@ async def replace_coupon_products(db: AsyncSession, coupon_uuid: str, product_uu
     return unique_uuids
 
 
+async def patch_coupon_products(db: AsyncSession, coupon_uuid: str, add_uuids: list[str], remove_uuids: list[str]) -> tuple[list[str], list[str], int, int]:
+    """Incremental (a diferencia de replace_coupon_products) - mismo patron que
+    taxonomy_service.patch_category_products."""
+    coupon = await get_coupon_by_uuid(db, coupon_uuid)
+    if coupon.scope_type != "PRODUCT":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este cupón no tiene scopeType=PRODUCT.")
+
+    unique_add = sorted(set(add_uuids))
+    add_product_ids: list[int] = []
+    if unique_add:
+        result = await db.execute(
+            select(Product.id, Product.sicar_uuid).where(Product.sicar_uuid.in_(unique_add), Product.is_deleted == False)
+        )
+        found = {row.sicar_uuid: row.id for row in result.all()}
+        missing = [u for u in unique_add if u not in found]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Productos no encontrados: {', '.join(missing)}")
+        add_product_ids = [found[u] for u in unique_add]
+
+    added_count = 0
+    if add_product_ids:
+        insert_stmt = pg_insert(coupon_products).values(
+            [{"coupon_id": coupon.id, "product_id": pid} for pid in add_product_ids]
+        ).on_conflict_do_nothing(index_elements=["coupon_id", "product_id"]).returning(coupon_products.c.product_id)
+        insert_result = await db.execute(insert_stmt)
+        added_count = len(insert_result.all())
+
+    unique_remove = sorted(set(remove_uuids))
+    removed_count = 0
+    if unique_remove:
+        delete_stmt = delete(coupon_products).where(
+            coupon_products.c.coupon_id == coupon.id,
+            coupon_products.c.product_id.in_(select(Product.id).where(Product.sicar_uuid.in_(unique_remove))),
+        ).returning(coupon_products.c.product_id)
+        delete_result = await db.execute(delete_stmt)
+        removed_count = len(delete_result.all())
+
+    await db.commit()
+    logger.info(f"Cupón {coupon_uuid}: {added_count} producto(s) agregado(s), {removed_count} quitado(s) via PATCH /admin.")
+    return unique_add, unique_remove, added_count, removed_count
+
+
 async def replace_coupon_clients(db: AsyncSession, coupon_uuid: str, client_emails: list[str]) -> list[str]:
     """Vacio = cupon publico. Resuelto por email (no hay uuid de cliente a mano en la UI de admin) - mismo lowercase que client_service."""
     coupon = await get_coupon_by_uuid(db, coupon_uuid)
@@ -411,6 +493,46 @@ async def replace_coupon_clients(db: AsyncSession, coupon_uuid: str, client_emai
     await db.commit()
     logger.info(f"Cupón {coupon_uuid}: clientes asignados reemplazados via /admin ({len(client_ids)}).")
     return unique_emails
+
+
+async def patch_coupon_clients(db: AsyncSession, coupon_uuid: str, add_emails: list[str], remove_emails: list[str]) -> tuple[list[str], list[str], int, int]:
+    """Incremental (a diferencia de replace_coupon_clients) - mismo patron que
+    taxonomy_service.patch_category_products. Sin chequeo de scope_type - la elegibilidad
+    por cliente es independiente del alcance de descuento, mismo criterio que
+    list_coupon_clients."""
+    coupon = await get_coupon_by_uuid(db, coupon_uuid)
+
+    unique_add = sorted({e.strip().lower() for e in add_emails})
+    add_client_ids: list[int] = []
+    if unique_add:
+        result = await db.execute(select(ClientAccount.id, ClientAccount.email).where(ClientAccount.email.in_(unique_add)))
+        found = {row.email: row.id for row in result.all()}
+        missing = [e for e in unique_add if e not in found]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Clientes no encontrados: {', '.join(missing)}")
+        add_client_ids = [found[e] for e in unique_add]
+
+    added_count = 0
+    if add_client_ids:
+        insert_stmt = pg_insert(coupon_assigned_clients).values(
+            [{"coupon_id": coupon.id, "client_account_id": cid} for cid in add_client_ids]
+        ).on_conflict_do_nothing(index_elements=["coupon_id", "client_account_id"]).returning(coupon_assigned_clients.c.client_account_id)
+        insert_result = await db.execute(insert_stmt)
+        added_count = len(insert_result.all())
+
+    unique_remove = sorted({e.strip().lower() for e in remove_emails})
+    removed_count = 0
+    if unique_remove:
+        delete_stmt = delete(coupon_assigned_clients).where(
+            coupon_assigned_clients.c.coupon_id == coupon.id,
+            coupon_assigned_clients.c.client_account_id.in_(select(ClientAccount.id).where(ClientAccount.email.in_(unique_remove))),
+        ).returning(coupon_assigned_clients.c.client_account_id)
+        delete_result = await db.execute(delete_stmt)
+        removed_count = len(delete_result.all())
+
+    await db.commit()
+    logger.info(f"Cupón {coupon_uuid}: {added_count} cliente(s) agregado(s), {removed_count} quitado(s) via PATCH /admin.")
+    return unique_add, unique_remove, added_count, removed_count
 
 
 async def list_redemptions(db: AsyncSession, coupon_uuid: str, limit: int, offset: int) -> tuple[int, list]:
