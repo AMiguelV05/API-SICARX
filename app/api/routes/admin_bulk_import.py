@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from app.core.database import DbDep
@@ -31,7 +32,7 @@ async def admin_bulk_import_template():
     """Descarga un .xlsx de ejemplo con las hojas/columnas exactas que espera `POST
     /products` (comparten las mismas constantes, no pueden desalinearse) - encabezados en
     negritas, comentarios de celda y filas de ejemplo con datos ficticios."""
-    file_bytes = bulk_import_service.build_template_workbook()
+    file_bytes = await asyncio.to_thread(bulk_import_service.build_template_workbook)
     return Response(
         content=file_bytes,
         media_type=XLSX_MEDIA_TYPE,

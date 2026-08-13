@@ -8,6 +8,13 @@ class Order(Base):
     __table_args__ = (
         # Toda orden tiene alguna identidad (cuenta o invitado) - ver checkout de invitado.
         CheckConstraint("client_account_id IS NOT NULL OR guest_email IS NOT NULL", name="ck_orders_has_identity"),
+        # Respalda GET /admin/dashboard/summary|top-products|top-categories, que filtran
+        # exactamente esta combinacion - declarado aqui tambien para que autogenerate no lo
+        # marque para eliminar (mismo patron que ix_products_available_stock).
+        Index(
+            "ix_orders_paid_created_at", "created_at",
+            postgresql_where=text("status = 'PAID' AND deleted_at IS NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -38,7 +45,9 @@ class Order(Base):
 
     branch_id = Column(Integer, nullable=True)
     total = Column(Numeric(10, 2), nullable=False)
-    total_quantity = Column(Numeric(10, 2), nullable=False)
+    # Numeric(12,3), no (10,2): igual que Product.stock/reserved/sales_count, para no
+    # redondear silenciosamente la cantidad de una linea a granel (p. ej. 1.005 kg).
+    total_quantity = Column(Numeric(12, 3), nullable=False)
 
     # Placeholder sin usar hoy: no se calcula ni se suma a Mercado Pago ni a Sicar X.
     delivery_cost = Column(Numeric(10, 2), nullable=True)

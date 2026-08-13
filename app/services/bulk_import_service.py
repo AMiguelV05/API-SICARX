@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import unicodedata
@@ -100,6 +101,23 @@ def _read_sheet(wb, sheet_name: str, required_columns: tuple[str, ...]) -> tuple
         row_dict = {col: raw_row[idx] if idx < len(raw_row) else None for col, idx in header_map.items()}
         rows.append((excel_row_num, row_dict))
     return True, rows
+
+
+def _parse_workbook(file_bytes: bytes):
+    """Carga el .xlsx y lee las 4 hojas de una sola vez - openpyxl (zip+XML) es
+    sincrono/bloqueante, asi que import_bulk_assignments corre esto entero en un thread
+    (asyncio.to_thread) en vez de bloquear el event loop, mismo criterio que
+    google_auth_service.py ya usa para PyJWKClient.fetch_data()."""
+    wb = _load_workbook(file_bytes)
+    try:
+        return (
+            _read_sheet(wb, CATEGORIES_SHEET, CATEGORIES_REQUIRED_COLUMNS),
+            _read_sheet(wb, VEHICLES_SHEET, VEHICLES_REQUIRED_COLUMNS),
+            _read_sheet(wb, ATTRIBUTES_SHEET, ATTRIBUTES_REQUIRED_COLUMNS),
+            _read_sheet(wb, VARIANTS_SHEET, VARIANTS_REQUIRED_COLUMNS),
+        )
+    finally:
+        wb.close()
 
 
 def _clean_str(value) -> str:
@@ -443,14 +461,9 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
             detail=f"Archivo demasiado grande (limite {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB).",
         )
 
-    wb = _load_workbook(file_bytes)
-    try:
-        cat_found, cat_rows = _read_sheet(wb, CATEGORIES_SHEET, CATEGORIES_REQUIRED_COLUMNS)
-        veh_found, veh_rows = _read_sheet(wb, VEHICLES_SHEET, VEHICLES_REQUIRED_COLUMNS)
-        attr_found, attr_rows = _read_sheet(wb, ATTRIBUTES_SHEET, ATTRIBUTES_REQUIRED_COLUMNS)
-        var_found, var_rows = _read_sheet(wb, VARIANTS_SHEET, VARIANTS_REQUIRED_COLUMNS)
-    finally:
-        wb.close()
+    (cat_found, cat_rows), (veh_found, veh_rows), (attr_found, attr_rows), (var_found, var_rows) = (
+        await asyncio.to_thread(_parse_workbook, file_bytes)
+    )
 
     if not cat_found and not veh_found and not attr_found and not var_found:
         raise HTTPException(

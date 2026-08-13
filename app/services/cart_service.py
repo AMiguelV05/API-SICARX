@@ -68,7 +68,7 @@ async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartRespo
     enriched, subtotal, total_quantity, products_by_uuid = await _enrich(db, cart.items or [])
 
     coupon_valid = False
-    discount_amount = 0.0
+    discount_amount_decimal = Decimal("0")
     invalid_reason = None
     if cart.coupon_code:
         try:
@@ -76,13 +76,18 @@ async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartRespo
             await coupon_service.validate_coupon_eligibility(db, coupon, cart.client_account_id, _to_decimal(subtotal))
             quantities = {item["uuid"]: item["quantity"] for item in (cart.items or []) if item.get("uuid")}
             scoped_subtotal = await coupon_service.compute_scoped_subtotal(db, coupon, products_by_uuid, quantities)
-            discount_amount = float(coupon_service.compute_discount_amount(coupon, scoped_subtotal))
+            discount_amount_decimal = coupon_service.compute_discount_amount(coupon, scoped_subtotal)
             coupon_valid = True
         except HTTPException as e:
             invalid_reason = e.detail
 
     # cartToken siempre se deriva del carrito resuelto, nunca hace eco de lo que mando el cliente.
     cart_token = cart.uuid if cart.client_account_id is None else None
+    # Resta final en Decimal (no float) para no heredar error de representacion binaria en
+    # un campo de dinero - mismo criterio que order_service._format_amount.
+    total_decimal = max(_to_decimal(subtotal) - discount_amount_decimal, Decimal("0"))
+    total_decimal = total_decimal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    discount_amount = float(discount_amount_decimal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
     return CartResponse(
         items=enriched,
         subtotal=subtotal,
@@ -93,7 +98,7 @@ async def get_cart_response(db: AsyncSession, cart: Optional[Cart]) -> CartRespo
         couponValid=coupon_valid,
         couponInvalidReason=invalid_reason,
         discountAmount=discount_amount,
-        total=max(subtotal - discount_amount, 0.0),
+        total=float(total_decimal),
     )
 
 async def replace_cart(

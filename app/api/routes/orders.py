@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
-from fastapi import APIRouter, Depends, HTTPException, Body, Header, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Body, Header, Request, Response, status
 from sqlalchemy import select
 from app.core.database import DbDep
 from app.core.security import validate_api_key, OptionalClientHeaderDep
@@ -23,10 +23,11 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/orders", tags=["Orders Creation and Cancellation"], dependencies=[Depends(validate_api_key)])
 
-@router.post("", response_model=OrderResponse, summary="Crear pedido")
+@router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED, summary="Crear pedido")
 @limiter.limit("10/minute")
 async def create_order(
     request: Request,
+    response: Response,
     client: OptionalClientHeaderDep,
     db: DbDep,
     order_payload: OrderCreate = Body(),
@@ -109,6 +110,9 @@ async def create_order(
                 cached_order = result.scalar_one_or_none()
                 if cached_order is not None:
                     logger.info(f"POST /orders con Idempotency-Key repetida ({idempotency_key}) para {'cliente ' + str(client.id) if client else 'invitado ' + str(guest_email)} - devolviendo orden ya creada {cached_order.uuid}.")
+                    # 200, no el 201 por defecto de esta ruta: no se creo nada nuevo, se
+                    # devuelve la orden ya existente del intento anterior.
+                    response.status_code = status.HTTP_200_OK
                     return OrderResponse(
                         id=cached_order.sicar_order_id,
                         serieFolio=cached_order.serie_folio,
@@ -299,6 +303,7 @@ async def pay_order(
     order_id: str,
     client: OptionalClientHeaderDep,
     db: DbDep,
+    background_tasks: BackgroundTasks,
     submit: PaymentSubmit = Body(),
 ):
     """
@@ -313,15 +318,30 @@ async def pay_order(
     El monto cobrado SIEMPRE es el `total` ya guardado en la orden, nunca el del body.
     Segun el resultado, la orden pasa a `PAID`, sigue `TO_PAY` (OXXO/tarjeta pendiente)
     o pasa a `CANCELLED` (rechazado, libera el stock reservado).
+
+    Reintento seguro: si la orden ya esta `PAID` (p. ej. la respuesta del primer submit
+    se perdio en la red pero el cobro si se aplico), se devuelve el mismo resultado en
+    vez de un 409 - no hay riesgo de doble cobro porque `payment_service.create_payment`
+    ya usa `order.uuid` como `X-Idempotency-Key` de Mercado Pago. `CANCELLED` si sigue
+    siendo 409: no es un estado del que un reintento deba "recuperarse".
     """
     local_order = await get_order_for_action(db, client, order_id)
 
+    if local_order.status == "PAID":
+        return OrderPayResponse(
+            orderUuid=local_order.uuid,
+            status=local_order.status,
+            mpPaymentId=local_order.mp_payment_id,
+            mpStatus=local_order.mp_status,
+            mpStatusDetail=local_order.mp_status_detail,
+            ticketUrl=local_order.mp_ticket_url,
+        )
     if local_order.status != "TO_PAY":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya fue pagada o cancelada.")
 
     try:
         mp_payment = await payment_service.create_payment(local_order, submit.model_dump())
-        local_order = await finalize_order_payment(db, local_order, mp_payment)
+        local_order = await finalize_order_payment(db, local_order, mp_payment, background_tasks)
 
         logger.info(f"Pago procesado para la orden {local_order.uuid} ({'cliente ' + client.email if client else 'invitado ' + str(local_order.guest_email)}): mp_status={local_order.mp_status} -> status={local_order.status}.")
 
@@ -349,6 +369,7 @@ async def cancel_order(
     order_id: str,
     client: OptionalClientHeaderDep,
     db: DbDep,
+    background_tasks: BackgroundTasks,
     cancel_payload: OrderCancel = Body(),
 ):
     """
@@ -412,7 +433,7 @@ async def cancel_order(
         logger.info(f"Pedido {order_id} cancelado localmente por {'cliente ' + client.email if client else 'invitado ' + str(local_order.guest_email)}. Stock restaurado, sincronizacion con Sicar X encolada.")
 
         try:
-            await notify_order_cancelled(local_order)
+            await notify_order_cancelled(local_order, background_tasks)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {local_order.uuid}: {type(e).__name__}: {e!r}")
 
@@ -442,6 +463,7 @@ async def delete_order(
     order_id: str,
     client: OptionalClientHeaderDep,
     db: DbDep,
+    background_tasks: BackgroundTasks,
 ):
     """
     Descarta una orden reservada (`TO_PAY`) que nunca se pago. Ya NO borra la fila —
@@ -491,7 +513,7 @@ async def delete_order(
         logger.info(f"Orden {order_id} (reservada, nunca pagada) eliminada (soft-delete) por {'cliente ' + client.email if client else 'invitado ' + str(local_order.guest_email)}. Sincronizacion con Sicar X encolada.")
 
         try:
-            await notify_order_cancelled(local_order)
+            await notify_order_cancelled(local_order, background_tasks)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {local_order.uuid}: {type(e).__name__}: {e!r}")
 

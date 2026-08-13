@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, Body, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Body, HTTPException, Query, status
 from app.core.database import DbDep
 from app.core.security import validate_admin_key
 from app.schemas.admin import (
@@ -118,7 +118,7 @@ async def admin_accept_order(order_uuid: str, db: DbDep, data: OrderAcceptReques
 
 
 @router.post("/orders/{order_uuid}/cancel", response_model=AdminOrderCancelResponse, summary="Cancelar una orden como administrador")
-async def admin_cancel_order(order_uuid: str, db: DbDep, data: AdminOrderCancelRequest = Body()):
+async def admin_cancel_order(order_uuid: str, db: DbDep, background_tasks: BackgroundTasks, data: AdminOrderCancelRequest = Body()):
     """Cancela localmente cualquier orden (`status = "CANCELLED"`, stock/reserva
     restaurados), con un `reason` obligatorio que queda guardado en la orden y viaja en el
     webhook `order-cancelled` - visible para el cliente, a diferencia de una cancelación
@@ -127,7 +127,7 @@ async def admin_cancel_order(order_uuid: str, db: DbDep, data: AdminOrderCancelR
     `DISPATCHED` (COMPLETE sigue siendo cancelable - también es terminal para pedidos
     PICKUP). Si la orden ya había sido aceptada, se le avisa a Sicar X de forma asíncrona
     vía `sicar_sync_outbox`; si nunca fue aceptada, no hay nada que sincronizar."""
-    order, was_accepted = await admin_service.cancel_order_admin(db, order_uuid, data.reason)
+    order, was_accepted = await admin_service.cancel_order_admin(db, order_uuid, data.reason, background_tasks)
     return AdminOrderCancelResponse(
         order_uuid=order.uuid,
         cancelled_at=datetime.now(timezone.utc),

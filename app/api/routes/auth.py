@@ -43,7 +43,7 @@ async def _build_auth_response(
     cart_response = await get_cart_response(db, cart)
     return ClientAuthResponse(token=token, client=client, cart=cart_response)
 
-@router.post("/auth/register", response_model=ClientAuthResponse, summary="Registrar una nueva cuenta de cliente")
+@router.post("/auth/register", response_model=ClientAuthResponse, status_code=status.HTTP_201_CREATED, summary="Registrar una nueva cuenta de cliente")
 @limiter.limit("5/minute")
 async def register(request: Request, response: Response, db: DbDep, data: ClientRegister = Body()):
     """

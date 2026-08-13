@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, BackgroundTasks, Request, status
 
 from app.core.database import DbDep
 from app.core.rate_limit import limiter
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/payments", tags=["Payments (Mercado Pago)"])
 
 @router.post("/webhook", summary="Notificaciones de Mercado Pago", status_code=status.HTTP_200_OK)
 @limiter.limit("60/minute")
-async def mercado_pago_webhook(request: Request, db: DbDep):
+async def mercado_pago_webhook(request: Request, db: DbDep, background_tasks: BackgroundTasks):
     """
     Unico camino para confirmar pagos con Mercado Pago Wallet (redirige al comprador y
     nunca llama a `POST /orders/{id}/pay`); tambien respalda cambios asincronos de
@@ -54,7 +54,7 @@ async def mercado_pago_webhook(request: Request, db: DbDep):
         logger.info(f"Notificacion de Mercado Pago para la orden {order_uuid} ignorada: ya esta en estado terminal ({order.status}).")
         return {"status": "already final"}
 
-    await finalize_order_payment(db, order, mp_payment)
+    await finalize_order_payment(db, order, mp_payment, background_tasks)
     logger.info(f"Orden {order_uuid} finalizada via webhook de Mercado Pago (payment {payment_id}).")
 
     return {"status": "ok"}

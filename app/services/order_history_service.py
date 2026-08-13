@@ -2,7 +2,7 @@ import logging
 import uuid
 from decimal import Decimal
 from datetime import datetime, timezone
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
@@ -222,7 +222,7 @@ async def prepare_local_cancellation(
 
     return order
 
-async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dict) -> Order:
+async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dict, background_tasks: BackgroundTasks) -> Order:
     """Aplica el resultado de un pago de Mercado Pago a la orden local - punto unico
     compartido por `/orders/{id}/pay` (submit sincrono) y el webhook (unico camino para
     Wallet); no duplicar esta logica. `mp_payment` es la respuesta re-consultada de
@@ -293,12 +293,12 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
 
     if became_paid:
         try:
-            await notify_order_confirmed(order)
+            await notify_order_confirmed(order, background_tasks)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_order_confirmed) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
     if became_cancelled:
         try:
-            await notify_order_cancelled(order)
+            await notify_order_cancelled(order, background_tasks)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 

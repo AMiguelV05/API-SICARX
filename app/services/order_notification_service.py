@@ -3,6 +3,7 @@ import logging
 import time
 
 import httpx
+from fastapi import BackgroundTasks
 
 from app.core.config import settings
 from app.models.order import Order
@@ -15,8 +16,27 @@ WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
 logger = logging.getLogger(__name__)
 
-async def notify_order_confirmed(order: Order) -> None:
-    """Avisa al frontend que la orden paso a PAID (el frontend envia el correo de confirmacion con su propio Resend). No fatal ni con reintento - no debe bloquear un pago ya aplicado."""
+async def _send_webhook(url: str, raw_body: bytes, headers: dict, log_context: str) -> None:
+    """Nucleo HTTP puro (sin BD) - corre via BackgroundTasks despues de que la respuesta ya
+    se envio al llamador, para que un receptor lento del frontend no le agregue latencia a
+    esta request (relevante sobre todo para POST /payments/webhook, que Mercado Pago
+    reintenta agresivamente si tarda)."""
+    try:
+        async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
+            response = await client.post(url, content=raw_body, headers=headers)
+        if response.status_code not in (200, 201, 202):
+            logger.error(f"{log_context}: rechazado por el frontend: {response.status_code} - {response.text}")
+            return
+        logger.info(f"{log_context}: enviado al frontend.")
+    except Exception as e:
+        logger.error(f"{log_context}: error inesperado enviando el webhook: {type(e).__name__}: {e!r}")
+
+async def notify_order_confirmed(order: Order, background_tasks: BackgroundTasks) -> None:
+    """Avisa al frontend que la orden paso a PAID (el frontend envia el correo de
+    confirmacion con su propio Resend). No fatal ni con reintento - no debe bloquear un
+    pago ya aplicado. Solo la llamada HTTP en si se difiere a `background_tasks` - la
+    preparacion del body (que necesita `order.awaitable_attrs.client_account`) sigue
+    siendo sincrona porque necesita la sesion de BD todavia abierta."""
     try:
         client_account = await order.awaitable_attrs.client_account
         contact_email = ((order.delivery_info or {}).get("contactInfo") or {}).get("email")
@@ -34,19 +54,14 @@ async def notify_order_confirmed(order: Order) -> None:
         signature = sign_hmac_sha256(settings.FRONTEND_WEBHOOK_SECRET, f"{ts}.".encode() + raw_body)
 
         url = f"{settings.FRONTEND_BASE_URL.rstrip('/')}{ORDER_CONFIRMED_WEBHOOK_PATH}"
-        async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
-            response = await client.post(
-                url,
-                content=raw_body,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Webhook-Timestamp": ts,
-                    "X-Webhook-Signature": signature,
-                },
-            )
-        if response.status_code not in (200, 201, 202):
-            logger.error(f"Frontend rechazo la notificacion de pedido confirmado para la orden {order.uuid}: {response.status_code} - {response.text}")
-            return
-        logger.info(f"Notificacion de pedido confirmado enviada al frontend para la orden {order.uuid}.")
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": ts,
+            "X-Webhook-Signature": signature,
+        }
+        background_tasks.add_task(
+            _send_webhook, url, raw_body, headers,
+            f"Notificacion de pedido confirmado para la orden {order.uuid}",
+        )
     except Exception as e:
-        logger.error(f"Error inesperado notificando al frontend sobre la orden {order.uuid}: {type(e).__name__}: {e!r}")
+        logger.error(f"Error inesperado preparando la notificacion de la orden {order.uuid}: {type(e).__name__}: {e!r}")

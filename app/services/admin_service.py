@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from fastapi import HTTPException, status
+from fastapi import BackgroundTasks, HTTPException, status
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -201,7 +201,7 @@ async def accept_order(db: AsyncSession, order_uuid: str, accepted_by: str | Non
     return order
 
 
-async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str) -> tuple[Order, bool]:
+async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str, background_tasks: BackgroundTasks) -> tuple[Order, bool]:
     """Cancela una orden como admin - mismo mecanismo local-first que
     `routes/orders.py::cancel_order` (reembolso/cancelación de Mercado Pago si aplica,
     luego `prepare_local_cancellation`), pero sin ownership de cliente (admin puede
@@ -252,7 +252,7 @@ async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str) -> 
     logger.info(f"Orden {order.uuid} cancelada por admin (motivo: {reason!r}). Stock restaurado, sincronizacion con Sicar X encolada." if was_accepted else f"Orden {order.uuid} cancelada por admin (motivo: {reason!r}). Nunca fue aceptada, Sicar X no fue notificado.")
 
     try:
-        await notify_order_cancelled(order)
+        await notify_order_cancelled(order, background_tasks)
     except Exception as e:
         logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import get_client_ip
 from app.models.client import ClientAccount
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ async def validate_admin_key(request: Request, x_admin_key: str = Header(None, a
     - mientras no se configure, rechaza toda peticion sin importar la cabecera. Tambien
     throttlea por IP (ver `_admin_key_rate_limited`), a diferencia de x-api-key.
     """
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request)
     if _admin_key_rate_limited(client_ip):
         logger.error("Acceso denegado a ruta admin: demasiados intentos desde %s.", client_ip)
         raise HTTPException(
