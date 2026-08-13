@@ -939,10 +939,13 @@ GET /v1/admin/categories/export
 X-Admin-Key: <admin-key>
 ```
 
-Opcionalmente `?categoryUuid=<uuid>` para acotar el export a ese nodo y sus
-descendientes (mismo criterio que `taxonomyUuid` en `/catalog`/`/search`); omitido
-exporta el árbol completo. Un botón "Exportar CSV" en el dashboard puede apuntar
-directo aquí.
+Opcionalmente `?taxonomyUuid=<uuid>` (antes `categoryUuid` — renombrado 2026-08-13 para no
+chocar con el `categoryUuid` de `/products`/`/search`, que filtra por un campo
+completamente distinto, `Product.category_uuid` sincronizado de Sicar X; este endpoint es
+admin-only y no forma parte del contrato con el frontend, así que el parámetro se pudo
+renombrar directo sin capa de compatibilidad) para acotar el export a ese nodo y sus
+descendientes (mismo criterio que `taxonomyUuid` en `/catalog`/`/search`); omitido exporta
+el árbol completo. Un botón "Exportar CSV" en el dashboard puede apuntar directo aquí.
 
 Respuesta `200`: el CSV en sí (`Content-Type: text/csv`, no JSON), codificado
 `utf-8-sig` (con BOM) para que los acentos se vean bien al abrirlo directo en Excel, con
@@ -959,14 +962,14 @@ category_uuid,category_path,category_slug,product_sku,product_name,product_price
 - `category_path` es la cadena completa de ancestros (`Padre > Hijo`), no solo el nombre
   del nodo — necesario porque dos categorías pueden compartir nombre bajo padres
   distintos. Se resuelve para **todas** las categorías, no solo las exportadas, así un
-  export acotado con `categoryUuid` igual muestra los nombres reales de los ancestros
+  export acotado con `taxonomyUuid` igual muestra los nombres reales de los ancestros
   aunque esos ancestros mismos queden fuera del subárbol exportado.
 - Una categoría sin productos asignados (o cuyos productos asignados están todos
   eliminados) igual aparece, con las cuatro columnas `product_*` en blanco — no se omite
   del CSV.
 - `product_stock` es `availableStock` (vendible ahora mismo, no el físico crudo) — mismo
   criterio que `ProductBasic.stock` en el storefront.
-- `404` si `categoryUuid` no corresponde a una categoría real.
+- `404` si `taxonomyUuid` no corresponde a una categoría real.
 
 ### Cupones (descuentos)
 

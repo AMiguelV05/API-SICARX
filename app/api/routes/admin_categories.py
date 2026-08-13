@@ -41,12 +41,14 @@ async def admin_list_product_categories(product_uuid: str, db: DbDep):
 @router.get("/export", summary="Descargar un CSV con todas las categorias y sus productos asignados")
 async def admin_export_categories(
     db: DbDep,
-    category_uuid: Optional[str] = Query(default=None, alias="categoryUuid", description="Acota el export a este nodo y sus descendientes; omitido exporta el arbol completo"),
+    category_uuid: Optional[str] = Query(default=None, alias="taxonomyUuid", description="Acota el export a este nodo (arbol PIM de categorias) y sus descendientes; omitido exporta el arbol completo. Nombrado `taxonomyUuid` (no `categoryUuid`) para no chocar con Product.category_uuid, el campo crudo sincronizado de Sicar X que /products y /search filtran bajo ese otro nombre - ver CLAUDE.md."),
 ):
     """Un CSV con una fila por par (categoria, producto) - via outer joins, una categoria
     sin productos (o con productos ya eliminados) igual aparece con las columnas de
-    producto en blanco. `categoryUuid` opcional acota el export a ese subarbol; `404` si
-    no resuelve a una categoria real."""
+    producto en blanco. `taxonomyUuid` opcional acota el export a ese subarbol; `404` si
+    no resuelve a una categoria real. Este endpoint es admin-only (no forma parte del
+    contrato con el frontend), asi que este parametro se pudo renombrar directo sin capa
+    de compatibilidad - a diferencia de los campos de OrderPublic/OrderResponse."""
     file_bytes = await taxonomy_service.export_categories_csv(db, category_uuid)
     return Response(
         content=file_bytes,

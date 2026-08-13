@@ -256,21 +256,35 @@ async def create_order(
         if coupon is not None:
             await coupon_service.create_redemption(db, coupon, client.id, local_order.id)
 
-        # No fatal: la orden sigue soportando tarjeta/OXXO sin la opcion de wallet si
-        # Mercado Pago no responde aqui - ver payment_service.create_preference.
-        preference = await payment_service.create_preference(local_order)
-        if preference:
-            local_order.mp_preference_id = preference.get("id")
-
         if claim is not None:
             claim.order_uuid = local_order.uuid
             claim_pending = False
 
-        # Único commit: stock, Order y el reclamo de idempotencia se persisten o revierten juntos.
+        # Único commit: stock, Order y el reclamo de idempotencia se persisten o revierten
+        # juntos. La preferencia de Mercado Pago se crea DESPUES de este commit a proposito
+        # - ver el comentario de abajo.
         await db.commit()
         await db.refresh(local_order)
 
         logger.info(f"Orden {local_order.uuid} reservada (TO_PAY) en la sucursal {branch_id} para {'cliente ' + client.email if client else 'invitado ' + str(guest_email)}.")
+
+        # Se crea DESPUES del commit de arriba, con los locks FOR UPDATE de Product/Coupon
+        # ya liberados: antes, la llamada HTTP a Mercado Pago (hasta MP_TIMEOUT) se hacia
+        # con esas filas todavia bloqueadas y una conexion del pool retenida - varios
+        # checkouts concurrentes sobre un SKU con poco stock (o un cupon con tope de usos)
+        # podian entonces agotar el pool (pool_size=5 + max_overflow=5 por proceso) mientras
+        # esperaban a Mercado Pago. No fatal: si falla o tarda, la orden ya quedo creada y
+        # sigue soportando tarjeta/OXXO sin la opcion de wallet - ver payment_service.create_preference.
+        preference_id = None
+        try:
+            preference = await payment_service.create_preference(local_order)
+            if preference:
+                preference_id = preference.get("id")
+                local_order.mp_preference_id = preference_id
+                await db.commit()
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Error inesperado creando la preferencia de Mercado Pago para la orden {local_order.uuid} (la orden ya se creo correctamente, se continua sin preferenceId): {type(e).__name__}: {e!r}")
 
         return OrderResponse(
             id=local_order.sicar_order_id,
@@ -278,7 +292,7 @@ async def create_order(
             date=None,
             status="TO_PAY",
             orderUuid=local_order.uuid,
-            preferenceId=local_order.mp_preference_id,
+            preferenceId=preference_id,
             amount=total_amount,
             discountAmount=float(discount_amount),
         )

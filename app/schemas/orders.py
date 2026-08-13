@@ -107,17 +107,19 @@ class OrderCancel(CamelModel):
     products: List[ProductItem] = Field(default_factory=list, description="Aceptado por compatibilidad, pero ignorado - el stock se restaura desde la orden guardada localmente, no desde este campo.")
 
 class OrderResponse(CamelModel):
-    id: str = Field(description="ID publico de la orden - generado localmente, ya no proviene de Sicar X (ver CLAUDE.md, \"SICAR es solo ERP de inventario\"). Usar con POST /orders/{id}/pay y /cancel.")
+    id: str = Field(description="ID publico canonico de la orden - generado localmente, ya no proviene de Sicar X. Usar con POST /orders/{id}/pay y /cancel. Mismo valor que `sicarOrderId` en OrderPublic.")
     serieFolio: Optional[str] = Field(default=None, description="Ya no aplica - Sicar X no crea ningun documento al hacer checkout. Siempre null.")
     date: Optional[float] = Field(default=None, description="Ya no aplica - Sicar X no crea ningun documento al hacer checkout. Siempre null.")
     status: str = Field(description="Estado local de la orden justo despues de crearla (siempre TO_PAY)")
     orderUuid: str = Field(description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid} y con POST /orders/{id}/pay")
     preferenceId: Optional[str] = Field(default=None, description="ID de preferencia de Mercado Pago para initialization.preferenceId del Payment Brick (null si Mercado Pago no respondio)")
-    amount: float = Field(description="Total autoritativo de la orden (YA con el descuento del cupón aplicado, si hubo uno) - usar en initialization.amount del Payment Brick")
-    discountAmount: float = Field(default=0.0, description="Monto descontado por el cupón aplicado, ya restado de `amount`. 0 si no se usó cupón.")
+    amount: float = Field(description="[DEPRECATED, usar `total`] Alias historico de `total` - mismo valor, se conserva por compatibilidad. Nuevas integraciones deben leer `total`.")
+    total: float = Field(validation_alias="amount", serialization_alias="total", description="[Recomendado] Total autoritativo de la orden (YA con el descuento del cupón aplicado, si hubo uno) - mismo valor que `amount` y que OrderPublic.total. Usar en initialization.amount del Payment Brick.")
+    discountAmount: float = Field(default=0.0, description="Monto descontado por el cupón aplicado, ya restado de `total`/`amount`. 0 si no se usó cupón.")
 
 class OrderCancelResponse(CamelModel):
-    documentUuid: str = Field(description="ID de la orden (sicar_order_id) cancelada")
+    documentUuid: str = Field(description="[DEPRECATED, usar `orderId`] Alias historico - el nombre viene de cuando esto era un UUID de documento real de Sicar X; hoy simplemente hace eco del `order_id` (id o orderUuid) que recibió esta llamada. Se conserva por compatibilidad.")
+    orderId: str = Field(validation_alias="documentUuid", serialization_alias="orderId", description="[Recomendado] Mismo valor que `documentUuid` (el `id`/`orderUuid` de la orden cancelada) bajo un nombre no ambiguo.")
     sicarTimestamp: float = Field(description="Momento (epoch ms) en que la cancelación se aceptó localmente. Ya no es una confirmación de Sicar X: la sincronización con Sicar X ahora es asíncrona (ver sicar_sync_outbox) y ocurre después de esta respuesta.")
     message: str = Field(description="Mensaje de confirmación de cancelación")
     status: str = Field(description="Estado de la orden después de la cancelación")
@@ -148,7 +150,8 @@ class OrderPayResponse(CamelModel):
 
 class OrderPublic(CamelModel):
     uuid: str
-    sicar_order_id: str
+    sicar_order_id: str = Field(description="[DEPRECATED, usar `id`] Alias historico - el nombre viene de cuando este id provenia de Sicar X (ya no es el caso, ver CLAUDE.md). Se conserva por compatibilidad.")
+    id: str = Field(validation_alias="sicar_order_id", serialization_alias="id", description="[Recomendado] Mismo valor que `sicarOrderId`, bajo el mismo nombre que OrderResponse.id - usar con POST /orders/{id}/pay y /cancel.")
     serie_folio: Optional[str]
     status: str
     dispatch_status: Optional[str] = Field(default=None, description="Estado de cumplimiento en Sicar X: PENDING_ACCEPTANCE, PENDING, PREPARING, COMPLETE o DISPATCHED")

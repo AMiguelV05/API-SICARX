@@ -157,9 +157,11 @@ Content-Type: application/json
 el visitante ya tenía un carrito anónimo armado antes de registrarse (ver la cookie del carrito más
 arriba), mándalo aquí y se fusiona a la cuenta nueva en la misma llamada, sin un segundo request a
 `POST /v1/cart/merge`. Un `cartToken` ausente, vencido o que ya no corresponde a ningún carrito
-**no** hace fallar el registro — simplemente se ignora. Responde `200` con el mismo shape
-que `/v1/auth/login` — el registro inicia sesión automáticamente, no hace falta llamar a
-`/v1/auth/login` después:
+**no** hace fallar el registro — simplemente se ignora. Responde `201` (creó una cuenta
+nueva — antes de 2026-08-13 este endpoint respondía `200`; si tu cliente HTTP solo aceptaba
+`200` como éxito, actualízalo para aceptar `2xx`) con el mismo shape que `/v1/auth/login`
+(que sigue respondiendo `200`, no crea nada) — el registro inicia sesión automáticamente,
+no hace falta llamar a `/v1/auth/login` después:
 
 ```json
 {
@@ -511,6 +513,7 @@ Respuesta `200`:
     {
       "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
       "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+      "id": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
       "serieFolio": null,
       "status": "PAID",
       "dispatchStatus": "PENDING_ACCEPTANCE",
@@ -529,6 +532,12 @@ Respuesta `200`:
   ]
 }
 ```
+
+**Nuevo (2026-08-13) — `id` es el nombre recomendado, `sicarOrderId` queda como alias
+histórico**: mismo valor, mismo campo que `id` en la respuesta de `POST /v1/orders` — se
+agregó aquí para que ambas respuestas usen el mismo nombre para el identificador de la
+orden. `sicarOrderId` se sigue mandando y se seguirá mandando, no hay fecha de retiro
+planeada; el nombre es histórico (de cuando este id sí venía de Sicar X, ya no es el caso).
 
 Cada elemento de `items` lleva `imageUrl` (la `image_url` del producto en el catálogo local al
 momento de crear la orden, `null` si el producto no la tenía) — pensado para que el frontend pueda
@@ -1269,7 +1278,8 @@ ofrecerla como opción de entrega. El monto a cobrar (`amount`, y lo que despué
 `POST /v1/orders/{id}/pay`) **no incluye ningún costo de envío** todavía, para ningún tipo de
 entrega — sigue siendo solo el total de productos.
 
-Respuesta `200`:
+Respuesta `201` (creación real; ver la nota de idempotencia más abajo para cuándo viene
+`200` en vez de `201`):
 ```json
 {
   "id": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
@@ -1279,13 +1289,21 @@ Respuesta `200`:
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "preferenceId": "123456789-abcdef01-2345-6789-abcd-ef0123456789",
   "amount": 129.99,
+  "total": 129.99,
   "discountAmount": 0.0
 }
 ```
 
 `discountAmount` es el monto descontado por el cupón aplicado (`0.0` si no se usó ninguno) —
-`amount` **ya viene con el descuento restado**, es el monto real a cobrar/mostrar en el
-Payment Brick tal cual, no hace falta restar `discountAmount` del lado del frontend.
+`amount`/`total` **ya vienen con el descuento restado**, es el monto real a cobrar/mostrar en
+el Payment Brick tal cual, no hace falta restar `discountAmount` del lado del frontend.
+
+**Nuevo (2026-08-13) — `total` es el nombre recomendado, `amount` queda como alias
+histórico**: ambos son exactamente el mismo valor (`total` simplemente se agregó al lado de
+`amount`, nada se quitó). Es el mismo cambio que `GET /v1/auth/me/orders/{orderUuid}` ya
+tiene abajo (`OrderPublic.total`) — usa `total` en integraciones nuevas para que el mismo
+campo se llame igual en ambas respuestas; `amount` se sigue mandando y se seguirá mandando,
+no hay fecha de retiro planeada.
 
 **Importante (2026-07-31) — `id`/`serieFolio`/`date` cambiaron de significado**, aunque
 siguen presentes con los mismos nombres:
@@ -1305,8 +1323,14 @@ viene `"TO_PAY"`) y prepara el cobro con Mercado Pago. **Guarda `id`** — se us
 usado en `GET /v1/auth/me/orders/{orderUuid}`. `preferenceId` puede venir `null` si Mercado
 Pago no respondió al crear la preferencia (no es fatal — el pedido igual se creó y sigue
 soportando tarjeta/OXXO, solo no tendrá la opción de pagar con cuenta/Wallet de Mercado Pago).
-`amount` es el total autoritativo calculado por el backend — úsalo en `initialization.amount`
-del Payment Brick, no un total calculado en el frontend.
+`amount`/`total` es el total autoritativo calculado por el backend — úsalo en
+`initialization.amount` del Payment Brick, no un total calculado en el frontend.
+
+**Retry con `Idempotency-Key`**: si reenvías la misma request con el mismo header
+`Idempotency-Key` (p. ej. un reintento de red del mismo submit), la respuesta trae el mismo
+pedido ya creado la primera vez — pero con status `200`, no `201`, ya que no se creó nada
+nuevo. No trates un `200` aquí como un error; el body tiene exactamente el mismo shape que
+el `201` original.
 
 Errores esperables:
 - `401` — se mandó `X-Client-Token` pero es inválido/expiró (llama de nuevo a
@@ -1569,6 +1593,7 @@ token de auth — aquí no hay token, así que van explícitos en el body:
 {
   "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "id": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
   "serieFolio": null,
   "status": "PAID",
   "dispatchStatus": "PENDING_ACCEPTANCE",
@@ -1603,8 +1628,14 @@ el checkout.
 **Sin reintentos de este lado** — a diferencia del webhook de Mercado Pago hacia este
 backend (que sí reintenta agresivamente), este backend **no** reintenta si tu endpoint
 falla o tarda. Responde `200` rápido y trata cualquier falla de tu lado como definitiva
-(no hay una segunda oportunidad automática todavía). Si necesitas reintentos, impleméntalos
-tú mismo del lado del frontend antes de disparar el correo, o avisa al equipo de backend
+(no hay una segunda oportunidad automática todavía). **Nuevo (2026-08-13)**: este backend
+ahora dispara la llamada HTTP hacia tu endpoint en segundo plano (después de ya haberle
+respondido al comprador/a Mercado Pago) en vez de esperarla en línea — así que un receptor
+lento de tu lado ya no le agrega latencia al checkout ni a la respuesta que este backend le
+da a Mercado Pago. Esto no cambia el contrato para ti: sigue sin reintentos, sigue siendo
+fire-and-forget desde nuestro lado, solo deja de ser una dependencia síncrona en la ruta
+crítica. Si necesitas reintentos, impleméntalos tú mismo del lado del frontend antes de
+disparar el correo, o avisa al equipo de backend
 para evaluar una cola de reintentos ahí.
 
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/order-cancelled`
@@ -1637,7 +1668,10 @@ cliente esto no importa: la cancelación ya es definitiva de su lado en cuanto r
 esta notificación.
 
 **Sin reintentos de este lado** — mismo comportamiento que `order-confirmed`: responde
-`200` rápido, no hay reintento automático si tu endpoint falla o tarda.
+`200` rápido, no hay reintento automático si tu endpoint falla o tarda. **(2026-08-13)**
+también comparte el mismo cambio que `order-confirmed`: la llamada HTTP hacia tu endpoint
+ahora se dispara en segundo plano, así que un receptor lento de tu lado ya no le agrega
+latencia a `POST /v1/orders/{order_id}/cancel` ni a `DELETE /v1/orders/{order_id}`.
 
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/order-status-changed`
 
@@ -1847,8 +1881,16 @@ Errores esperables:
 - `401` — se mandó `X-Client-Token` pero es inválido/expiró
 - `404` — el pedido no existe, no pertenece a la cuenta autenticada, o (invitado) ya fue
   vinculado a una cuenta
-- `409` — el pedido ya fue pagado o cancelado antes (no se puede volver a cobrar)
+- `409` — el pedido ya fue **cancelado** antes (no se puede cobrar un pedido cancelado)
 - `502` — Mercado Pago rechazó la solicitud de cobro (reintenta más tarde)
+
+**Nuevo (2026-08-13) — reintento seguro si el pedido ya quedó `PAID`**: si vuelves a llamar
+a este endpoint para un pedido que ya está `PAID` (p. ej. la respuesta del primer submit se
+perdió por un problema de red, pero el cobro sí se aplicó), la respuesta es exactamente el
+mismo `200` de arriba con el resultado ya conocido — **ya no es `409`**. No hay riesgo de
+doble cobro: Mercado Pago ya deduplica internamente por `orderUuid`. Solo un pedido ya
+`CANCELLED` sigue devolviendo `409` (ese sí es un estado del que un reintento no debe
+"recuperarse" silenciosamente).
 
 ### `POST /v1/orders/{order_id}/cancel` — cancelar pedido
 
@@ -1894,11 +1936,18 @@ Respuesta `200`:
 ```json
 {
   "documentUuid": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "orderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
   "sicarTimestamp": 1783961225017.0,
   "message": "Pedido cancelado exitosamente.",
   "status": "CANCELLED"
 }
 ```
+
+**Nuevo (2026-08-13) — `orderId` es el nombre recomendado, `documentUuid` queda como alias
+histórico**: mismo valor exacto (el `{order_id}` que se mandó en la URL) — el nombre
+`documentUuid` viene de cuando esto sí era el UUID de un documento real de Sicar X, ya no es
+el caso desde el rediseño "SICAR es solo ERP de inventario". `documentUuid` se sigue mandando
+y se seguirá mandando, no hay fecha de retiro planeada.
 
 **Importante — esta respuesta ya no espera a Sicar X.** El pedido queda `CANCELLED` y el
 stock restaurado de inmediato en cuanto responde esta llamada (así un Sicar X caído nunca
@@ -2152,3 +2201,24 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
   eliminarse: la identidad anónima ahora es 100% automática vía cookie (ver el punto 3 de "Dos
   capas de autenticación"). Solo sigue haciendo falta guardar `cartToken` **en memoria** (no
   persistente) para pasarlo como `cartToken` en `/v1/auth/login`/`/v1/auth/register`.
+- **Nuevo (2026-08-13) — nombres de campo consolidados, nada roto, nada retirado.** Varias
+  respuestas tenían el mismo dato bajo dos nombres distintos según el endpoint; ahora ambos
+  nombres viajan **siempre** en ambos lados, así que no hay nada que migrar con urgencia, solo
+  una recomendación de a cuál conviene apuntar el código nuevo:
+  - `POST /v1/orders` y el webhook `order-confirmed`: usa `id`, no `sicarOrderId`, en
+    `GET /v1/auth/me/orders*` — ahora ambas respuestas traen `id`.
+  - Usa `total`, no `amount`, en `POST /v1/orders` — ahora esa respuesta trae ambos
+    (`OrderPublic.total` ya se llamaba así).
+  - Usa `orderId`, no `documentUuid`, en `POST /v1/orders/{order_id}/cancel` — ahora esa
+    respuesta trae ambos.
+  - `POST /v1/orders` y `POST /v1/auth/register` ahora responden `201` (antes `200`) al crear
+    de verdad — si tu cliente HTTP solo trataba `200` como éxito, acéptalo como `2xx`. La
+    única excepción es un reintento con el mismo `Idempotency-Key` en `POST /v1/orders`, que
+    sigue respondiendo `200` porque no crea nada nuevo (ver esa sección arriba).
+  - `POST /v1/orders/{order_id}/pay` ya no responde `409` para un pedido que ya quedó `PAID`
+    — un reintento ahora recibe el mismo `200` de la primera vez (ver esa sección arriba).
+    Sigue siendo `409` para un pedido `CANCELLED`.
+  - Las notificaciones salientes (`order-confirmed`/`order-cancelled`) ahora se disparan en
+    segundo plano de este lado — no cambia nada del contrato que implementas, solo deja de
+    ser una dependencia síncrona en la ruta crítica de checkout (ver la nota junto al webhook
+    `order-confirmed` arriba).
