@@ -59,6 +59,12 @@ class Order(Base):
     # Foto fija (ClientAddressPublic) de la direccion al crear la orden, solo DELIVERYMAN - evita usar una direccion editada despues.
     delivery_address_snapshot = Column(JSON, nullable=True)
 
+    # Aceptacion de Terminos y Condiciones en un checkout de invitado (sin cuenta, ver
+    # guest_email) - la unica identidad de un invitado es la orden misma, asi que se guarda
+    # aqui en vez de en ClientAccount. Opcional: NULL si el frontend no lo mando.
+    terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    terms_accepted_version = Column(String, nullable=True)
+
     # Guia de envio via envia.com; None hasta generarse, sin regeneracion (409 si ya existe).
     shipping_label = Column(JSON, nullable=True)
 

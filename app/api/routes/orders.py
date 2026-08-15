@@ -248,6 +248,8 @@ async def create_order(
             coupon_id=coupon.id if coupon else None,
             coupon_code=coupon.code if coupon else None,
             guest_email=guest_email,
+            terms_accepted_at=order_payload.termsAcceptedAt,
+            terms_accepted_version=order_payload.termsAcceptedVersion,
         )
 
         # Debe ir DESPUES de create_local_order (necesita local_order.id) y DENTRO de la

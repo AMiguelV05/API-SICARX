@@ -23,7 +23,7 @@ MP_FAILED_STATUSES = {"rejected", "cancelled"}
 async def create_local_order(
     db: AsyncSession, client_account_id: int | None, order_payload_dict: dict, local_products: dict | None = None,
     delivery_address_snapshot: dict | None = None, coupon_id: int | None = None, coupon_code: str | None = None,
-    guest_email: str | None = None,
+    guest_email: str | None = None, terms_accepted_at: datetime | None = None, terms_accepted_version: str | None = None,
 ) -> Order:
     """Persiste la orden localmente (status siempre "TO_PAY" en este punto; ver
     finalize_order_payment). `sicar_order_id` se genera aqui con `uuid.uuid4()` - ya no
@@ -66,6 +66,8 @@ async def create_local_order(
         coupon_code=coupon_code,
         subtotal=Decimal(str(eco_order.get("subtotal"))) if eco_order.get("subtotal") is not None else None,
         discount_amount=Decimal(str(eco_order.get("discountAmount"))) if eco_order.get("discountAmount") is not None else None,
+        terms_accepted_at=terms_accepted_at,
+        terms_accepted_version=terms_accepted_version,
     )
     db.add(order)
     await db.flush()

@@ -34,6 +34,9 @@ async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccou
         email=email,
         phone=data.phone,
         hashed_password=await hash_password(data.password),
+        # terms_accepted ya viene garantizado True por ClientRegister.validate_terms_accepted.
+        terms_accepted_at=datetime.now(timezone.utc),
+        terms_accepted_version=data.terms_version,
     )
     db.add(client)
     try:
@@ -91,6 +94,22 @@ async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpd
     await client.awaitable_attrs.addresses  # necesario para serializar ClientPublic.addresses
 
     logger.info(f"Cuenta de cliente actualizada: {client.email}")
+    return client
+
+async def accept_terms(db: AsyncSession, client: ClientAccount, terms_version: str) -> ClientAccount:
+    """Registra/actualiza la aceptación de Términos y Condiciones de una cuenta ya
+    autenticada - para cuentas creadas antes de este campo, o vía Google (que no pasa por
+    ClientRegister). A diferencia de verify_client_email, no hay ningún efecto secundario
+    (como link_guest_orders_by_email) que proteger de re-ejecutarse, así que no hace falta
+    un guard de "ya aceptado" - sobreescribir es trivialmente idempotente."""
+    client.terms_accepted_at = datetime.now(timezone.utc)
+    client.terms_accepted_version = terms_version
+
+    await db.commit()
+    await db.refresh(client)
+    await client.awaitable_attrs.addresses  # necesario para serializar ClientPublic.addresses
+
+    logger.info(f"Términos y Condiciones aceptados (versión {terms_version}): {client.email}")
     return client
 
 async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity) -> ClientAccount:

@@ -29,6 +29,11 @@ class ClientAccount(Base):
     # cambiado su password. Usado por _resolve_client_from_token para invalidar sesiones
     # (JWTs) emitidas antes de este momento - ver security.py.
     password_changed_at = Column(DateTime(timezone=True), nullable=True)
+    # Aceptacion de Terminos y Condiciones. NULL = nunca aceptados (cuenta creada antes de
+    # este campo, o via Google - ver POST /auth/accept-terms). terms_accepted_version es
+    # texto libre que decide el frontend (fecha/version del texto legal); el backend no lo valida.
+    terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    terms_accepted_version = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 

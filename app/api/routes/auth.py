@@ -11,12 +11,12 @@ from app.models.client import ClientAccount
 from app.models.cart import Cart
 from app.schemas.client import (
     ClientRegister, ClientLogin, GoogleLogin, VerifyEmailRequest, ClientAuthResponse, ClientPublic, ClientUpdate,
-    ForgotPasswordRequest, ResetPasswordRequest, MessageResponse,
+    ForgotPasswordRequest, ResetPasswordRequest, MessageResponse, AcceptTermsRequest,
 )
 from app.services.client_service import (
     register_client, authenticate_client, update_client,
     get_or_create_google_client, verify_client_email, resend_verification_email,
-    request_password_reset, reset_password,
+    request_password_reset, reset_password, accept_terms,
 )
 from app.services.google_auth_service import verify_google_id_token
 from app.services.cart_service import get_cart_response, try_merge_cart_token
@@ -140,3 +140,15 @@ async def update_me(request: Request, client: CurrentClientDep, db: DbDep, data:
     """
     updated = await update_client(db, client, data)
     return updated
+
+@router.post("/auth/accept-terms", response_model=ClientPublic, summary="Registrar aceptación de Términos y Condiciones")
+@limiter.limit("10/minute")
+async def accept_terms_route(request: Request, client: CurrentClientDep, db: DbDep, data: AcceptTermsRequest = Body()):
+    """
+    Registra/actualiza la aceptación de Términos y Condiciones de la cuenta autenticada —
+    para cuentas creadas antes de este campo, o vía Google (que no pasa por el formulario
+    de registro, así que nunca mandó `termsAccepted`). Idempotente: llamarla de nuevo
+    (misma versión u otra) solo actualiza `termsAcceptedAt`/`termsAcceptedVersion`, sin
+    efectos secundarios que duplicar.
+    """
+    return await accept_terms(db, client, data.terms_version)

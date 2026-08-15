@@ -96,6 +96,8 @@ class OrderCreate(CamelModel):
     priceListUuid: Optional[str] = Field(default=None, description="Por defecto settings.SICAR_PRICE_LIST_ID si se omite")
     wholesalePrices: bool = Field(default=False)
     couponCode: Optional[str] = Field(default=None, description="Código de cupón a aplicar. Se revalida y bloquea aquí (no en el carrito) - nunca se confía en el descuento ya mostrado por GET /cart.")
+    termsAcceptedAt: Optional[datetime] = Field(default=None, description="Momento (ISO 8601) en que el comprador aceptó los Términos y Condiciones - principalmente para checkout de invitado, que no tiene ClientAccount donde guardarlo. Opcional, no rompe compatibilidad si se omite.")
+    termsAcceptedVersion: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada (texto libre, lo decide el frontend).")
 
     @field_validator("couponCode")
     @classmethod
@@ -165,6 +167,8 @@ class OrderPublic(CamelModel):
     discount_amount: Optional[float] = Field(default=None, description="Monto descontado por el cupón. Null si no se usó cupón.")
     subtotal: Optional[float] = Field(default=None, description="Total antes del descuento del cupón. Null en órdenes anteriores a esta funcionalidad - tratar como igual a `total` en ese caso.")
     shipping_label: Optional[ShippingLabelInfo] = Field(default=None, description="Guía de envío real (envia.com) si un admin ya la generó - incluye trackUrl para que el cliente siga su paquete. Null hasta entonces; solo aplica a pedidos DELIVERYMAN.")
+    terms_accepted_at: Optional[datetime] = Field(default=None, description="Momento en que se aceptaron los Términos y Condiciones al hacer checkout como invitado. Null si no se mandó o si la orden es de una cuenta (ver ClientPublic.termsAcceptedAt en ese caso).")
+    terms_accepted_version: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada al hacer checkout como invitado.")
 
 class OrderListResponse(CamelModel):
     total: int

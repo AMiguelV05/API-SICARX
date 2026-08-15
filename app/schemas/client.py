@@ -1,6 +1,7 @@
 import re
+from datetime import datetime
 from typing import List, Optional
-from pydantic import EmailStr, Field, field_validator
+from pydantic import EmailStr, Field, field_validator, model_validator
 from app.schemas.base import CamelModel
 from app.schemas.cart import CartResponse
 
@@ -17,6 +18,14 @@ class ClientRegister(CamelModel):
     phone: Optional[str] = None
     password: str = Field(min_length=8, description="Contraseña en texto plano, mínimo 8 caracteres")
     cart_token: Optional[str] = Field(default=None, description="cartToken de un carrito anonimo a fusionar, si existe")
+    terms_accepted: bool = Field(description="Debe ser explícitamente true - el usuario aceptó los Términos y Condiciones / Aviso de Privacidad")
+    terms_version: str = Field(min_length=1, description="Versión de los Términos y Condiciones aceptada (texto libre, lo decide el frontend)")
+
+    @model_validator(mode="after")
+    def validate_terms_accepted(self):
+        if not self.terms_accepted:
+            raise ValueError("Debes aceptar los Términos y Condiciones para registrarte.")
+        return self
 
 class ClientLogin(CamelModel):
     email: EmailStr
@@ -39,6 +48,9 @@ class ResetPasswordRequest(CamelModel):
 
 class MessageResponse(CamelModel):
     detail: str
+
+class AcceptTermsRequest(CamelModel):
+    terms_version: str = Field(min_length=1, description="Versión de los Términos y Condiciones aceptada (texto libre, lo decide el frontend)")
 
 class ClientAddressBase(CamelModel):
     label: Optional[str] = None
@@ -94,6 +106,8 @@ class ClientPublic(CamelModel):
     is_verified: bool
     auth_provider: str
     addresses: List[ClientAddressPublic] = []
+    terms_accepted_at: Optional[datetime] = Field(default=None, description="Momento en que se aceptaron los Términos y Condiciones. Null si nunca se aceptaron (cuenta previa a este campo, o vía Google).")
+    terms_accepted_version: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada.")
 
 class ClientAuthResponse(CamelModel):
     token: str
