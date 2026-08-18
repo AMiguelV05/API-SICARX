@@ -20,6 +20,9 @@ from app.models.attribute import Attribute, AttributePreset, attribute_preset_it
 from app.models.password_reset import PasswordResetToken
 from app.models.review import ProductReview, ReviewHelpfulVote
 from app.models.coupon import Coupon, CouponRedemption, coupon_categories, coupon_products, coupon_assigned_clients
+from app.models.admin_user import AdminUser
+from app.models.audit_log import AdminAuditLog
+from app.models.refund import Refund
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

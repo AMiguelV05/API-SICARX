@@ -1,0 +1,74 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sicarx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Variables minimas requeridas por app.core.config.Settings al importar - valores
+      # dummy, ninguna prueba llama de verdad a Sicar X/Mercado Pago/envia.com/Google (se
+      # monkeypatchea lo que haga falta, ver tests/conftest.py).
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/sicarx_test
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/sicarx_test
+      X_API_KEY: test-x-api-key
+      SICAR_ADMIN_EMAIL: test@example.com
+      SICAR_ADMIN_PASSWORD: test-password
+      SICAR_TOKEN: test-sicar-token
+      SICAR_PRICE_LIST_ID: test-price-list-id
+      CASH_REGISTER_UUID: test-cash-register-uuid
+      CLIENT_JWT_SECRET: test-client-jwt-secret
+      ADMIN_JWT_SECRET: test-admin-jwt-secret
+      MP_ACCESS_TOKEN: test-mp-access-token
+      MP_WEBHOOK_SECRET: test-mp-webhook-secret
+      FRONTEND_BASE_URL: https://example.com
+      API_BASE_URL: https://api.example.com
+      FRONTEND_WEBHOOK_SECRET: test-frontend-webhook-secret
+      GOOGLE_CLIENT_ID: test-google-client-id.apps.googleusercontent.com
+      ENVIA_API_TOKEN: test-envia-token
+      ENVIA_ORIGIN_NAME: Test
+      ENVIA_ORIGIN_COMPANY: Test
+      ENVIA_ORIGIN_PHONE: "5555555555"
+      ENVIA_ORIGIN_EMAIL: test@example.com
+      ENVIA_ORIGIN_STREET: Test
+      ENVIA_ORIGIN_NUMBER: "1"
+      ENVIA_ORIGIN_DISTRICT: Test
+      ENVIA_ORIGIN_CITY: Test
+      ENVIA_ORIGIN_STATE: NL
+      ENVIA_ORIGIN_ZIP_CODE: "00000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run migrations against the test database
+        run: alembic upgrade head
+
+      - name: Run pytest
+        run: pytest -v

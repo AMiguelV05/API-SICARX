@@ -15,37 +15,67 @@ un consumidor completamente distinto de esta misma API.
 
 ## Arquitectura obligatoria: server-to-server, nunca desde el navegador
 
-**`X-Admin-Key` es un secreto estático compartido, sin alcance por usuario** — no es un JWT de
-sesión ni tiene expiración ni identifica a un admin en particular, solo confirma que la llamada
-viene de un sistema autorizado. Por eso **esta llave nunca debe llegar al navegador**: sea cual
-sea el framework del dashboard, la llamada a `/v1/admin/*` debe hacerse desde el backend/servidor
-del dashboard (p. ej. un Route Handler o Server Action de Next.js), no desde JavaScript del lado
-del cliente. Si `X-Admin-Key` viajara en una petición hecha directamente desde el navegador,
-cualquiera con acceso a las devtools del dashboard podría copiarla y llamar a `/v1/admin/*`
-directamente sin pasar por ningún control de acceso propio del dashboard.
+**Actualización (2026-08-18): el antiguo `X-Admin-Key` compartido fue reemplazado por login
+real por administrador (`AdminUser`) con JWT propio.** Si integraste este dashboard antes de
+esta fecha, todo lo de esta sección cambió — sigue leyendo, no asumas que `X-Admin-Key` sigue
+funcionando (ya no existe, la ruta que lo validaba fue eliminada).
+
+El token que emite `POST /admin/auth/login` (ver abajo) es una credencial de sesión real, con
+expiración (12h) e identidad de admin — pero el mismo principio de arquitectura de antes sigue
+aplicando: **nunca debe llegar al navegador**. La llamada a `/v1/admin/*` (incluyendo el login
+en sí) debe hacerse desde el backend/servidor del dashboard (p. ej. un Route Handler o Server
+Action de Next.js), no desde JavaScript del lado del cliente — si el token viajara a un
+navegador, cualquiera con acceso a las devtools podría copiarlo y llamar a `/v1/admin/*`
+directamente hasta que expire, sin pasar por ningún control de acceso propio del dashboard.
+Guarda el email/password del admin (o el token ya emitido) en una sesión de servidor propia del
+dashboard, nunca en una cookie/localStorage accesible por JS.
 
 Como consecuencia de ser 100% server-to-server, **CORS no aplica aquí** — no hay ninguna petición
 cross-origin del navegador hacia `api-production-cf7a.up.railway.app` para estas rutas, así que no
 hace falta agregar nada a `allow_origins`/`allow_headers` en `app/main.py` para este flujo (esos
 ya cubren el storefront, un caso distinto).
 
-## Autenticación — una sola cabecera, distinta de las del storefront
+## Autenticación — login real por administrador, distinto del storefront
+
+Primero, login (una sola vez, o de nuevo cuando el token expire/un 401 lo indique):
 
 ```http
-X-Admin-Key: <valor de ADMIN_API_KEY>
+POST /v1/admin/auth/login
+Content-Type: application/json
+
+{"email": "admin@ferreteriacharly.com", "password": "..."}
+```
+
+Respuesta `200`:
+
+```json
+{"token": "<jwt>", "admin": {"uuid": "...", "email": "...", "name": "...", "role": "super_admin", "isActive": true, "lastLoginAt": "...", "createdAt": "..."}}
+```
+
+Luego, en cada llamada a `/v1/admin/*`:
+
+```http
+Authorization: Bearer <admin-token>
 ```
 
 Es la **única** cabecera de autenticación que exige `/v1/admin/*` — a diferencia de cada ruta del
-storefront (que siempre exige `x-api-key`), este router **no** valida `x-api-key` en absoluto, solo
-`X-Admin-Key`. No reutilices la `x-api-key` del storefront aquí ni esperes que haga falta.
+storefront (que siempre exige `x-api-key`), este router **no** valida `x-api-key` en absoluto,
+solo esta. No reutilices la `x-api-key` del storefront aquí ni esperes que haga falta.
 
-- `401` si falta la cabecera, o si `X-Admin-Key` no coincide con el valor configurado.
-- El valor de `ADMIN_API_KEY` se entrega **fuera de este repo**, por un canal seguro aparte
-  (mismo criterio que `FRONTEND_WEBHOOK_SECRET` en `FRONTEND_INTEGRATION.md`) — nunca se
-  documenta el valor real aquí ni en ningún otro archivo del repo.
-- Si `ADMIN_API_KEY` no está configurado del lado del backend (`Optional`, sin valor por
-  defecto), **todas** las rutas de `/v1/admin/*` responden `401` sin importar qué se envíe —
-  es el comportamiento seguro-por-defecto mientras no exista un valor real que verificar.
+- `401` si falta la cabecera, si el token es inválido/expiró, o si la cuenta de admin fue
+  desactivada. **A diferencia del antiguo `X-Admin-Key`, el token expira (12h)** — el backend
+  del dashboard debe volver a hacer login (mismo `POST /admin/auth/login`) cuando reciba un
+  `401`, en vez de asumir una credencial de vida indefinida.
+- Dos roles: `super_admin` (todo, incluyendo gestionar otros `AdminUser`) y `staff` (operación
+  del día a día — aceptar/cancelar órdenes, moderar reseñas, dashboard — pero no puede
+  gestionar admins, borrar categorías/vehículos/cupones, ni emitir reembolsos). Una llamada de
+  `staff` a una ruta `super_admin`-only responde `403` (no `401` — sí está autenticado, solo
+  sin permiso), con el mismo token que ya venía usando.
+- Las credenciales del primer `super_admin` se crean fuera de esta API (script
+  `create_admin_user.py`, no expuesto por HTTP) y se entregan **fuera de este repo**, por un
+  canal seguro aparte (mismo criterio que `FRONTEND_WEBHOOK_SECRET`) — nunca se documenta un
+  valor real aquí. Cuentas adicionales se crean vía `POST /admin/admins` (ver abajo) por un
+  `super_admin` ya autenticado.
 
 ## Webhooks salientes hacia el dashboard admin
 
@@ -68,10 +98,10 @@ manifest = "{X-Webhook-Timestamp}." + <raw request body, tal cual, sin re-serial
 signature = hex(HMAC_SHA256(ADMIN_WEBHOOK_SECRET, manifest))
 ```
 
-`ADMIN_WEBHOOK_SECRET` es un secreto **distinto** de `ADMIN_API_KEY` de arriba (ese autentica
-llamadas *hacia* esta API; este firma llamadas *desde* esta API hacia el dashboard - un leak
-de uno no compromete al otro) y se entrega por el mismo canal seguro fuera de este repo, nunca
-documentado aqui. Recalcula `signature` con el mismo secreto y comparala contra
+`ADMIN_WEBHOOK_SECRET` es un secreto **distinto** de las credenciales de login de arriba (esas
+autentican llamadas *hacia* esta API; este firma llamadas *desde* esta API hacia el dashboard -
+un leak de uno no compromete al otro) y se entrega por el mismo canal seguro fuera de este
+repo, nunca documentado aqui. Recalcula `signature` con el mismo secreto y comparala contra
 `X-Webhook-Signature` con una comparacion en tiempo constante (no `===`/`==`), usando el
 **body crudo** para el HMAC - un JSON re-serializado puede no ser byte-a-byte identico al
 original. Rechaza tambien si `X-Webhook-Timestamp` tiene mas de ~5 minutos de antiguedad
@@ -158,11 +188,74 @@ el pedido correspondiente).
 
 ## Referencia de endpoints
 
+### `POST /v1/admin/auth/login` — login
+
+Ver "Autenticación" arriba para el request/response completo. Sin rol requerido (obviamente
+— es la ruta que emite el token). Rate-limited (5/min por IP).
+
+### `GET /v1/admin/auth/me` — datos del admin autenticado
+
+```http
+GET /v1/admin/auth/me
+Authorization: Bearer <admin-token>
+```
+
+Respuesta `200`: el mismo shape `admin` del login. Útil para que el dashboard confirme
+`role` sin tener que decodificar el JWT del lado del cliente.
+
+### `POST` / `GET` / `PATCH /v1/admin/admins` — gestión de cuentas admin (solo `super_admin`)
+
+```http
+POST /v1/admin/admins
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{"email": "nuevo@ferreteriacharly.com", "name": "Nueva Persona", "password": "...", "role": "staff"}
+```
+
+`role` es `"super_admin"` o `"staff"`. `409` en correo duplicado. `GET /v1/admin/admins`
+(paginado, `limit`/`offset`) lista todas las cuentas. `PATCH /v1/admin/admins/{uuid}`
+(`exclude_unset`) actualiza `name`/`role`/`isActive`/`newPassword` — **restablece la
+contraseña de otro admin directamente**, sin flujo de correo (para eso está: no hay
+self-service, un `super_admin` lo hace por el colega). Una llamada de `staff` a cualquiera de
+estas tres rutas responde `403`.
+
+### `GET /v1/admin/audit-log` — historial de acciones admin (solo `super_admin`)
+
+```http
+GET /v1/admin/audit-log?adminUserUuid=...&action=order.cancel&resourceType=order&dateFrom=2026-08-01T00:00:00Z&dateTo=2026-08-18T23:59:59Z&limit=50&offset=0
+Authorization: Bearer <admin-token>
+```
+
+Todos los query params son opcionales. Cubre estas acciones (no todavía las ~30 rutas admin
+completas — ver `CLAUDE.md`, "Admin RBAC, audit log, and partial refunds"): `order.accept`,
+`order.cancel`, `order.refund`, `admin_user.create`, `admin_user.update`, `coupon.create`,
+`coupon.update`, `coupon.delete`, `category.delete`, `vehicle.delete`, `review.moderate`,
+`review.delete`. Respuesta `200`:
+
+```json
+{
+  "total": 1,
+  "docs": [
+    {
+      "id": 1,
+      "adminUserUuid": "...",
+      "adminUserName": "Miguel",
+      "action": "order.cancel",
+      "resourceType": "order",
+      "resourceId": "<order uuid>",
+      "detail": {"reason": "Cliente lo pidió"},
+      "createdAt": "2026-08-18T10:00:00Z"
+    }
+  ]
+}
+```
+
 ### `GET /v1/admin/health` — estado operativo
 
 ```http
 GET /v1/admin/health
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Respuesta `200`:
@@ -183,7 +276,7 @@ confirma que el token sea válido, solo que existe uno). `outboxCounts` — cont
 
 ```http
 GET /v1/admin/sync/catalog-status
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Respuesta `200`:
@@ -210,7 +303,7 @@ sincronizando.
 
 ```http
 GET /v1/admin/sync/outbox?status=PENDING&status=FAILED&limit=50&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 - `status` (repetible, opcional) — uno o más de `PENDING`/`IN_PROGRESS`/`SUCCEEDED`/`FAILED`. Si se
@@ -255,7 +348,7 @@ en el panel nativo de Sicar X, o reintentar con el siguiente endpoint una vez re
 
 ```http
 POST /v1/admin/sync/outbox/42/retry
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Resetea la fila a `PENDING` con `nextAttemptAt` = ahora, para que el worker (corre cada minuto) la
@@ -267,7 +360,7 @@ vuelva a intentar en su siguiente ciclo. `404` si el `id` no existe o la fila no
 
 ```http
 GET /v1/admin/orders?status=TO_PAY&dispatchStatus=PENDING_ACCEPTANCE&limit=50&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 A diferencia de `GET /v1/auth/me/orders` (storefront, acotado a una sola cuenta), esta ruta busca
@@ -295,7 +388,7 @@ Respuesta `200` — mismo shape que el detalle de abajo, dentro de `docs`, orden
 
 ```http
 GET /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6?includeDeleted=false
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Respuesta `200`:
@@ -357,14 +450,16 @@ que cualquier otro, con dos diferencias:
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/accept
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "acceptedBy": "Miguel" }
 ```
 
-`acceptedBy` es opcional y es **texto libre** (no hay todavía un sistema de usuarios admin real
-detrás de `X-Admin-Key` — es un identificador para auditoría, no una FK a nada). Respuesta `200`:
+`acceptedBy` es opcional y sigue siendo **texto libre**, independiente de la identidad real del
+`AdminUser` autenticado (que ahora sí existe, y queda registrada aparte en `admin_audit_log` -
+ver la sección de autenticación arriba) — `acceptedBy` no es una FK a `admin_users`, solo un
+identificador legible mandado por el dashboard. Respuesta `200`:
 
 ```json
 {
@@ -389,7 +484,7 @@ si el pedido ya fue aceptado antes (`acceptedAt` ya tenía un valor) — no se p
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/cancel
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "reason": "Producto agotado en tienda" }
@@ -399,9 +494,10 @@ Content-Type: application/json
 esto no es solo auditoría interna: queda guardado en la orden (`cancellationReason`, visible en
 `GET .../orders/{orderUuid}` de arriba y en `GET /v1/auth/me/orders/{orderUuid}` del storefront)
 y viaja en el webhook `order-cancelled` de abajo — es lo que el cliente ve como motivo de su
-cancelación. No hay `cancelledBy` en este contrato — no existe todavía un sistema de usuarios
-admin real detrás de `X-Admin-Key` para identificar quién canceló (mismo motivo por el que
-`acceptedBy` en `/accept` es texto libre y opcional).
+cancelación. No hay `cancelledBy` en este contrato (`reason` es la única cosa que el cliente
+necesita ver) — quién canceló sí queda registrado ahora, pero en `admin_audit_log`
+(`action="order.cancel"`, ver la sección de autenticación arriba), no en un campo de este
+response.
 
 Respuesta `200`:
 ```json
@@ -431,7 +527,7 @@ terminal de pedidos `PICKUP`, que nunca se "enviaron" a ningún lado).
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/advance-status
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "dispatchStatus": "PREPARING" }
@@ -490,7 +586,7 @@ tiene nada que hacer todavía), ni en ninguna reversión.
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/assign-delivery
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "deliveryCompany": "Estafeta" }
@@ -519,6 +615,56 @@ asignado", que sigue permitido): `409` si el pedido ya está `CANCELLED`, y `409
 pedido es `PICKUP` (recolección en tienda no tiene mensajería que asignar — mismo chequeo
 que el `409` de `DISPATCHED` en `advance-status` para pedidos `PICKUP`).
 
+### `POST /v1/admin/orders/{orderUuid}/refund` — reembolso parcial o total (solo `super_admin`)
+
+**Nuevo (2026-08-18).**
+
+```http
+POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/refund
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{ "amount": 150.00, "reason": "Un artículo llegó dañado" }
+```
+
+`amount` es el monto a reembolsar (no tiene que ser el total de la orden — soporta
+reembolsos parciales; Mercado Pago procesa el cargo real). `reason` es obligatorio. `409` si
+la orden no está `PAID` o no tiene un pago de Mercado Pago asociado. `400` si `amount` excede
+lo que queda por reembolsar (`total` de la orden menos la suma de reembolsos previos sobre
+esa misma orden). Respuesta `200`:
+
+```json
+{
+  "id": 5,
+  "orderId": 42,
+  "amount": 150.0,
+  "reason": "Un artículo llegó dañado",
+  "mpRefundId": "987654321",
+  "issuedByAdminId": 3,
+  "createdAt": "2026-08-18T12:00:00Z"
+}
+```
+
+**Deliberadamente no toca nada más**: `Order.status` se queda `PAID` (no hay un status
+"parcialmente reembolsado" en este contrato todavía), y no se restaura ningún inventario
+(`Product.stock`/`reserved`) — es un evento puramente monetario. Si el artículo dañado
+también necesita volver a inventario, es un ajuste manual aparte, no algo que esta ruta haga
+por ti.
+
+### `GET /v1/admin/orders/{orderUuid}/refunds` — historial de reembolsos de un pedido
+
+```http
+GET /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/refunds?limit=50&offset=0
+Authorization: Bearer <admin-token>
+```
+
+Cualquier admin autenticado puede leer esto (solo `super_admin` puede emitir un reembolso
+nuevo, ver arriba). Incluye tanto reembolsos parciales explícitos como el reembolso
+**automático** que ya dispara `POST .../cancel` cuando la orden tenía un pago aprobado
+(`reason` en ese caso es `"Cancelación de orden"` o `"Cancelación de orden (admin)"`, y
+`issuedByAdminId` es `null` si fue el propio cliente quien canceló). Respuesta `200`: mismo
+shape que el objeto de arriba, dentro de `{"total": ..., "docs": [...]}`.
+
 ### Guía de envío con envia.com
 
 Pantalla "Guía de envío" del panel admin: cotizar + generar una guía real con envia.com una vez
@@ -544,7 +690,7 @@ que un pedido `DELIVERYMAN` llega a `dispatchStatus: COMPLETE`.
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/quote
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "weight": 2.5, "length": 30, "width": 20, "height": 15 }
@@ -616,7 +762,7 @@ Respuesta `200`:
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/generate
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "weight": 2.5, "length": 30, "width": 20, "height": 15, "carrier": "dhl", "service": "1" }
@@ -696,7 +842,7 @@ sobre timeout para "resolverlo".
 
 ```http
 POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/cancel
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "reason": "Dirección incorrecta, se regenerará la guía" }
@@ -746,14 +892,15 @@ Endpoints para administrar el árbol propio de categorías (PIM, auto-referencia
 única forma de poblar `product_categories`, que hasta ahora no tenía ningún endpoint
 que la llenara. Para **leer** el árbol completo (navegación/filtros del storefront)
 sigue usando `GET /v1/taxonomy` (público, solo necesita `x-api-key`) — estas rutas
-son exclusivamente de escritura/administración, gateadas por `X-Admin-Key` como todo
-lo demás en este documento.
+son exclusivamente de escritura/administración, gateadas por el token de admin como todo
+lo demás en este documento (`DELETE` requiere además rol `super_admin`, ver la sección de
+autenticación arriba).
 
 #### `POST /v1/admin/categories` — crear un nodo
 
 ```http
 POST /v1/admin/categories
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "name": "Herramientas Eléctricas", "parentUuid": "6a4fd308da77fe7cd25d1dd9" }
@@ -782,7 +929,7 @@ Respuesta `201`:
 
 ```http
 PATCH /v1/admin/categories/3f9a1c2e-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "name": "Herramienta Eléctrica", "parentUuid": null }
@@ -803,7 +950,7 @@ el nodo a raíz. Renombrar recalcula el `slug` automáticamente (mismo criterio 
 
 ```http
 DELETE /v1/admin/categories/3f9a1c2e-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 `204` sin cuerpo si tiene éxito. Es un borrado real (no soft-delete — a diferencia de
@@ -819,7 +966,7 @@ X-Admin-Key: <admin-key>
 
 ```http
 PUT /v1/admin/categories/3f9a1c2e-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
@@ -854,7 +1001,7 @@ en vez de este `PUT`.
 
 ```http
 PATCH /v1/admin/categories/3f9a1c2e-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
@@ -888,7 +1035,7 @@ mandado) — p. ej. un `add` de un producto ya asignado no incrementa `addedCoun
 
 ```http
 GET /v1/admin/categories/3f9a1c2e-.../products?limit=60&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Pensado para poblar la UI de edición antes de un `PUT` (arriba) — muestra solo lo
@@ -920,7 +1067,7 @@ Respuesta `200`:
 
 ```http
 GET /v1/admin/categories/by-product/3Cny4OOxdX1GoSzL9rEsTZNL7un
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Dirección inversa de `GET .../{uuid}/products` de arriba: dado un producto, qué
@@ -943,7 +1090,7 @@ categorías):
 
 ```http
 GET /v1/admin/categories/export
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Opcionalmente `?taxonomyUuid=<uuid>` (antes `categoryUuid` — renombrado 2026-08-13 para no
@@ -1011,7 +1158,7 @@ verdad) — ver `FRONTEND_INTEGRATION.md`.
 
 ```http
 POST /v1/admin/coupons
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {
@@ -1037,7 +1184,7 @@ Respuesta `201`: mismo shape que `GET /{uuid}` de abajo.
 
 ```http
 GET /v1/admin/coupons?isActive=true&code=WELCOME&limit=60&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Paginado (`limit`/`offset`, mismo estilo que el resto de este documento). `code` es
@@ -1096,7 +1243,7 @@ arriba) — quitarlo del alcance del cupón primero.
 
 ```http
 PUT /v1/admin/coupons/b2e4b3f0-.../categories
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "categoryUuids": ["3f9a1c2e-..."] }
@@ -1112,7 +1259,7 @@ picker del dashboard nunca cargó el conjunto completo:
 
 ```http
 PATCH /v1/admin/coupons/b2e4b3f0-.../categories
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "add": ["3f9a1c2e-..."], "remove": ["6a4fd308-..."] }
@@ -1148,7 +1295,7 @@ recibe `productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe), y
 
 ```http
 PUT /v1/admin/coupons/b2e4b3f0-.../clients
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "clientEmails": ["vip@example.com"] }
@@ -1177,7 +1324,7 @@ actuales (una campaña puede apuntar a muchos clientes):
 
 ```http
 GET /v1/admin/coupons/b2e4b3f0-.../redemptions?limit=60&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 ```json
@@ -1230,7 +1377,7 @@ particular.
 
 ```http
 POST /v1/admin/vehicles
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "vehicleType": "AUTOMOTIVE", "make": "Chevrolet", "model": "Aveo", "yearStart": 2008, "yearEnd": 2016, "engine": "L4 1.6L" }
@@ -1260,7 +1407,7 @@ Respuesta `201`:
 
 ```http
 GET /v1/admin/vehicles?vehicleType=MOTORCYCLE&make=italika&model=FT&limit=50&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 `make`/`model` son coincidencia parcial sin distinguir mayúsculas (`ILIKE`), pensados
@@ -1281,7 +1428,7 @@ Respuesta `200` — mismo shape que `POST`, dentro de `docs`, ordenado por
 
 ```http
 PATCH /v1/admin/vehicles/8f2c1a4e-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "yearEnd": null }
@@ -1296,7 +1443,7 @@ queda con `yearEnd < yearStart`. Responde el mismo shape que `POST`.
 
 ```http
 DELETE /v1/admin/vehicles/8f2c1a4e-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 `204` sin cuerpo si tiene éxito. `409` si todavía tiene productos asignados
@@ -1307,7 +1454,7 @@ diferencia de categorías no hay chequeo de "hijos" (no existen).
 
 ```http
 PUT /v1/admin/vehicles/8f2c1a4e-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
@@ -1332,7 +1479,7 @@ resto. Usar el `PATCH` de abajo para ediciones incrementales.
 
 ```http
 PATCH /v1/admin/vehicles/8f2c1a4e-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": [] }
@@ -1354,7 +1501,7 @@ Respuesta `200`:
 
 ```http
 GET /v1/admin/vehicles/models-for-years?make=Honda&vehicleType=AUTOMOTIVE&years=2012&years=2013&years=2014
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Primer paso de la asignación masiva de abajo: dado `make` y una lista de `years`
@@ -1375,7 +1522,7 @@ Lista vacía si ningún modelo de esa marca cubre todos los años dados.
 
 ```http
 POST /v1/admin/vehicles/assign-by-model
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {
@@ -1433,7 +1580,7 @@ si alguna combinación ya existía de una asignación anterior.
 
 ```http
 GET /v1/admin/vehicles/8f2c1a4e-.../products?limit=60&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Mismo shape/paginación que el equivalente de categorías. `404` si el vehículo no
@@ -1443,7 +1590,7 @@ existe.
 
 ```http
 GET /v1/admin/vehicles/by-product/3Cny4OOxdX1GoSzL9rEsTZNL7un
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Dirección inversa de `GET .../{uuid}/products` de arriba, mismo propósito que el
@@ -1485,7 +1632,7 @@ construir esto). Es trabajo de contenido, no algo que este backend intente adivi
 
 ```http
 POST /v1/admin/attributes
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "name": "Color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null }
@@ -1506,7 +1653,7 @@ Respuesta `201`:
 
 ```http
 GET /v1/admin/attributes?search=color&dataType=ENUM&limit=50&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 `search` es `ILIKE` parcial contra `name`, `dataType` es igualdad exacta — ambos opcionales y
@@ -1521,7 +1668,7 @@ Respuesta `200` — mismo shape que `POST`, dentro de `docs`, ordenado por `name
 
 ```http
 PATCH /v1/admin/attributes/8bdb99f9-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "unit": "cm" }
@@ -1539,7 +1686,7 @@ o el tipo guardado dejaría de tener sentido). Quita los valores existentes prim
 
 ```http
 DELETE /v1/admin/attributes/8bdb99f9-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 `204` sin cuerpo si tiene éxito. Borrado real. `409` si algún producto todavía tiene esta clave
@@ -1549,7 +1696,7 @@ en `attributes`, o si el atributo sigue asignado a algún preset — quítalo de
 
 ```http
 GET /v1/admin/attributes/8bdb99f9-.../products?limit=60&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Dirección inversa de `GET /v1/admin/products/{uuid}/attributes` — dado un atributo, qué
@@ -1579,7 +1726,7 @@ de abajo:
 
 ```http
 PUT /v1/admin/attributes/8bdb99f9-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {
@@ -1633,7 +1780,7 @@ ediciones incrementales.
 
 ```http
 PATCH /v1/admin/attributes/8bdb99f9-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {
@@ -1680,7 +1827,7 @@ quita el atajo de captura, nunca afecta valores ya guardados.
 
 ```http
 PUT /v1/admin/attribute-presets/c1c2c3c4-.../attributes
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {
@@ -1707,7 +1854,7 @@ request) — pensado para precargar la UI de edición antes de un `PUT`.
 
 ```http
 POST /v1/admin/attribute-presets/c1c2c3c4-.../apply
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
@@ -1733,7 +1880,7 @@ tenía alguna de las claves del preset cuenta menos que `productUuids.length × 
 
 ```http
 GET /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/attributes
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Respuesta `200`:
@@ -1749,7 +1896,7 @@ sin filtrar por `isActive`.
 
 ```http
 PUT /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/attributes
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 {
@@ -1777,7 +1924,7 @@ Respuesta `200` — mismo shape que `GET` de arriba, con el conjunto ya aplicado
 
 ```http
 PATCH /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/variant-group
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "variantGroupUuid": "b52bf1c5-873a-45f6-b341-930106d669ed" }
@@ -1798,7 +1945,7 @@ Mismo patrón CRUD que atributos/presets:
 
 ```http
 POST /v1/admin/variant-groups
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "name": "Portarollo acero inoxidable", "variantAttributeSlug": "color" }
@@ -1821,7 +1968,7 @@ todavía apunta a este grupo (`GET .../products` de abajo para revisarlos) — q
 
 ```http
 PUT /v1/admin/variant-groups/b52bf1c5-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
@@ -1851,7 +1998,7 @@ productos no cargados. Usar el `PATCH` de abajo para ediciones incrementales.
 
 ```http
 PATCH /v1/admin/variant-groups/b52bf1c5-.../products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
@@ -1879,7 +2026,7 @@ Respuesta `200`:
 
 ```http
 GET /v1/admin/bulk-import/template
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Respuesta `200`: el archivo `.xlsx` en sí (`Content-Type:
@@ -1906,7 +2053,7 @@ para poblar `product_categories`/`product_vehicles`/`Product.attributes`/
 
 ```http
 POST /v1/admin/bulk-import/products
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: multipart/form-data
 
 file: <archivo .xlsx>
@@ -2046,7 +2193,7 @@ cuentan como venta.
 
 ```http
 GET /v1/admin/dashboard/summary?startDate=2026-07-01&endDate=2026-08-05
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Respuesta `200`:
@@ -2073,7 +2220,7 @@ huecos con `0` si necesita un eje continuo para graficar).
 
 ```http
 GET /v1/admin/dashboard/top-products?startDate=2026-07-01&endDate=2026-08-05&sortBy=revenue&limit=20&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 - `sortBy` — `"revenue"` (default) o `"quantity"`.
@@ -2099,7 +2246,7 @@ aquí con los datos vigentes al momento de cada venta.
 
 ```http
 GET /v1/admin/dashboard/top-categories?startDate=2026-07-01&endDate=2026-08-05&sortBy=revenue&limit=20&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Mismos parámetros que `top-products` (`sortBy`/`limit`/`offset`). Agrupa por el árbol de
@@ -2137,7 +2284,7 @@ storefront-facing (listar, crear, editar, marcar útil).
 
 ```http
 GET /v1/admin/reviews?productSku=HV-3617&isHidden=false&limit=50&offset=0
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 ```
 
 Filtros, todos opcionales y combinables: `productUuid`, `productSku` (coincidencia
@@ -2176,7 +2323,7 @@ Respuesta `200`:
 
 ```http
 PATCH /v1/admin/reviews/c2a8ff9a-.../
-X-Admin-Key: <admin-key>
+Authorization: Bearer <admin-token>
 Content-Type: application/json
 
 { "isHidden": true, "hiddenReason": "Lenguaje inapropiado" }
