@@ -2,11 +2,11 @@ from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from app.core.database import DbDep
-from app.core.security import SuperAdminDep
+from app.core.security import require_super_admin
 from app.schemas.audit_log import AdminAuditLogPublic, AdminAuditLogListResponse
 from app.services import audit_service
 
-router = APIRouter(prefix="/admin/audit-log", tags=["Admin - Audit Log"], dependencies=[Depends(SuperAdminDep)])
+router = APIRouter(prefix="/admin/audit-log", tags=["Admin - Audit Log"], dependencies=[Depends(require_super_admin)])
 
 
 @router.get("", response_model=AdminAuditLogListResponse, summary="Historial de acciones admin")

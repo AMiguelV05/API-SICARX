@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Body, Depends, Query
 from app.core.database import DbDep
-from app.core.security import SuperAdminDep
+from app.core.security import SuperAdminDep, require_super_admin
 from app.schemas.admin_auth import AdminUserCreate, AdminUserUpdate, AdminUserPublic, AdminUserListResponse
 from app.services import admin_auth_service, audit_service
 
-router = APIRouter(prefix="/admin/admins", tags=["Admin - Admin Users"], dependencies=[Depends(SuperAdminDep)])
+router = APIRouter(prefix="/admin/admins", tags=["Admin - Admin Users"], dependencies=[Depends(require_super_admin)])
 
 
 @router.post("", response_model=AdminUserPublic, summary="Crear una cuenta de administrador")
