@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, Body, HTTPException, Query, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin, CurrentAdminDep, SuperAdminDep
 from app.schemas.admin import (
     AdminHealthResponse,
     SyncStatusResponse,
@@ -27,10 +27,11 @@ from app.schemas.admin import (
     ShippingCancelResponse,
     ShippingCancelRefund,
 )
-from app.services import admin_service
+from app.schemas.refund import RefundCreateRequest, RefundPublic, RefundListResponse
+from app.services import admin_service, audit_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin", tags=["Admin"], dependencies=[Depends(get_current_admin)])
 
 
 @router.get("/health", response_model=AdminHealthResponse, summary="Estado operativo: DB, token Sicar X, cola de sincronizacion")
@@ -108,17 +109,19 @@ async def admin_get_order(order_uuid: str, db: DbDep, include_deleted: bool = Qu
 
 
 @router.post("/orders/{order_uuid}/accept", response_model=OrderAcceptResponse, summary="Aceptar una orden localmente y encolar el avance de dispatchStatus en Sicar X")
-async def admin_accept_order(order_uuid: str, db: DbDep, data: OrderAcceptRequest = Body(default=OrderAcceptRequest())):
+async def admin_accept_order(order_uuid: str, db: DbDep, current: CurrentAdminDep, data: OrderAcceptRequest = Body(default=OrderAcceptRequest())):
     """Marca la orden como aceptada localmente (`accepted_at`/`accepted_by`) y encola un
     `SicarSyncOutbox` (`action="ACCEPT"`) para que el worker avance su `dispatchStatus` a
     `PENDING` en Sicar X de forma asincrona - Sicar X no sabe que la orden existe hasta
     este punto."""
     order = await admin_service.accept_order(db, order_uuid, data.accepted_by)
+    await audit_service.log_action(db, current, "order.accept", "order", order.uuid)
+    await db.commit()
     return OrderAcceptResponse(order_uuid=order.uuid, accepted_at=order.accepted_at, accepted_by=order.accepted_by, dispatch_status=order.dispatch_status)
 
 
 @router.post("/orders/{order_uuid}/cancel", response_model=AdminOrderCancelResponse, summary="Cancelar una orden como administrador")
-async def admin_cancel_order(order_uuid: str, db: DbDep, background_tasks: BackgroundTasks, data: AdminOrderCancelRequest = Body()):
+async def admin_cancel_order(order_uuid: str, db: DbDep, current: CurrentAdminDep, background_tasks: BackgroundTasks, data: AdminOrderCancelRequest = Body()):
     """Cancela localmente cualquier orden (`status = "CANCELLED"`, stock/reserva
     restaurados), con un `reason` obligatorio que queda guardado en la orden y viaja en el
     webhook `order-cancelled` - visible para el cliente, a diferencia de una cancelación
@@ -128,6 +131,8 @@ async def admin_cancel_order(order_uuid: str, db: DbDep, background_tasks: Backg
     PICKUP). Si la orden ya había sido aceptada, se le avisa a Sicar X de forma asíncrona
     vía `sicar_sync_outbox`; si nunca fue aceptada, no hay nada que sincronizar."""
     order, was_accepted = await admin_service.cancel_order_admin(db, order_uuid, data.reason, background_tasks)
+    await audit_service.log_action(db, current, "order.cancel", "order", order.uuid, {"reason": data.reason})
+    await db.commit()
     return AdminOrderCancelResponse(
         order_uuid=order.uuid,
         cancelled_at=datetime.now(timezone.utc),
@@ -139,6 +144,32 @@ async def admin_cancel_order(order_uuid: str, db: DbDep, background_tasks: Backg
             else "La cancelación ya se aplicó localmente. Sicar X nunca fue notificado de esta orden, así que no hay nada que sincronizar."
         ),
     )
+
+
+@router.post("/orders/{order_uuid}/refund", response_model=RefundPublic, summary="Emitir un reembolso parcial o total sobre una orden pagada")
+async def admin_refund_order(order_uuid: str, db: DbDep, current: SuperAdminDep, data: RefundCreateRequest = Body()):
+    """Solo super_admin. `409` si la orden no esta `PAID` o no tiene `mp_payment_id`.
+    `400` si `amount` excede `order.total` menos lo ya reembolsado. No toca
+    `Product.stock`/`reserved` (evento solo monetario) ni `Order.status` (se queda
+    `PAID`) - ver CLAUDE.md, "Reembolsos parciales"."""
+    refund = await admin_service.refund_order(db, order_uuid, data.amount, data.reason, current)
+    await audit_service.log_action(db, current, "order.refund", "order", order_uuid, {"amount": float(refund.amount), "reason": data.reason})
+    await db.commit()
+    return RefundPublic.model_validate(refund)
+
+
+@router.get("/orders/{order_uuid}/refunds", response_model=RefundListResponse, summary="Listar los reembolsos emitidos sobre una orden")
+async def admin_list_order_refunds(
+    order_uuid: str,
+    db: DbDep,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Cualquier admin autenticado puede ver (solo super_admin puede emitir, ver arriba).
+    Incluye tanto reembolsos parciales explicitos como el reembolso automatico de una
+    cancelacion completa (`reason="Cancelación de orden"`/`"Cancelación de orden (admin)"`)."""
+    total, refunds = await admin_service.list_order_refunds(db, order_uuid, limit, offset)
+    return RefundListResponse(total=total, docs=[RefundPublic.model_validate(r) for r in refunds])
 
 
 @router.post("/orders/{order_uuid}/advance-status", response_model=AdvanceDispatchStatusResponse, summary="Avanzar (o revertir un paso) el dispatchStatus de una orden")

@@ -2,12 +2,12 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, Path, Query, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin, CurrentAdminDep
 from app.schemas.review import AdminReviewPublic, AdminReviewListResponse, AdminReviewModerateRequest, AdminReviewReplyRequest
-from app.services import review_service
+from app.services import review_service, audit_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/reviews", tags=["Admin - Reviews"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/reviews", tags=["Admin - Reviews"], dependencies=[Depends(get_current_admin)])
 
 @router.get("", response_model=AdminReviewListResponse, summary="Buscar/listar reseñas")
 async def admin_list_reviews(
@@ -37,14 +37,19 @@ async def admin_list_reviews(
     )
 
 @router.patch("/{review_uuid}", response_model=AdminReviewPublic, summary="Ocultar/mostrar una reseña")
-async def admin_moderate_review(db: DbDep, review_uuid: str = Path(), data: AdminReviewModerateRequest = Body()):
+async def admin_moderate_review(db: DbDep, current: CurrentAdminDep, review_uuid: str = Path(), data: AdminReviewModerateRequest = Body()):
     """Actualizacion parcial (`exclude_unset`): oculta o vuelve a mostrar una reseña. Ocultarla la excluye de inmediato del promedio/desglose publico del producto."""
-    return await review_service.admin_moderate_review(db, review_uuid, data)
+    review = await review_service.admin_moderate_review(db, review_uuid, data)
+    await audit_service.log_action(db, current, "review.moderate", "review", review_uuid, data.model_dump(exclude_unset=True))
+    await db.commit()
+    return review
 
 @router.delete("/{review_uuid}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar permanentemente una reseña")
-async def admin_delete_review(db: DbDep, review_uuid: str = Path()):
+async def admin_delete_review(db: DbDep, current: CurrentAdminDep, review_uuid: str = Path()):
     """Borrado real (no soft-delete) - para contenido genuinamente abusivo/ilegal. Distinto de ocultar (`PATCH`), que es reversible."""
     await review_service.admin_delete_review(db, review_uuid)
+    await audit_service.log_action(db, current, "review.delete", "review", review_uuid)
+    await db.commit()
 
 @router.put("/{review_uuid}/reply", response_model=AdminReviewPublic, summary="Crear o reemplazar la respuesta oficial")
 async def admin_reply_to_review(db: DbDep, review_uuid: str = Path(), data: AdminReviewReplyRequest = Body()):

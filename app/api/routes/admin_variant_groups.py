@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin
 from app.schemas.attribute import (
     VariantGroupPublic,
     VariantGroupCreateRequest,
@@ -18,7 +18,7 @@ from app.schemas.products import ProductAdminBasic
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/variant-groups", tags=["Admin - Variant Groups"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/variant-groups", tags=["Admin - Variant Groups"], dependencies=[Depends(get_current_admin)])
 
 
 @router.post("", response_model=VariantGroupPublic, status_code=status.HTTP_201_CREATED, summary="Crear un grupo de variantes")

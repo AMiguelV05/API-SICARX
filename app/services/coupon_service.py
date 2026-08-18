@@ -221,7 +221,7 @@ async def release_redemption(db: AsyncSession, order: Order) -> None:
         redemption.status = "RELEASED"
 
 
-# Desde aqui: muta coupons/coupon_*, solo llamado por admin_coupons.py (validate_admin_key).
+# Desde aqui: muta coupons/coupon_*, solo llamado por admin_coupons.py (get_current_admin).
 
 def _decimal_or_none(value) -> Decimal | None:
     return Decimal(str(value)) if value is not None else None

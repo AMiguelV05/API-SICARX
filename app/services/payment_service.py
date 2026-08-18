@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
@@ -130,10 +131,20 @@ async def get_payment(payment_id: str) -> dict:
 
     return response.json()
 
-async def refund_payment(payment_id: str) -> dict:
-    """Reembolsa un pago aprobado. MP exige X-Idempotency-Key en este endpoint (400 sin el header) - se usa el propio payment_id para deduplicar reintentos."""
+async def refund_payment(payment_id: str, amount: Decimal | None = None) -> dict:
+    """Reembolsa un pago aprobado - total si `amount` es None, parcial si se da (Mercado
+    Pago soporta ambos en el mismo endpoint). MP exige X-Idempotency-Key en este endpoint
+    (400 sin el header) - se usa el propio payment_id para deduplicar reintentos (nota:
+    esto significa que dos reembolsos PARCIALES distintos sobre el mismo pago compartirian
+    idempotency key si se reintentaran cerca uno del otro - no es un caso de uso hoy, ver
+    admin_service.refund_order, que solo permite un reembolso a la vez por llamada)."""
+    payload = {"amount": float(amount)} if amount is not None else None
     async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.post(f"{PAYMENTS_URL}/{payment_id}/refunds", headers=_mp_headers(idempotency_key=payment_id))
+        response = await client.post(
+            f"{PAYMENTS_URL}/{payment_id}/refunds",
+            json=payload,
+            headers=_mp_headers(idempotency_key=payment_id),
+        )
 
     if response.status_code not in (200, 201):
         raise_upstream_error(response, f"Error al reembolsar el pago {payment_id} en Mercado Pago", "No se pudo reembolsar el pago en Mercado Pago.")

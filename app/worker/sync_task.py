@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 from app.core.sicar_headers import bearer_json_headers
+from app.core.error_tracking import capture_exception
 from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
 from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -275,6 +276,7 @@ async def scheduled_job():
         await _record_sync_result(success=completed, products_processed=processed, products_deactivated=deactivated, error=None)
     except Exception as e:
         logger.error(f"Fallo en la tarea programada: {e}")
+        capture_exception(e)
         try:
             await _record_sync_result(success=False, products_processed=None, products_deactivated=None, error=str(e)[:2000])
         except Exception as inner_e:

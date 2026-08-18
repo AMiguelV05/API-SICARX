@@ -10,6 +10,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from app.core.config import settings
 from app.core.rate_limit import limiter
+from app.core.error_tracking import capture_exception
 from app.api.v1_router import v1_router
 
 # Contextvar + logging.Filter para correlacionar todas las lineas de log de una misma
@@ -44,12 +45,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-if not settings.ADMIN_API_KEY:
-    logger.warning(
-        "ADMIN_API_KEY no esta configurada: todas las rutas /v1/admin/* responderan 401 "
-        "hasta que se configure (ver CLAUDE.md, seccion Admin API)."
-    )
-
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(SlowAPIMiddleware)
@@ -69,6 +64,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": "; ".join(messages) or "Entrada inválida."},
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Red de seguridad para cualquier excepcion no manejada explicitamente en una ruta -
+    reporta via error_tracking antes de devolver el 500 generico, para que un proveedor
+    real (Sentry u otro) capture todo lo no manejado, no solo los pocos casos con logging
+    explicito. No reemplaza el logging existente en cada ruta, es una red adicional."""
+    capture_exception(exc, path=str(request.url.path), method=request.method, request_id=request_id_ctx_var.get())
+    logger.error(f"Excepcion no manejada en {request.method} {request.url.path}: {type(exc).__name__}: {exc!r}")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "Ocurrió un error interno inesperado. Intenta más tarde."},
     )
 
 @app.middleware("http")

@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, Body, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin
 from app.schemas.attribute import (
     ProductAttributesResponse,
     AttributeValuePublic,
@@ -12,7 +12,7 @@ from app.schemas.attribute import (
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependencies=[Depends(get_current_admin)])
 
 # No hay superficie admin para editar los campos propios del producto (name/price/stock/...)
 # - esos siguen siendo propiedad de Sicar X, sincronizados por el worker. Este router solo

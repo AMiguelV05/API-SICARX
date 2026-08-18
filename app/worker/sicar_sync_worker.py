@@ -13,6 +13,7 @@ from app.services.sicar_stock_service import apply_order_stock_delta
 from app.services.product_stock_service import apply_stock_deltas, apply_reserved_deltas
 from app.services.order_service import _to_decimal
 from app.services import admin_notification_service
+from app.core.error_tracking import capture_exception
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,9 @@ async def _process_claimed_row(row_id: int) -> None:
                     f"Sincronizacion con Sicar X agotada para la orden {order.uuid} "
                     f"(sicar_sync_outbox {row.id}, accion={row.action}) tras {row.attempts} intentos: {e}"
                 )
+                # Ademas del webhook admin de abajo (senal especifica de este dominio) -
+                # ver error_tracking.py.
+                capture_exception(e, order_uuid=order.uuid, outbox_id=row.id, action=row.action, attempts=row.attempts)
             else:
                 row.status = "PENDING"
                 # Backoff exponencial: 1, 2, 4, 8, 16 minutos.
@@ -128,3 +132,4 @@ async def scheduled_sicar_sync_job() -> None:
         await sync_pending_cancellations()
     except Exception as e:
         logger.error(f"Fallo en la tarea programada de sincronizacion con Sicar X: {e}")
+        capture_exception(e)

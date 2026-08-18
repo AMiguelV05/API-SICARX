@@ -33,10 +33,11 @@ class Settings(BaseSettings):
     ADMIN_DASHBOARD_BASE_URL: Optional[str] = None
     ADMIN_WEBHOOK_SECRET: Optional[str] = None
 
-    # Llave estatica para /v1/admin/* (ver security.py::validate_admin_key). Optional igual
-    # que el par de arriba, pero su ausencia hace que las rutas admin respondan 401 siempre,
-    # en vez de no-opear como ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET.
-    ADMIN_API_KEY: Optional[str] = None
+    # Firma los JWT de sesion de AdminUser (login admin, ver security.py::get_current_admin).
+    # Dominio de firma separado de CLIENT_JWT_SECRET a proposito - distinto radio de
+    # impacto si alguno de los dos se filtra. Reemplaza al antiguo ADMIN_API_KEY
+    # (X-Admin-Key compartido) - ver CLAUDE.md, "Admin RBAC y auditoria".
+    ADMIN_JWT_SECRET: str
 
     # Guias de envio con envia.com (ver shipping_service.py). Requeridas en AMBOS servicios
     # de Railway (api y worker) aunque solo api las use - pydantic-settings falla al importar

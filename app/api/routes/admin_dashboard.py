@@ -3,7 +3,7 @@ from datetime import date
 from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Query
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin
 from app.schemas.dashboard import (
     DashboardSummaryResponse,
     DashboardTopProductsResponse,
@@ -12,7 +12,7 @@ from app.schemas.dashboard import (
 from app.services import dashboard_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/dashboard", tags=["Admin - Dashboard"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/dashboard", tags=["Admin - Dashboard"], dependencies=[Depends(get_current_admin)])
 
 
 @router.get("/summary", response_model=DashboardSummaryResponse, summary="KPIs de ventas (revenue, ordenes, AOV) y serie diaria para un rango de fechas")

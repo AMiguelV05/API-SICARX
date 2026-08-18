@@ -2,13 +2,13 @@ import asyncio
 import logging
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin
 from app.schemas.bulk_import import BulkImportProductsResponse, BulkImportSheetResult, BulkImportRowError
 from app.services import bulk_import_service
 from app.services.bulk_import_service import MAX_FILE_SIZE_BYTES
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/bulk-import", tags=["Admin - Bulk Import"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/bulk-import", tags=["Admin - Bulk Import"], dependencies=[Depends(get_current_admin)])
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _READ_CHUNK_SIZE = 1024 * 1024  # 1 MB

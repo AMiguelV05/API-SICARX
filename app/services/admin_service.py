@@ -1,11 +1,14 @@
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from fastapi import BackgroundTasks, HTTPException, status
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.models.order import Order, SicarSyncOutbox
 from app.models.product import SyncStatus
+from app.models.refund import Refund
+from app.models.admin_user import AdminUser
 from app.schemas.admin import (
     AdminHealthResponse,
     SyncStatusResponse,
@@ -19,6 +22,7 @@ from app.services.sicar_auth import sicar_auth
 from app.services import shipping_service
 from app.services import order_status_notification_service
 from app.services import payment_service
+from app.services import audit_service
 from app.services.order_history_service import prepare_local_cancellation
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_display_service import resolve_client_name
@@ -227,9 +231,20 @@ async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str, bac
     try:
         if order.mp_payment_id:
             if order.mp_status == "approved":
-                await payment_service.refund_payment(order.mp_payment_id)
+                mp_refund = await payment_service.refund_payment(order.mp_payment_id)
                 order.mp_status = "refunded"
                 mp_resolved_here = True
+                # Misma razon que en routes/orders.py::cancel_order - Refund es la unica
+                # fuente de verdad de cuanto se ha reembolsado. issued_by_admin_id NULL
+                # aqui tambien: esto es el reembolso AUTOMATICO de la cancelacion, no un
+                # reembolso parcial explicito via POST .../refund (ver refund_order abajo).
+                db.add(Refund(
+                    order_id=order.id,
+                    amount=Decimal(str(mp_refund.get("amount", order.total))),
+                    reason="Cancelación de orden (admin)",
+                    mp_refund_id=str(mp_refund.get("id")) if mp_refund.get("id") is not None else None,
+                    issued_by_admin_id=None,
+                ))
             elif order.mp_status in ("pending", "in_process"):
                 await payment_service.cancel_payment(order.mp_payment_id)
                 order.mp_status = "cancelled"
@@ -257,6 +272,53 @@ async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str, bac
         logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     return order, was_accepted
+
+
+async def refund_order(db: AsyncSession, order_uuid: str, amount: float, reason: str, admin: AdminUser) -> Refund:
+    """Reembolso parcial (o total, si `amount == order.total - ya_reembolsado`) sobre una
+    orden `PAID`. No toca `Order.status` ni `Product.stock`/`reserved` - ver CLAUDE.md,
+    "Reembolsos parciales". `amount` ya viene validado > 0 por `RefundCreateRequest`."""
+    order = await db.scalar(select(Order).where(Order.uuid == order_uuid, Order.deleted_at.is_(None)))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+    if order.status != "PAID" or not order.mp_payment_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Solo se pueden reembolsar ordenes pagadas con un pago de Mercado Pago asociado.")
+
+    already_refunded = await db.scalar(select(func.coalesce(func.sum(Refund.amount), 0)).where(Refund.order_id == order.id))
+    amount_decimal = Decimal(str(amount))
+    remaining = order.total - Decimal(str(already_refunded))
+    if amount_decimal > remaining:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"El monto excede lo reembolsable ({remaining} restante de {order.total}).",
+        )
+
+    mp_refund = await payment_service.refund_payment(order.mp_payment_id, amount=amount_decimal)
+
+    refund = Refund(
+        order_id=order.id,
+        amount=amount_decimal,
+        reason=reason,
+        mp_refund_id=str(mp_refund.get("id")) if mp_refund.get("id") is not None else None,
+        issued_by_admin_id=admin.id,
+    )
+    db.add(refund)
+    await db.flush()
+    await db.refresh(refund)
+    logger.info(f"Reembolso de {amount_decimal} emitido sobre la orden {order.uuid} por {admin.email} (motivo: {reason!r}).")
+    return refund
+
+
+async def list_order_refunds(db: AsyncSession, order_uuid: str, limit: int, offset: int) -> tuple[int, list[Refund]]:
+    order = await db.scalar(select(Order.id).where(Order.uuid == order_uuid))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+
+    total = await db.scalar(select(func.count()).select_from(Refund).where(Refund.order_id == order))
+    result = await db.execute(
+        select(Refund).where(Refund.order_id == order).order_by(Refund.created_at.desc()).limit(limit).offset(offset)
+    )
+    return total or 0, list(result.scalars().all())
 
 
 async def advance_order_dispatch_status(db: AsyncSession, order_uuid: str, target_status: str) -> Order:

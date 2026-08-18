@@ -2,7 +2,7 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin, SuperAdminDep
 from app.schemas.vehicle import (
     VehicleType,
     VehiclePublic,
@@ -19,10 +19,10 @@ from app.schemas.vehicle import (
     AssignProductsToModelResponse,
 )
 from app.schemas.products import ProductAdminBasic
-from app.services import vehicle_service
+from app.services import vehicle_service, audit_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/vehicles", tags=["Admin - Vehicles"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/vehicles", tags=["Admin - Vehicles"], dependencies=[Depends(get_current_admin)])
 
 
 @router.post("", response_model=VehiclePublic, status_code=status.HTTP_201_CREATED, summary="Crear un fitment de vehiculo (make/model/year-range/engine)")
@@ -110,10 +110,13 @@ async def admin_update_vehicle(vehicle_uuid: str, db: DbDep, data: VehicleUpdate
 
 
 @router.delete("/{vehicle_uuid}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar un vehiculo (bloqueado si tiene productos asignados)")
-async def admin_delete_vehicle(vehicle_uuid: str, db: DbDep):
-    """Borrado real. `409` si tiene productos asignados en `product_vehicles` -
-    reasignarlos/quitarlos primero. Sin chequeo de "hijos" (no existen, tabla plana)."""
+async def admin_delete_vehicle(vehicle_uuid: str, db: DbDep, current: SuperAdminDep):
+    """Borrado real, solo super_admin. `409` si tiene productos asignados en
+    `product_vehicles` - reasignarlos/quitarlos primero. Sin chequeo de "hijos" (no
+    existen, tabla plana)."""
     await vehicle_service.delete_vehicle(db, vehicle_uuid)
+    await audit_service.log_action(db, current, "vehicle.delete", "vehicle", vehicle_uuid)
+    await db.commit()
 
 
 @router.put("/{vehicle_uuid}/products", response_model=ReplaceVehicleProductsResponse, summary="Reemplazar el conjunto completo de productos asignados a un vehiculo")

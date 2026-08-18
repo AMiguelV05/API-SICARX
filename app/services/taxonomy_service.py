@@ -155,7 +155,7 @@ async def export_categories_csv(db: AsyncSession, category_uuid: str | None = No
     return buffer.getvalue().encode("utf-8-sig")
 
 
-# Desde aqui: muta categories/product_categories, solo llamado por admin_categories.py (validate_admin_key).
+# Desde aqui: muta categories/product_categories, solo llamado por admin_categories.py (get_current_admin).
 
 def _slugify(name: str) -> str:
     """Espeja la logica de slugify de la migracion 5cbd5e4aa1be (no la importa - las migraciones son historia congelada)."""

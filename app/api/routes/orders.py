@@ -8,6 +8,7 @@ from app.core.database import DbDep
 from app.core.security import validate_api_key, OptionalClientHeaderDep
 from app.core.rate_limit import limiter
 from app.models.order import Order
+from app.models.refund import Refund
 from app.services.order_service import validate_cart_items, build_order_payload, compute_subtotal, _to_decimal
 from app.services.product_stock_service import apply_reserved_deltas
 from app.services.order_history_service import create_local_order, get_order_for_action, finalize_order_payment, prepare_local_cancellation, lock_order_for_payment
@@ -440,9 +441,21 @@ async def cancel_order(
     try:
         if local_order.mp_payment_id:
             if local_order.mp_status == "approved":
-                await payment_service.refund_payment(local_order.mp_payment_id)
+                mp_refund = await payment_service.refund_payment(local_order.mp_payment_id)
                 local_order.mp_status = "refunded"
                 mp_resolved_here = True
+                # Refund es la fuente unica de verdad de "cuanto se ha reembolsado" (ver
+                # CLAUDE.md, "Reembolsos parciales") - tambien se registra aqui el
+                # reembolso automatico de una cancelacion, no solo los parciales via
+                # /admin. issued_by_admin_id NULL: cancelacion iniciada por el propio
+                # cliente/invitado, sin AdminUser involucrado.
+                db.add(Refund(
+                    order_id=local_order.id,
+                    amount=Decimal(str(mp_refund.get("amount", local_order.total))),
+                    reason="Cancelación de orden",
+                    mp_refund_id=str(mp_refund.get("id")) if mp_refund.get("id") is not None else None,
+                    issued_by_admin_id=None,
+                ))
             elif local_order.mp_status in ("pending", "in_process"):
                 await payment_service.cancel_payment(local_order.mp_payment_id)
                 local_order.mp_status = "cancelled"

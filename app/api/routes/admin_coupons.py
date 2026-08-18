@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin, CurrentAdminDep, SuperAdminDep
 from app.schemas.coupons import (
     CouponAdminPublic,
     CouponCreateRequest,
@@ -29,18 +29,20 @@ from app.schemas.coupons import (
 )
 from app.schemas.taxonomy import CategoryAdminPublic
 from app.schemas.products import ProductAdminBasic
-from app.services import coupon_service
+from app.services import coupon_service, audit_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/coupons", tags=["Admin - Coupons"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/coupons", tags=["Admin - Coupons"], dependencies=[Depends(get_current_admin)])
 
 
 @router.post("", response_model=CouponAdminPublic, status_code=status.HTTP_201_CREATED, summary="Crear un cupón")
-async def admin_create_coupon(db: DbDep, data: CouponCreateRequest = Body()):
+async def admin_create_coupon(db: DbDep, current: CurrentAdminDep, data: CouponCreateRequest = Body()):
     """Crea un cupón. `409` si ya existe uno con el mismo código (normalizado a
     mayúsculas). `scopeType=CATEGORY`/`PRODUCT` empieza sin categorías/productos asignados
     - usar `PUT .../categories` o `.../products` para poblarlos."""
     coupon = await coupon_service.create_coupon(db, data.model_dump())
+    await audit_service.log_action(db, current, "coupon.create", "coupon", coupon.uuid, {"code": coupon.code})
+    await db.commit()
     return CouponAdminPublic.model_validate(coupon)
 
 
@@ -63,19 +65,23 @@ async def admin_get_coupon(coupon_uuid: str, db: DbDep):
 
 
 @router.patch("/{coupon_uuid}", response_model=CouponAdminPublic, summary="Actualización parcial de un cupón")
-async def admin_update_coupon(coupon_uuid: str, db: DbDep, data: CouponUpdateRequest = Body()):
+async def admin_update_coupon(coupon_uuid: str, db: DbDep, current: CurrentAdminDep, data: CouponUpdateRequest = Body()):
     """Actualización parcial (`exclude_unset`, mismo patrón que categorías/vehículos) - solo
     los campos presentes en el body se tocan."""
     coupon = await coupon_service.update_coupon(db, coupon_uuid, data.model_dump(exclude_unset=True))
+    await audit_service.log_action(db, current, "coupon.update", "coupon", coupon.uuid, data.model_dump(exclude_unset=True))
+    await db.commit()
     return CouponAdminPublic.model_validate(coupon)
 
 
 @router.delete("/{coupon_uuid}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar un cupón (bloqueado si ya tiene usos registrados)")
-async def admin_delete_coupon(coupon_uuid: str, db: DbDep):
-    """Borrado real. `409` si el cupón ya tiene algún uso registrado (cualquier status) -
-    usar `PATCH {isActive: false}` para retirarlo sin perder el historial de órdenes que lo
-    usaron."""
+async def admin_delete_coupon(coupon_uuid: str, db: DbDep, current: SuperAdminDep):
+    """Borrado real, solo super_admin. `409` si el cupón ya tiene algún uso registrado
+    (cualquier status) - usar `PATCH {isActive: false}` para retirarlo sin perder el
+    historial de órdenes que lo usaron."""
     await coupon_service.delete_coupon(db, coupon_uuid)
+    await audit_service.log_action(db, current, "coupon.delete", "coupon", coupon_uuid)
+    await db.commit()
 
 
 @router.put("/{coupon_uuid}/categories", response_model=ReplaceCouponCategoriesResponse, summary="Reemplazar el conjunto completo de categorías del alcance del cupón")

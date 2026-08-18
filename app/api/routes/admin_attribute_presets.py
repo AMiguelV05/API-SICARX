@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Body, Query, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin
 from app.schemas.attribute import (
     AttributePresetPublic,
     AttributePresetCreateRequest,
@@ -17,7 +17,7 @@ from app.schemas.attribute import (
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/attribute-presets", tags=["Admin - Attribute Presets"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/attribute-presets", tags=["Admin - Attribute Presets"], dependencies=[Depends(get_current_admin)])
 
 
 @router.post("", response_model=AttributePresetPublic, status_code=status.HTTP_201_CREATED, summary="Crear un preset de atributos")

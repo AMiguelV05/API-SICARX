@@ -2,7 +2,7 @@ import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Body, Query, Response, status
 from app.core.database import DbDep
-from app.core.security import validate_admin_key
+from app.core.security import get_current_admin, SuperAdminDep
 from app.schemas.taxonomy import (
     CategoryAdminPublic,
     CategoryCreateRequest,
@@ -14,10 +14,10 @@ from app.schemas.taxonomy import (
     CategoryProductsResponse,
 )
 from app.schemas.products import ProductAdminBasic
-from app.services import taxonomy_service
+from app.services import taxonomy_service, audit_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/admin/categories", tags=["Admin - Taxonomy"], dependencies=[Depends(validate_admin_key)])
+router = APIRouter(prefix="/admin/categories", tags=["Admin - Taxonomy"], dependencies=[Depends(get_current_admin)])
 
 
 @router.post("", response_model=CategoryAdminPublic, status_code=status.HTTP_201_CREATED, summary="Crear un nodo de categoria")
@@ -68,11 +68,13 @@ async def admin_update_category(category_uuid: str, db: DbDep, data: CategoryUpd
 
 
 @router.delete("/{category_uuid}", status_code=status.HTTP_204_NO_CONTENT, summary="Eliminar un nodo de categoria (bloqueado si tiene subcategorias o productos asignados)")
-async def admin_delete_category(category_uuid: str, db: DbDep):
-    """Borrado real (no soft-delete). `409` si el nodo todavia tiene subcategorias o
-    productos asignados en `product_categories` - hay que reasignarlos/quitarlos primero,
-    deliberadamente sin cascada ni reparenteo automatico."""
+async def admin_delete_category(category_uuid: str, db: DbDep, current: SuperAdminDep):
+    """Borrado real (no soft-delete), solo super_admin. `409` si el nodo todavia tiene
+    subcategorias o productos asignados en `product_categories` - hay que
+    reasignarlos/quitarlos primero, deliberadamente sin cascada ni reparenteo automatico."""
     await taxonomy_service.delete_category(db, category_uuid)
+    await audit_service.log_action(db, current, "category.delete", "category", category_uuid)
+    await db.commit()
 
 
 @router.put("/{category_uuid}/products", response_model=ReplaceCategoryProductsResponse, summary="Reemplazar el conjunto completo de productos asignados a una categoria")

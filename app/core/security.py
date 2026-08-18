@@ -2,8 +2,6 @@ import asyncio
 import hashlib
 import logging
 import secrets
-import time
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 import bcrypt
@@ -14,8 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.rate_limit import get_client_ip
 from app.models.client import ClientAccount
+from app.models.admin_user import AdminUser
 
 logger = logging.getLogger(__name__)
 # Definimos que buscaremos la clave en la cabecera 'x-api-key'
@@ -40,43 +38,6 @@ async def validate_api_key(api_key: str = Security(api_key_header)):
         )
 
     return api_key
-
-# Throttle en memoria para /v1/admin/* por IP, independiente del limiter de slowapi -
-# decorar cada ruta admin individualmente seria un diff grande para una sola dependencia.
-# Mismo caveat que ese limiter: solo valido mientras `api` corra como una sola instancia.
-_ADMIN_KEY_WINDOW_SECONDS = 60
-_ADMIN_KEY_MAX_ATTEMPTS = 30
-_admin_key_attempts: dict[str, list[float]] = defaultdict(list)
-
-def _admin_key_rate_limited(client_ip: str) -> bool:
-    now = time.monotonic()
-    window_start = now - _ADMIN_KEY_WINDOW_SECONDS
-    attempts = [t for t in _admin_key_attempts[client_ip] if t > window_start]
-    attempts.append(now)
-    _admin_key_attempts[client_ip] = attempts
-    return len(attempts) > _ADMIN_KEY_MAX_ATTEMPTS
-
-async def validate_admin_key(request: Request, x_admin_key: str = Header(None, alias="X-Admin-Key")):
-    """
-    Dependencia para el router /v1/admin/*. `ADMIN_API_KEY` es Optional (ver config.py)
-    - mientras no se configure, rechaza toda peticion sin importar la cabecera. Tambien
-    throttlea por IP (ver `_admin_key_rate_limited`), a diferencia de x-api-key.
-    """
-    client_ip = get_client_ip(request)
-    if _admin_key_rate_limited(client_ip):
-        logger.error("Acceso denegado a ruta admin: demasiados intentos desde %s.", client_ip)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Demasiados intentos, intenta de nuevo en un minuto."
-        )
-
-    if not settings.ADMIN_API_KEY or not x_admin_key or not secrets.compare_digest(x_admin_key, settings.ADMIN_API_KEY):
-        logger.error("Acceso denegado a ruta admin: X-Admin-Key invalida, ausente, o ADMIN_API_KEY sin configurar.")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Acceso denegado."
-        )
-    return x_admin_key
 
 def _hash_password_sync(password: str) -> str:
     """Genera el hash bcrypt de una contraseña en texto plano. Sincrona a proposito: solo
@@ -237,3 +198,50 @@ async def get_optional_client_header(
 CurrentClientDep = Annotated[ClientAccount, Depends(get_current_client)]
 CurrentClientHeaderDep = Annotated[ClientAccount, Depends(get_current_client_header)]
 OptionalClientHeaderDep = Annotated[ClientAccount | None, Depends(get_optional_client_header)]
+
+# --- Autenticacion de AdminUser (/v1/admin/*) ---
+# Reemplaza el antiguo X-Admin-Key compartido (validate_admin_key) - ver CLAUDE.md,
+# "Admin RBAC y auditoria". Dominio de firma propio (ADMIN_JWT_SECRET), separado de
+# CLIENT_JWT_SECRET.
+
+ADMIN_JWT_ALGORITHM = "HS256"
+ADMIN_JWT_EXPIRE_MINUTES = 60 * 12  # 12 horas - sesion de staff, no de comprador
+
+def create_admin_token(admin_uuid: str) -> str:
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=ADMIN_JWT_EXPIRE_MINUTES)
+    payload = {"sub": admin_uuid, "exp": expire, "iat": now}
+    return jwt.encode(payload, settings.ADMIN_JWT_SECRET, algorithm=ADMIN_JWT_ALGORITHM)
+
+async def get_current_admin(
+    authorization: str = Header(None, alias="Authorization", description="Token JWT de AdminUser"),
+    db: AsyncSession = Depends(get_db),
+) -> AdminUser:
+    """Dependencia de router para todo /v1/admin/* (reemplaza validate_admin_key).
+    Decodifica el JWT emitido por create_admin_token y carga el AdminUser."""
+    if not authorization:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No se proporcionó el token de administrador.")
+
+    clean_token = authorization.replace("Bearer ", "").replace("bearer ", "").strip()
+    try:
+        payload = jwt.decode(clean_token, settings.ADMIN_JWT_SECRET, algorithms=[ADMIN_JWT_ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="La sesión expiró, inicia sesión nuevamente.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido.")
+
+    admin = await db.scalar(select(AdminUser).where(AdminUser.uuid == payload.get("sub")))
+    if not admin or not admin.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Cuenta de administrador no encontrada o desactivada.")
+    return admin
+
+async def require_super_admin(admin: AdminUser = Depends(get_current_admin)) -> AdminUser:
+    """Envuelve get_current_admin: 403 (autenticado pero sin permiso, no 401) si el rol
+    no es super_admin. Usado en rutas destructivas/sensibles (gestion de AdminUser,
+    DELETE de categorias/vehiculos/cupones, emision de reembolsos)."""
+    if admin.role != "super_admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Esta acción requiere permisos de super administrador.")
+    return admin
+
+CurrentAdminDep = Annotated[AdminUser, Depends(get_current_admin)]
+SuperAdminDep = Annotated[AdminUser, Depends(require_super_admin)]
