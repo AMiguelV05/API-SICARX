@@ -16,6 +16,11 @@ from sqlalchemy import select
 from app.core.database import AsyncSessionLocal
 from app.core.security import hash_password
 from app.models.admin_user import AdminUser
+# Necesario para que SQLAlchemy resuelva ClientAccount.orders (relationship por string
+# "Order", ver app/models/client.py) - app.core.security importa ClientAccount, y sin este
+# import el primer query de esta sesion falla al configurar mappers ("failed to locate a
+# name ('Order')"). Mismo fix ya aplicado en app/worker/sicar_sync_worker.py.
+from app.models.order import Order  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("create_admin_user")
