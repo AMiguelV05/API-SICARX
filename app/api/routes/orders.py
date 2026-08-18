@@ -10,7 +10,7 @@ from app.core.rate_limit import limiter
 from app.models.order import Order
 from app.services.order_service import validate_cart_items, build_order_payload, compute_subtotal, _to_decimal
 from app.services.product_stock_service import apply_reserved_deltas
-from app.services.order_history_service import create_local_order, get_order_for_action, finalize_order_payment, prepare_local_cancellation
+from app.services.order_history_service import create_local_order, get_order_for_action, finalize_order_payment, prepare_local_cancellation, lock_order_for_payment
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
 from app.services.address_service import get_owned_address
@@ -337,11 +337,17 @@ async def pay_order(
 
     Reintento seguro: si la orden ya esta `PAID` (p. ej. la respuesta del primer submit
     se perdio en la red pero el cobro si se aplico), se devuelve el mismo resultado en
-    vez de un 409 - no hay riesgo de doble cobro porque `payment_service.create_payment`
-    ya usa `order.uuid` como `X-Idempotency-Key` de Mercado Pago. `CANCELLED` si sigue
-    siendo 409: no es un estado del que un reintento deba "recuperarse".
+    vez de un 409. `payment_service.create_payment` ya NO usa `order.uuid` como
+    `X-Idempotency-Key` (usa un uuid4 fresco por llamada - ver su propio docstring), asi
+    que la seguridad ante dos `/pay` concurrentes para la misma orden viene de
+    `lock_order_for_payment` abajo: relockea la fila ANTES de llamar a Mercado Pago y el
+    status se re-chequea ya con el lock tomado, asi un segundo intento concurrente queda
+    bloqueado hasta que el primero termine (commit o rollback) y entonces ve el status
+    ya resuelto en vez de cobrar de nuevo. `CANCELLED` si sigue siendo 409: no es un
+    estado del que un reintento deba "recuperarse".
     """
     local_order = await get_order_for_action(db, client, order_id)
+    local_order = await lock_order_for_payment(db, local_order)
 
     if local_order.status == "PAID":
         return OrderPayResponse(

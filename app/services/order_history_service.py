@@ -224,6 +224,30 @@ async def prepare_local_cancellation(
 
     return order
 
+async def lock_order_for_payment(db: AsyncSession, order: Order) -> Order:
+    """Relockea la orden ANTES de llamar a Mercado Pago, para cerrar la ventana de doble
+    cobro: payment_service.create_payment ya no usa order.uuid como X-Idempotency-Key (ver
+    su propio docstring - MP repetia errores viejos para siempre con una key fija), asi que
+    ya no hay nada del lado de Mercado Pago que deduplique dos /pay concurrentes para la
+    misma orden. Mismo patron SELECT...FOR UPDATE + populate_existing que
+    prepare_local_cancellation/finalize_order_payment - reentrante con ambas (misma
+    transaccion, Postgres permite re-adquirir FOR UPDATE sobre la misma fila dentro de la
+    misma transaccion). El lock se sostiene durante toda la llamada HTTP a Mercado Pago en
+    el llamador, hasta el commit de finalize_order_payment (o el rollback en el except) -
+    un segundo /pay concurrente para la misma orden queda bloqueado en este mismo SELECT
+    hasta entonces, y al desbloquear ve el status ya actualizado (PAID/CANCELLED) antes de
+    decidir si debe cobrar de nuevo.
+
+    NO hace commit - el llamador es responsable de un unico commit (via
+    finalize_order_payment)."""
+    locked_result = await db.execute(
+        select(Order)
+        .where(Order.id == order.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return locked_result.scalar_one()
+
 async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dict, background_tasks: BackgroundTasks) -> Order:
     """Aplica el resultado de un pago de Mercado Pago a la orden local - punto unico
     compartido por `/orders/{id}/pay` (submit sincrono) y el webhook (unico camino para
