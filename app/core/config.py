@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     CLIENT_JWT_EXPIRE_MINUTES: int = 10080  # 7 dias
     ENVIRONMENT: str = "production"  # "development" habilita cookies validas sobre HTTP local
 
+    # Minutos que una orden TO_PAY sin ningun intento de pago (mp_payment_id IS NULL) puede
+    # quedar reservando stock localmente antes de que abandoned_order_worker.py la cancele automaticamente
+    ABANDONED_ORDER_TIMEOUT_MINUTES: int = 30
+
     MP_ACCESS_TOKEN: str
     MP_WEBHOOK_SECRET: str  # valida x-signature en las notificaciones entrantes
     FRONTEND_BASE_URL: str  # dominio real del frontend

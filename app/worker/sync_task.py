@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 from app.core.sicar_headers import bearer_json_headers
 from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
+from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 handler = RotatingFileHandler(
@@ -285,6 +286,9 @@ async def main():
     scheduler.add_job(scheduled_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
     # Drena sicar_sync_outbox; cadencia mas corta que el sync de catalogo por ser sensible al tiempo.
     scheduler.add_job(scheduled_sicar_sync_job, 'interval', minutes=1, max_instances=1, coalesce=True, next_run_time=datetime.now())
+    # Cancela ordenes TO_PAY abandonadas (sin ningun intento de pago) y libera su reserva de
+    # stock - 5 min es de sobra de granularidad contra un timeout de 30 min por defecto.
+    scheduler.add_job(scheduled_abandoned_order_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
     scheduler.start()
 
     while True:

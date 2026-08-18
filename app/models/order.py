@@ -15,6 +15,12 @@ class Order(Base):
             "ix_orders_paid_created_at", "created_at",
             postgresql_where=text("status = 'PAID' AND deleted_at IS NULL"),
         ),
+        # Respalda abandoned_order_worker.py, que busca exactamente esta combinacion cada
+        # 5 minutos
+        Index(
+            "ix_orders_to_pay_abandoned_created_at", "created_at",
+            postgresql_where=text("status = 'TO_PAY' AND deleted_at IS NULL AND mp_payment_id IS NULL"),
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)
