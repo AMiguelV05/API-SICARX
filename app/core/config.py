@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     ADMIN_DASHBOARD_BASE_URL: Optional[str] = None
     ADMIN_WEBHOOK_SECRET: Optional[str] = None
 
+    # Reporte de errores via Sentry (ver error_tracking.py). Opcional, mismo trato que
+    # ADMIN_DASHBOARD_BASE_URL - sin DSN, capture_exception/capture_message siguen
+    # comportandose exactamente como antes (solo loggean), sin fallar al importar.
+    SENTRY_DSN: Optional[str] = None
+
     # Firma los JWT de sesion de AdminUser (login admin, ver security.py::get_current_admin).
     # Dominio de firma separado de CLIENT_JWT_SECRET a proposito - distinto radio de
     # impacto si alguno de los dos se filtra. Reemplaza al antiguo ADMIN_API_KEY

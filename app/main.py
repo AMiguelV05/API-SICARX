@@ -10,8 +10,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from app.core.config import settings
 from app.core.rate_limit import limiter
-from app.core.error_tracking import capture_exception
+from app.core.error_tracking import capture_exception, init_error_tracking
 from app.api.v1_router import v1_router
+
+init_error_tracking("api")
 
 # Contextvar + logging.Filter para correlacionar todas las lineas de log de una misma
 # peticion en app.log (el worker tiene su propio sync.log aparte, no cubierto por esto -
@@ -38,11 +40,19 @@ logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler
 
 logger = logging.getLogger(__name__)
 
+# /docs, /redoc y /openapi.json solo se exponen fuera de produccion - ENVIRONMENT no esta
+# seteado en ningun .env hoy (ni local ni Railway), asi que el default "production" ya los
+# deja apagados salvo que se ponga ENVIRONMENT=development explicitamente.
+_docs_enabled = settings.ENVIRONMENT != "production"
+
 app = FastAPI(
     title="API Integración Sicar X",
     description="Capa intermedia para el e-commerce",
     contact={"name": "Ferretería Charly"},
-    version="1.0.0"
+    version="1.0.0",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 app.state.limiter = limiter

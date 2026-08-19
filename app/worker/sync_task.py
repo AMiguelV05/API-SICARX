@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 from app.core.sicar_headers import bearer_json_headers
-from app.core.error_tracking import capture_exception
+from app.core.error_tracking import capture_exception, init_error_tracking
 from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
 from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -47,6 +47,8 @@ logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
+
+init_error_tracking("worker")
 
 SICAR_LIST_URL = "https://api.sicarx.com/product/v1/product/list"
 PRICE_LIST_ID = settings.SICAR_PRICE_LIST_ID
