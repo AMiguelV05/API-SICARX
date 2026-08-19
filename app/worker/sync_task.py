@@ -3,7 +3,7 @@ import asyncio
 import logging
 from decimal import Decimal
 from logging.handlers import RotatingFileHandler
-from sqlalchemy import update, select
+from sqlalchemy import update, select, and_, not_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
@@ -208,11 +208,18 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         # Alerta de deriva: Product.reserved > Product.stock significa que el stock real de
         # Sicar X bajo por una razon ajena a este backend (venta en tienda, otro canal)
         # mientras habia unidades reservadas localmente - ver Product.available_stock y
-        # admin_notification_service.notify_admin_stock_drift.
+        # admin_notification_service.notify_admin_stock_drift. Se excluye el caso
+        # stock < 0 y reserved <= 0: ahi no hay ninguna reserva local en juego, es un
+        # stock negativo que ya viene asi de Sicar X, no una deriva causada por reservas.
         try:
             drift_result = await db.execute(
                 select(Product.sicar_uuid, Product.sku, Product.name, Product.stock, Product.reserved)
-                .where(Product.reserved > Product.stock, Product.is_deleted == False, Product.is_active == True)
+                .where(
+                    Product.reserved > Product.stock,
+                    Product.is_deleted == False,
+                    Product.is_active == True,
+                    not_(and_(Product.stock < 0, Product.reserved <= 0)),
+                )
             )
             drift_rows = drift_result.all()
             if drift_rows:
