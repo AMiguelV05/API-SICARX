@@ -358,6 +358,53 @@ Identity resolution (`routes/cart.py`'s `get_cart_context`, used by every route 
 
 **Login/register also merge a cart inline**, via a second, tolerant entry point (`try_merge_cart_token`, not the strict `/merge` route): `POST /auth/register`, `/auth/login`, and `/auth/google` all accept an optional `cartToken` in the request body and merge it into the newly authenticated account within the same call (`routes/auth.py`'s shared `_build_auth_response`), returning the resulting cart inline in `ClientAuthResponse` so the frontend doesn't need a separate `GET /cart` just to hydrate its UI post-login. Unlike `/cart/merge`, an absent or already-stale `cartToken` here is **silently ignored** (just logged) rather than a `404` — the frontend can't know whether a locally-stored token is still valid, and login/registration shouldn't become fragile over stale cart state.
 
+### Wishlist / favoritos (`app/models/wishlist.py`, `app/services/wishlist_service.py`) (2026-08-19)
+
+Account-only (no anonymous/guest wishlist, unlike Cart) — a saved-for-later product list only
+makes sense as something that persists across visits/devices, which requires an account
+anyway; matches `ClientAddress`/`ProductReview`'s pattern (`CurrentClientDep`), not Cart's
+anonymous-cookie-plus-merge complexity. `WishlistCollection`/`WishlistItem` are one unified
+mechanism, not two parallel features: every client has exactly one collection flagged
+`is_default=true` (named "Favoritos"), enforced unique at the DB level via a partial unique
+index (`ix_wishlist_collections_one_default`, same pattern as `ix_client_addresses_one_default`)
+— this is the fixed target of the heart-icon shortcut routes below — plus any number of
+additional named collections the client creates explicitly. `WishlistItem` is a pure toggle
+table (no own `uuid`, addressed via `collection_id` + `product_id`, same shape as
+`ReviewHelpfulVote`) with `UniqueConstraint(collection_id, product_id)` — the same product can
+be saved in several different collections of the same client, just not twice in the same one.
+`product_id` FKs to `Product.id` with no `ondelete` (same reasoning as `ProductReview.product_id`
+— products are never hard-deleted, only `is_deleted=True` flagged, so no cascade is needed).
+
+The default collection is created **lazily**, on the first `PUT /wishlist/favorites/{uuid}` —
+same silent-mint-on-first-use idiom as Cart's anonymous cart — not eagerly on registration.
+`GET /wishlist/favorites` never creates it (same "a GET never creates a row" idiom as
+`GET /cart`) — no default collection yet just returns an empty list.
+
+`wishlist_service.list_items` mirrors `cart_service._enrich`'s live-enrichment philosophy:
+a saved product going `is_deleted`/inactive doesn't delete the `WishlistItem` row (the client
+explicitly chose to save it), the response just marks that line `available: false` with no
+`product` detail, same as an unavailable cart line. `add_item`/`remove_item` are both
+idempotent (`INSERT ... ON CONFLICT DO NOTHING` / delete-if-exists) — saving an already-saved
+product, or removing an already-absent one, is a `200`/`204` no-op, never an error, same
+"absence isn't an error" idiom used throughout Cart/coupons.
+
+Deliberately out of scope for this pass (v1 is pure save/organize/remove): no back-in-stock
+or price-drop notifications tied to wishlisted products — a legitimately separate feature this
+schema doesn't preclude adding later; no "is this product favorited" per-product check route —
+the frontend fetches the (bounded, cheap) favorites list once and checks client-side, same
+reasoning `GET /v1/vehicles/{uuid}` was never built; no combined "move to cart" action — the
+frontend already has `PATCH /cart/items` + `DELETE .../items/{productUuid}` to do this itself
+with two existing calls.
+
+Endpoints (all under `/v1/wishlist`, `client account (X-Client-Token or Authorization,
+required)`, `x-api-key` like every non-admin route): `GET/POST /collections`, `PATCH/DELETE
+/collections/{uuid}` (`404` if not owned by the caller; `DELETE` is `409` on the default
+collection — it can't be removed), `GET/POST /collections/{uuid}/items`, `DELETE
+/collections/{uuid}/items/{productUuid}`, plus the heart-icon shortcuts `GET /favorites`,
+`PUT /favorites/{productUuid}`, `DELETE /favorites/{productUuid}` — thin wrappers that resolve
+(or lazily create, for `PUT`) the default collection and delegate to the exact same service
+functions as the named-collection routes, no duplicated logic.
+
 ### Cupones de descuento (`app/models/coupon.py`, `app/services/coupon_service.py`) (2026-08-10)
 
 `Coupon` supports three discount shapes (`discount_type`: `PERCENTAGE` with an optional `max_discount_amount` cap, or `FIXED_AMOUNT`) applied over one of three scopes (`scope_type`: `ORDER` — the whole cart, `CATEGORY` — only lines whose product is under one of `coupon_categories`' assigned categories (descendant-inclusive, via the same `taxonomy_service.get_descendant_uuids` CTE `/catalog`'s `taxonomyUuid` filter already uses), or `PRODUCT` — only lines in `coupon_products`), plus four independent usage-limit mechanisms (`max_total_uses`, `max_uses_per_client`, `first_purchase_only`, and `coupon_assigned_clients` — a non-empty eligibility list makes an otherwise-public code client-restricted), a validity window (`starts_at`/`ends_at`), and `min_order_amount`. Admin CRUD lives at `/v1/admin/coupons/*` (`app/api/routes/admin_coupons.py`), same shape as categories/vehicles — `PUT .../categories`/`.../products`/`.../clients` each replace their full assigned set, not incremental.
@@ -440,6 +487,12 @@ All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted
 | `DELETE /reviews/{uuid}` | client account, must own | Delete own review. `204`. |
 | `PUT`/`DELETE /reviews/{uuid}/helpful` | client account (required `Authorization` header) | Idempotent mark/unmark of a "helpful" vote — one per client per review. |
 | `GET /auth/me/reviews` | client account (required `Authorization` header) | Own review history, paginated, most recent first — includes reviews an admin has hidden (only the author still sees those here). |
+| `GET`/`POST /wishlist/collections` | client account (`X-Client-Token` or `Authorization`, required) | List/create named wishlist collections. |
+| `PATCH`/`DELETE /wishlist/collections/{uuid}` | client account, must own | Rename/delete a collection. `404` if not owned, `409` deleting the default "Favoritos" collection. |
+| `GET`/`POST /wishlist/collections/{uuid}/items` | client account, must own | List (paginated, enriched with `ProductBasic`) / idempotently add a product to a collection. |
+| `DELETE /wishlist/collections/{uuid}/items/{productUuid}` | client account, must own | Idempotently remove a product from a collection. |
+| `GET /wishlist/favorites` | client account (required) | Same as the collection-items list, for the default "Favoritos" collection — never creates it. |
+| `PUT`/`DELETE /wishlist/favorites/{productUuid}` | client account (required) | Heart-icon shortcut: idempotent add/remove on the default collection, auto-created on first `PUT`. |
 
 ### Admin API (`/v1/admin/*`) — new, internal-only, not part of the frontend contract
 

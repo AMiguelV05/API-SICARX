@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import products, orders, taxonomy, search, vehicles, auth, addresses, client_orders, cart, payments, reviews, admin, admin_categories, admin_vehicles, admin_bulk_import, admin_attributes, admin_attribute_presets, admin_variant_groups, admin_products, admin_dashboard, admin_reviews, admin_coupons, admin_auth, admin_admins, admin_audit
+from app.api.routes import products, orders, taxonomy, search, vehicles, auth, addresses, client_orders, cart, payments, reviews, wishlist, admin, admin_categories, admin_vehicles, admin_bulk_import, admin_attributes, admin_attribute_presets, admin_variant_groups, admin_products, admin_dashboard, admin_reviews, admin_coupons, admin_auth, admin_admins, admin_audit
 
 # Agrupa toda la API bajo /v1. Cada sub-router ya declara su propio tags=/dependencies=
 # en su archivo -- no se repiten aqui para evitar que las listas de tags se dupliquen
@@ -17,6 +17,7 @@ v1_router.include_router(client_orders.router)
 v1_router.include_router(cart.router)
 v1_router.include_router(payments.router)
 v1_router.include_router(reviews.router)
+v1_router.include_router(wishlist.router)
 # /admin/* - interno, no forma parte del contrato del frontend. Gateado por
 # get_current_admin (JWT de AdminUser, Authorization: Bearer) via router-level
 # dependencies=[Depends(get_current_admin)] en cada sub-router, no validate_api_key -
