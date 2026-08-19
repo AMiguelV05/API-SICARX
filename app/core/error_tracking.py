@@ -14,7 +14,12 @@ def init_error_tracking(service_name: str) -> None:
     capture_message siguen comportandose exactamente igual que antes (solo loggean)."""
     if not settings.SENTRY_DSN:
         return
-    sentry_sdk.init(dsn=settings.SENTRY_DSN, environment=settings.ENVIRONMENT)
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.ENVIRONMENT,
+        default_integrations=False,
+        integrations=[],
+    )
     sentry_sdk.set_tag("service", service_name)
 
 
