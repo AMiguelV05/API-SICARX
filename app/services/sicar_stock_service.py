@@ -2,6 +2,7 @@ import httpx
 import logging
 from decimal import Decimal
 from app.services.sicar_auth import sicar_auth
+from app.core.retry import request_with_backoff
 from app.core.sicar_headers import admin_app_headers
 from app.core.sicar_validation import is_safe_sicar_id
 from app.core.upstream_errors import raise_upstream_error
@@ -18,7 +19,10 @@ async def _read_current_stock(product_uuid: str, branch_id: int | None) -> Decim
         async with httpx.AsyncClient(timeout=STOCK_TIMEOUT) as client:
             return await client.get(f"{STOCK_URL}/{product_uuid}/all", headers=headers)
 
-    response = await sicar_auth.request_with_retry(attempt)
+    async def call_with_auth():
+        return await sicar_auth.request_with_retry(attempt)
+
+    response = await request_with_backoff(call_with_auth, context=f"Sicar X stock read {product_uuid}")
     if response.status_code != 200:
         raise_upstream_error(
             response,
@@ -49,7 +53,10 @@ async def _patch_stock(product_uuid: str, current_stock: Decimal, new_stock: Dec
         async with httpx.AsyncClient(timeout=STOCK_TIMEOUT) as client:
             return await client.patch(f"{STOCK_URL}/{product_uuid}", json=payload, headers=headers)
 
-    response = await sicar_auth.request_with_retry(attempt)
+    async def call_with_auth():
+        return await sicar_auth.request_with_retry(attempt)
+
+    response = await request_with_backoff(call_with_auth, context=f"Sicar X stock patch {product_uuid}")
     if response.status_code != 200:
         raise_upstream_error(
             response,

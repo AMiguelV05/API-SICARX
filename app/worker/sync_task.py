@@ -112,7 +112,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                         except Exception as e:
                             logger.exception(e)
                         retry_count += 1
-                        
+                        await asyncio.sleep(2 ** retry_count)
+
                     else:
                         logger.warning(f"Sicar fallo con {response.status_code} en bloque {offset}. Reintento {retry_count + 1}/{MAX_RETRIES}")
                         logger.debug(f"Respuesta de Sicar: {response.text}")

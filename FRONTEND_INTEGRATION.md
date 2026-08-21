@@ -1535,6 +1535,138 @@ una lista mixta de productos). A diferencia de la vista pública, **sí incluye*
 reseñas que un admin haya ocultado (`isHidden: true`) — solo el propio autor las sigue
 viendo aquí.
 
+## Wishlist / lista de favoritos (nuevo, 2026-08-19)
+
+Solo para cuentas de cliente — **no existe wishlist anónima/de invitado**, a diferencia del
+carrito. Todas las rutas de esta sección van bajo `/v1/wishlist`, requieren `x-api-key` y
+requieren `Authorization: <token>` (la misma cabecera de `/v1/auth/me` y de reseñas —
+**no** `X-Client-Token`; esa cabecera es exclusiva de `/v1/orders`/`/v1/orders/*/cancel`,
+ver "Dos capas de autenticación" arriba). Un `Authorization` ausente o inválido responde
+`401` en todas ellas.
+
+Cada cuenta tiene una lista fija llamada **"Favoritos"** (`isDefault: true`), pensada como
+el destino del típico ícono de corazón en una tarjeta de producto, más cualquier cantidad
+de listas adicionales con nombre propio que el cliente cree explícitamente (p. ej. para
+armar una lista de regalo). El mismo producto puede estar guardado en varias listas a la
+vez, pero no dos veces en la misma lista — guardarlo de nuevo no falla, simplemente no
+hace nada (idempotente), igual que quitar un producto que ya no estaba.
+
+La lista "Favoritos" **no existe hasta el primer guardado** — `GET /v1/wishlist/favorites`
+antes de guardar algo responde una lista vacía (`{"total": 0, "docs": []}`), nunca `404`;
+se crea sola en el primer `PUT /v1/wishlist/favorites/{productUuid}`. No hace falta
+crearla manualmente ni comprobar que exista antes de usarla.
+
+### Atajo de corazón — `GET`/`PUT`/`DELETE /v1/wishlist/favorites{/productUuid}`
+
+Pensado para un ícono de corazón en una card de producto, sin que el frontend necesite
+conocer el `uuid` de ninguna lista.
+
+```http
+PUT /v1/wishlist/favorites/3Cny4OOxdX1GoSzL9rEsTZNL7un
+x-api-key: <api-key>
+Authorization: <token>
+```
+
+Responde `200` vacío. `DELETE` sobre la misma ruta responde `204` vacío. Ambos son
+idempotentes: marcar dos veces, o desmarcar algo que nunca se guardó, no son errores.
+`404` si `productUuid` no corresponde a un producto existente/disponible (eliminado o
+inactivo en el catálogo).
+
+```http
+GET /v1/wishlist/favorites?limit=60&offset=0
+x-api-key: <api-key>
+Authorization: <token>
+```
+
+```json
+{
+  "total": 2,
+  "docs": [
+    {
+      "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "addedAt": "2026-08-19T10:12:04.501Z",
+      "available": true,
+      "product": { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "...", "name": "...", "price": 149.0, "stock": 12, "...": "..." }
+    },
+    {
+      "productUuid": "9Zab2LLpqM4RtVxK7cWnUABw88f",
+      "addedAt": "2026-08-15T08:40:11.002Z",
+      "available": false,
+      "product": null
+    }
+  ]
+}
+```
+
+`limit`/`offset` funcionan igual que en `POST /v1/products` (`limit` 1-200, default 60).
+`product` trae el mismo shape que `ProductBasic` en `POST /v1/products`/`POST /v1/search`
+(ver referencia arriba) — úsalo para pintar la card directamente sin una llamada aparte.
+**`available: false` no significa que la fila se borró** — el producto fue desactivado o
+eliminado del catálogo desde que se guardó, pero la wishlist lo conserva (fue una acción
+explícita del cliente); en ese caso `product` viene `null` y conviene mostrar la línea
+como "ya no disponible" en vez de ocultarla silenciosamente.
+
+### Listas con nombre — `GET`/`POST /v1/wishlist/collections`
+
+```http
+GET /v1/wishlist/collections
+x-api-key: <api-key>
+Authorization: <token>
+```
+
+```json
+[
+  { "uuid": "a1b2...", "name": "Favoritos", "isDefault": true, "itemCount": 2, "createdAt": "2026-08-15T08:40:00.000Z" },
+  { "uuid": "c3d4...", "name": "Cumpleaños de mi papá", "isDefault": false, "itemCount": 1, "createdAt": "2026-08-19T09:00:00.000Z" }
+]
+```
+
+Sin paginar (un cliente no tiene cientos de listas) — si "Favoritos" todavía no existe
+(nunca se guardó nada), simplemente no aparece en el arreglo. `POST` crea una lista nueva:
+
+```http
+POST /v1/wishlist/collections
+x-api-key: <api-key>
+Authorization: <token>
+Content-Type: application/json
+
+{ "name": "Cumpleaños de mi papá" }
+```
+
+Responde `201` con el mismo shape que un elemento del arreglo de arriba (`itemCount: 0`).
+
+### `PATCH`/`DELETE /v1/wishlist/collections/{uuid}` — renombrar/eliminar una lista
+
+`PATCH` acepta `{ "name": "..." }`. Ambas responden `404` si la lista no existe o no
+pertenece a la cuenta autenticada (no se distingue de "no existe", mismo patrón que el
+resto de recursos propios de esta API — direcciones, reseñas, etc.). `DELETE` responde
+`204`, pero **`409` si intentas eliminar la lista "Favoritos"** (`isDefault: true`) — esa
+lista no se puede borrar, solo vaciar quitando sus productos uno por uno.
+
+### `GET`/`POST /v1/wishlist/collections/{uuid}/items` — productos de una lista con nombre
+
+Mismo shape de request/response que el atajo de corazón (`GET /v1/wishlist/favorites` /
+`PUT /v1/wishlist/favorites/{productUuid}`) — mismo `WishlistItemPublic` para cada item,
+mismo `limit`/`offset` en el `GET`. La diferencia es que aquí se manda `productUuid` en
+el body en vez de en la URL, y hay que conocer el `uuid` de la lista de antemano:
+
+```http
+POST /v1/wishlist/collections/c3d4.../items
+x-api-key: <api-key>
+Authorization: <token>
+Content-Type: application/json
+
+{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un" }
+```
+
+Responde `201` vacío. `404` si la lista no pertenece al cliente, o si `productUuid` no
+existe/no está disponible. Idempotente, igual que el atajo de corazón.
+
+### `DELETE /v1/wishlist/collections/{uuid}/items/{productUuid}` — quitar un producto de una lista
+
+`204` vacío. Idempotente (quitar algo que no estaba guardado no es error). `404` solo si
+la lista no pertenece al cliente.
+
 ## Pagos con Mercado Pago (Checkout Bricks)
 
 Después de `POST /v1/orders`, renderiza el **Payment Brick** de Mercado Pago
@@ -2162,6 +2294,10 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
 
 ## Notas y advertencias
 
+- **Nuevo (2026-08-19): wishlist / lista de favoritos** — `/v1/wishlist/*`, ver sección
+  dedicada arriba. Solo para cuentas de cliente (sin equivalente de invitado/anónimo, a
+  diferencia del carrito), autenticada con `Authorization` (no `X-Client-Token`). No
+  requiere ningún cambio en rutas existentes.
 - **Precios/stock pueden cambiar entre que se muestran y se compran** — `/v1/orders` valida
   disponibilidad contra el catálogo local (sincronizado desde Sicar X cada 5 minutos, sin
   ninguna llamada en vivo en este paso) antes de confirmar; un `409` en checkout es normal y

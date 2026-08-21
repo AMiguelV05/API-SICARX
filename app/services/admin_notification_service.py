@@ -3,10 +3,10 @@ import logging
 import time
 from typing import Optional
 
-import httpx
 from fastapi import BackgroundTasks
 
 from app.core.config import settings
+from app.core.webhook_client import send_signed_webhook
 from app.models.order import Order
 from app.schemas.orders import OrderPublic
 from app.core.webhook_signing import sign_hmac_sha256
@@ -14,7 +14,6 @@ from app.core.webhook_signing import sign_hmac_sha256
 ORDER_CANCELLED_WEBHOOK_PATH = "/api/webhooks/order-cancelled"
 SICAR_SYNC_FAILED_WEBHOOK_PATH = "/api/webhooks/order-sicar-sync-failed"
 STOCK_DRIFT_WEBHOOK_PATH = "/api/webhooks/product-stock-drift"
-WEBHOOK_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +36,6 @@ def _build_admin_request(path: str, body: dict) -> Optional[tuple[str, bytes, di
     }
     return url, raw_body, headers
 
-async def _send_admin_webhook(url: str, raw_body: bytes, headers: dict, log_context: str) -> None:
-    """Nucleo HTTP puro (sin BD) - compartido por el camino de request (backgrounded via
-    BackgroundTasks) y el camino de worker (awaited directo, no hay request que agilizar)."""
-    try:
-        async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT) as client:
-            response = await client.post(url, content=raw_body, headers=headers)
-        if response.status_code not in (200, 201, 202):
-            logger.error(f"{log_context}: el dashboard admin rechazo el webhook: {response.status_code} - {response.text}")
-            return
-        logger.info(f"{log_context}: webhook enviado al dashboard admin.")
-    except Exception as e:
-        logger.error(f"{log_context}: error inesperado enviando el webhook al dashboard admin: {type(e).__name__}: {e!r}")
-
 async def notify_admin_order_cancelled(order: Order, background_tasks: BackgroundTasks) -> None:
     """Señal informativa al dashboard admin de que la orden se cancelo; llamar solo desde
     notify_order_cancelled (siempre dentro de un request, por eso recibe BackgroundTasks -
@@ -63,7 +49,7 @@ async def notify_admin_order_cancelled(order: Order, background_tasks: Backgroun
     if request is None:
         logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
         return
-    background_tasks.add_task(_send_admin_webhook, *request, log_context)
+    background_tasks.add_task(send_signed_webhook, *request, log_context)
 
 async def notify_admin_sicar_sync_failed(order: Order, last_error: str) -> None:
     """Señal de que el worker agoto reintentos con Sicar X - requiere reconciliacion manual,
@@ -80,7 +66,7 @@ async def notify_admin_sicar_sync_failed(order: Order, last_error: str) -> None:
     if request is None:
         logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
         return
-    await _send_admin_webhook(*request, log_context)
+    await send_signed_webhook(*request, log_context)
 
 async def notify_admin_stock_drift(products: list[dict]) -> None:
     """Señal de que Product.reserved supera a Product.stock para uno o mas productos - el
@@ -95,4 +81,4 @@ async def notify_admin_stock_drift(products: list[dict]) -> None:
     if request is None:
         logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
         return
-    await _send_admin_webhook(*request, log_context)
+    await send_signed_webhook(*request, log_context)

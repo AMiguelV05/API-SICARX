@@ -3,6 +3,7 @@ import httpx
 import logging
 from fastapi import HTTPException
 from app.core.config import settings
+from app.core.retry import request_with_backoff
 
 ACCOUNT_LAMBDA_URL = "https://7ew5wkc4jsnbb6ph2bd2r4o5540hqlea.lambda-url.us-east-1.on.aws/login/v1/account"
 LOGIN_LAMBDA_URL = "https://7ew5wkc4jsnbb6ph2bd2r4o5540hqlea.lambda-url.us-east-1.on.aws/login/v1/login"
@@ -34,46 +35,67 @@ class SicarAuthManager:
                 "password": settings.SICAR_ADMIN_PASSWORD
             }
 
-            async with httpx.AsyncClient(timeout=AUTH_TIMEOUT) as client:
-                account_response = await client.post(ACCOUNT_LAMBDA_URL, json=account_payload)
+            try:
+                async with httpx.AsyncClient(timeout=AUTH_TIMEOUT) as client:
+                    async def _post_account():
+                        return await client.post(ACCOUNT_LAMBDA_URL, json=account_payload)
 
-                if account_response.status_code != 200:
-                    logger.error(f"Error fatal en Auto-Login: {account_response.text}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
-                    )
-                initial_jwt = account_response.json().get("jwt")
-
-                login_payload = {
-                    "branchId": 151456,
-                    "deviceId": device_id,
-                    "deviceAlias": "FastAPI Auto-Login Server",
-                    "fcmId": None,
-                    "deviceType": "Web",
-                    "jwt": initial_jwt
-                }
-                login_response = await client.post(LOGIN_LAMBDA_URL, json=login_payload)
-
-                if login_response.status_code != 200:
-                    logger.error(f"Error fatal en Auto-Login: {login_response.text}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
+                    account_response = await request_with_backoff(
+                        _post_account, max_attempts=2, base_delay=0.5, context="Sicar X auto-login (account)"
                     )
 
-                final_jwt = login_response.headers.get("Cauth") or login_response.headers.get("cauth")
+                    if account_response.status_code != 200:
+                        logger.error(f"Error fatal en Auto-Login: {account_response.text}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
+                        )
+                    initial_jwt = account_response.json().get("jwt")
 
-                if not final_jwt:
-                    logger.error(f"Headers de respuesta de login faltantes: {login_response.headers}")
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Fallo crítico: El backend no pudo obtener el token final de Sicar X."
+                    login_payload = {
+                        "branchId": 151456,
+                        "deviceId": device_id,
+                        "deviceAlias": "FastAPI Auto-Login Server",
+                        "fcmId": None,
+                        "deviceType": "Web",
+                        "jwt": initial_jwt
+                    }
+
+                    async def _post_login():
+                        return await client.post(LOGIN_LAMBDA_URL, json=login_payload)
+
+                    login_response = await request_with_backoff(
+                        _post_login, max_attempts=2, base_delay=0.5, context="Sicar X auto-login (login)"
                     )
 
-                self._current_token = final_jwt
-                logger.info("Token administrativo de Sicar X actualizado exitosamente.")
-                return self._current_token
+                    if login_response.status_code != 200:
+                        logger.error(f"Error fatal en Auto-Login: {login_response.text}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
+                        )
+
+                    final_jwt = login_response.headers.get("Cauth") or login_response.headers.get("cauth")
+
+                    if not final_jwt:
+                        logger.error(f"Headers de respuesta de login faltantes: {login_response.headers}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Fallo crítico: El backend no pudo obtener el token final de Sicar X."
+                        )
+            except httpx.HTTPError as e:
+                # request_with_backoff agoto sus reintentos por error de red (antes esto se
+                # propagaba crudo en vez de convertirse en el mismo HTTPException(500) que ya
+                # producen las ramas de status-code de arriba).
+                logger.error(f"Error de red fatal en Auto-Login tras reintentos: {type(e).__name__}: {e}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Fallo crítico: El backend no pudo autenticarse con los servidores centrales de Sicar X."
+                )
+
+            self._current_token = final_jwt
+            logger.info("Token administrativo de Sicar X actualizado exitosamente.")
+            return self._current_token
 
     async def request_with_retry(self, request_func):
         """Reintenta una vez con token refrescado si Sicar X responde 401 (refresh deduplicado entre corrutinas)."""

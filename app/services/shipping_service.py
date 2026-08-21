@@ -8,6 +8,7 @@ import httpx
 from fastapi import HTTPException, status
 
 from app.core.config import settings
+from app.core.retry import request_with_backoff
 from app.core.upstream_errors import raise_upstream_error
 from app.models.order import Order
 
@@ -186,8 +187,12 @@ async def _fetch_available_carriers() -> list[str]:
             return cached[1]
 
         url = f"{QUERIES_BASE_URL}/available-carrier/{settings.ENVIA_COUNTRY}/0/1"
-        async with httpx.AsyncClient(timeout=SHIPPING_TIMEOUT) as client:
-            response = await client.get(url, headers=_envia_headers())
+
+        async def attempt():
+            async with httpx.AsyncClient(timeout=SHIPPING_TIMEOUT) as client:
+                return await client.get(url, headers=_envia_headers())
+
+        response = await request_with_backoff(attempt, context="envia.com available-carrier")
 
         if response.status_code not in (200, 201):
             raise_upstream_error(
@@ -229,8 +234,20 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     async def _quote_one(client: httpx.AsyncClient, carrier: str):
         nonlocal last_error_response
         payload = {"origin": origin, "destination": destination, "packages": packages, "carrier": carrier}
-        async with semaphore:
-            response = await client.post(RATE_URL, json=payload, headers=_envia_headers())
+
+        async def attempt():
+            async with semaphore:
+                return await client.post(RATE_URL, json=payload, headers=_envia_headers())
+
+        try:
+            response = await request_with_backoff(attempt, max_attempts=2, context=f"envia.com rate {carrier} orden {order.uuid}")
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as e:
+            # Un carrier individual con falla de transporte se trata igual que un
+            # meta:error de ese carrier (se omite, no tumba la cotizacion completa) - antes
+            # esta excepcion se propagaba fuera de asyncio.gather y cancelaba las llamadas
+            # a los demas ~24 carriers en curso.
+            logger.warning(f"envia.com: carrier '{carrier}' fallo por error de red para la orden {order.uuid}: {type(e).__name__}: {e}")
+            return []
 
         if response.status_code not in (200, 201):
             # Falla de transporte/auth (no meta:error) - se recuerda para el 502 de abajo.

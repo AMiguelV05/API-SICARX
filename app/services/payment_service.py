@@ -1,11 +1,13 @@
+import hashlib
+import json
 import logging
 from decimal import Decimal
-from uuid import uuid4
 
 import httpx
 from fastapi import Request
 
 from app.core.config import settings
+from app.core.retry import request_with_backoff
 from app.models.order import Order
 from app.core.upstream_errors import raise_upstream_error
 from app.core.webhook_signing import verify_hmac_sha256
@@ -48,8 +50,11 @@ async def create_preference(order: Order) -> dict | None:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-            response = await client.post(PREFERENCES_URL, json=payload, headers=_mp_headers())
+        async def attempt():
+            async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
+                return await client.post(PREFERENCES_URL, json=payload, headers=_mp_headers())
+
+        response = await request_with_backoff(attempt, context=f"MP create_preference orden {order.uuid}")
         if response.status_code not in (200, 201):
             logger.error(f"Mercado Pago rechazo la creacion de preferencia para la orden {order.uuid}: {response.status_code} - {response.text}")
             return None
@@ -61,16 +66,20 @@ async def create_preference(order: Order) -> dict | None:
 async def create_payment(order: Order, submit_data: dict) -> dict:
     """Cobra via MP. `transaction_amount` siempre viene de `order.total` en Postgres, nunca de submit_data.
 
-    X-Idempotency-Key es un uuid4 fresco en cada llamada, NO order.uuid. MP guarda la
-    respuesta (incluyendo errores) asociada a cada key y la reproduce tal cual ante
-    cualquier reintento con la misma key, en vez de re-evaluar el payload nuevo - ver su
-    propia doc ("si el valor de idempotencia ya fue usado, reintenta con un valor nuevo").
-    Como local_order.status se queda en TO_PAY tras cualquier fallo (pay_order no lo
-    toca), un order.uuid fijo como key dejaba cualquier orden que fallara una vez
-    atascada repitiendo ese mismo error para siempre, sin importar que tan bien
-    formado estuviera un reintento posterior - confirmado en vivo el 2026-08-12: el
-    mismo internal_error 500 de MP persistio identico incluso despues de arreglar la
-    causa original (payer.email faltante, ver abajo).
+    X-Idempotency-Key es un hash determinista de `order.uuid` + el payload final, NO un
+    uuid4 fresco ni un order.uuid fijo puro. Un order.uuid fijo dejaba cualquier orden que
+    fallara una vez atascada repitiendo ese mismo error para siempre sin importar que tan
+    bien formado estuviera un reintento posterior - confirmado en vivo el 2026-08-12: el
+    mismo internal_error 500 de MP persistio identico incluso despues de arreglar la causa
+    original (payer.email faltante, ver abajo). Un uuid4 fresco en cada llamada resolvia
+    eso pero abria el problema opuesto: un timeout de este lado *despues* de que MP ya
+    proceso el cobro, seguido de un reintento (de este backend via request_with_backoff, o
+    de un doble-submit del cliente), generaba una key nueva que MP no podia reconocer como
+    duplicado - riesgo real de cobro doble. Hashear `order.uuid` + el payload ya construido
+    (mismo submit_data => mismo hash => misma key => MP deduplica) resuelve ambos casos: un
+    reintento del mismo envio es seguro, mientras que un envio genuinamente distinto (token
+    nuevo tras re-tokenizar en el Brick, correo corregido, etc.) sigue generando una key
+    nueva y nunca queda atascado repitiendo un error viejo.
 
     `payer.email` es requerido por MP para pagos con tarjeta - si el Brick no lo trae en
     `formData` (p. ej. solo se paso en `initialization.payer.email` y el Brick no lo
@@ -113,8 +122,14 @@ async def create_payment(order: Order, submit_data: dict) -> dict:
             "number": identification.get("number"),
         }
 
-    async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.post(PAYMENTS_URL, json=payload, headers=_mp_headers(idempotency_key=str(uuid4())))
+    idempotency_source = json.dumps(payload, sort_keys=True, default=str)
+    idempotency_key = hashlib.sha256(f"{order.uuid}:{idempotency_source}".encode()).hexdigest()
+
+    async def attempt():
+        async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
+            return await client.post(PAYMENTS_URL, json=payload, headers=_mp_headers(idempotency_key=idempotency_key))
+
+    response = await request_with_backoff(attempt, context=f"MP create_payment orden {order.uuid}")
 
     if response.status_code not in (200, 201):
         raise_upstream_error(response, f"Mercado Pago rechazo el cobro de la orden {order.uuid}", "No se pudo procesar el pago con Mercado Pago. Intenta nuevamente.")
@@ -123,8 +138,11 @@ async def create_payment(order: Order, submit_data: dict) -> dict:
 
 async def get_payment(payment_id: str) -> dict:
     """Consulta el estado autoritativo de un pago; los webhooks solo avisan que algo cambio, nunca se confia en su cuerpo."""
-    async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.get(f"{PAYMENTS_URL}/{payment_id}", headers=_mp_headers())
+    async def attempt():
+        async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
+            return await client.get(f"{PAYMENTS_URL}/{payment_id}", headers=_mp_headers())
+
+    response = await request_with_backoff(attempt, context=f"MP get_payment {payment_id}")
 
     if response.status_code != 200:
         raise_upstream_error(response, f"Error al consultar el pago {payment_id} en Mercado Pago", "No se pudo consultar el estado del pago en Mercado Pago.")
@@ -139,12 +157,16 @@ async def refund_payment(payment_id: str, amount: Decimal | None = None) -> dict
     idempotency key si se reintentaran cerca uno del otro - no es un caso de uso hoy, ver
     admin_service.refund_order, que solo permite un reembolso a la vez por llamada)."""
     payload = {"amount": float(amount)} if amount is not None else None
-    async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.post(
-            f"{PAYMENTS_URL}/{payment_id}/refunds",
-            json=payload,
-            headers=_mp_headers(idempotency_key=payment_id),
-        )
+
+    async def attempt():
+        async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
+            return await client.post(
+                f"{PAYMENTS_URL}/{payment_id}/refunds",
+                json=payload,
+                headers=_mp_headers(idempotency_key=payment_id),
+            )
+
+    response = await request_with_backoff(attempt, context=f"MP refund_payment {payment_id}")
 
     if response.status_code not in (200, 201):
         raise_upstream_error(response, f"Error al reembolsar el pago {payment_id} en Mercado Pago", "No se pudo reembolsar el pago en Mercado Pago.")
@@ -153,8 +175,11 @@ async def refund_payment(payment_id: str, amount: Decimal | None = None) -> dict
 
 async def cancel_payment(payment_id: str) -> dict:
     """Cancela un pago pendiente/en proceso (no capturado) - mas barato que un reembolso."""
-    async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
-        response = await client.put(f"{PAYMENTS_URL}/{payment_id}", json={"status": "cancelled"}, headers=_mp_headers())
+    async def attempt():
+        async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
+            return await client.put(f"{PAYMENTS_URL}/{payment_id}", json={"status": "cancelled"}, headers=_mp_headers())
+
+    response = await request_with_backoff(attempt, context=f"MP cancel_payment {payment_id}")
 
     if response.status_code not in (200, 201):
         raise_upstream_error(response, f"Error al cancelar el pago {payment_id} en Mercado Pago", "No se pudo cancelar el pago pendiente en Mercado Pago.")

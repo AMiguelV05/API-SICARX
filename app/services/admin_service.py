@@ -18,6 +18,7 @@ from app.schemas.admin import (
     ShippingGenerateRequest,
 )
 from app.schemas.client import ClientAddressPublic
+from app.core import error_tracking
 from app.services.sicar_auth import sicar_auth
 from app.services import shipping_service
 from app.services import order_status_notification_service
@@ -293,7 +294,28 @@ async def refund_order(db: AsyncSession, order_uuid: str, amount: float, reason:
             detail=f"El monto excede lo reembolsable ({remaining} restante de {order.total}).",
         )
 
-    mp_refund = await payment_service.refund_payment(order.mp_payment_id, amount=amount_decimal)
+    try:
+        mp_refund = await payment_service.refund_payment(order.mp_payment_id, amount=amount_decimal)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # A diferencia de un rechazo limpio de MP (HTTPException via raise_upstream_error,
+        # re-lanzado arriba tal cual), esto es un fallo de red/timeout tras agotar los
+        # reintentos de request_with_backoff - no hay forma de saber si MP ya proceso el
+        # reembolso o no. Se reporta explicitamente (antes esta funcion no llamaba
+        # capture_exception en absoluto) para que no quede invisible fuera de app.log, y se
+        # convierte en un 502 claro en vez de dejar la excepcion cruda propagarse.
+        error_tracking.capture_exception(
+            e,
+            order_uuid=order.uuid,
+            mp_payment_id=order.mp_payment_id,
+            amount=str(amount_decimal),
+            admin_email=admin.email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo confirmar el reembolso con Mercado Pago. Verifica el estado del pago antes de reintentar.",
+        )
 
     refund = Refund(
         order_id=order.id,

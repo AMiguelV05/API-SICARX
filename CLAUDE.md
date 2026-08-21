@@ -396,8 +396,8 @@ reasoning `GET /v1/vehicles/{uuid}` was never built; no combined "move to cart" 
 frontend already has `PATCH /cart/items` + `DELETE .../items/{productUuid}` to do this itself
 with two existing calls.
 
-Endpoints (all under `/v1/wishlist`, `client account (X-Client-Token or Authorization,
-required)`, `x-api-key` like every non-admin route): `GET/POST /collections`, `PATCH/DELETE
+Endpoints (all under `/v1/wishlist`, `client account (Authorization, required — CurrentClientDep,
+not X-Client-Token)`, `x-api-key` like every non-admin route): `GET/POST /collections`, `PATCH/DELETE
 /collections/{uuid}` (`404` if not owned by the caller; `DELETE` is `409` on the default
 collection — it can't be removed), `GET/POST /collections/{uuid}/items`, `DELETE
 /collections/{uuid}/items/{productUuid}`, plus the heart-icon shortcuts `GET /favorites`,
@@ -487,7 +487,7 @@ All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted
 | `DELETE /reviews/{uuid}` | client account, must own | Delete own review. `204`. |
 | `PUT`/`DELETE /reviews/{uuid}/helpful` | client account (required `Authorization` header) | Idempotent mark/unmark of a "helpful" vote — one per client per review. |
 | `GET /auth/me/reviews` | client account (required `Authorization` header) | Own review history, paginated, most recent first — includes reviews an admin has hidden (only the author still sees those here). |
-| `GET`/`POST /wishlist/collections` | client account (`X-Client-Token` or `Authorization`, required) | List/create named wishlist collections. |
+| `GET`/`POST /wishlist/collections` | client account (`Authorization`, required) | List/create named wishlist collections. |
 | `PATCH`/`DELETE /wishlist/collections/{uuid}` | client account, must own | Rename/delete a collection. `404` if not owned, `409` deleting the default "Favoritos" collection. |
 | `GET`/`POST /wishlist/collections/{uuid}/items` | client account, must own | List (paginated, enriched with `ProductBasic`) / idempotently add a product to a collection. |
 | `DELETE /wishlist/collections/{uuid}/items/{productUuid}` | client account, must own | Idempotently remove a product from a collection. |

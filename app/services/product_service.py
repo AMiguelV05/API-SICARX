@@ -1,11 +1,14 @@
+import json
 import httpx
 import logging
 from app.services.sicar_auth import sicar_auth
+from app.core.retry import request_with_backoff
 from app.core.sicar_headers import graphql_bearer_headers
 from app.core.sicar_validation import is_safe_sicar_id
 
 logger = logging.getLogger(__name__)
 GRAPHQL_URL = "https://api.sicarx.com/graph/v1/"
+DETAILS_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 
 async def fetch_full_details_from_sicar(uuid: str) -> dict:
     if not is_safe_sicar_id(uuid):
@@ -33,17 +36,25 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
 
     async def attempt_fetch(token: str):
         headers = graphql_bearer_headers(token)
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=DETAILS_TIMEOUT) as client:
             return await client.post(GRAPHQL_URL, content=graphql_query, headers=headers)
 
     try:
-        response = await sicar_auth.request_with_retry(attempt_fetch)
+        async def call_with_auth():
+            return await sicar_auth.request_with_retry(attempt_fetch)
+
+        response = await request_with_backoff(call_with_auth, max_attempts=2, context=f"Sicar X product detail {safe_uuid}")
 
         if response.status_code != 200:
             logger.error(f"Error obteniendo detalles para UUID {safe_uuid}. Estado: {response.status_code}")
             return {}
 
-        data = response.json()
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"Respuesta 200 no-JSON obteniendo detalles para UUID {safe_uuid}: {e}")
+            return {}
+
         if "errors" in data:
             logger.error(f"Errores GraphQL para UUID {safe_uuid}: {data['errors']}")
             return {}
