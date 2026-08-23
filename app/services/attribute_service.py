@@ -758,7 +758,7 @@ async def get_variant_group_detail(db: AsyncSession, product: Product) -> dict |
     }
 
 
-# --- Product info: campos propios (marca/bullets/especificaciones/contenido), no sincronizados desde Sicar X -----
+# --- Product info: campos propios (descripcion/marca/bullets/especificaciones/contenido), no sincronizados desde Sicar X -----
 
 async def update_product_info(db: AsyncSession, product_uuid: str, data: dict) -> Product:
     """`data` = ProductInfoUpdateRequest.model_dump(exclude_unset=True) - solo las claves
@@ -768,11 +768,11 @@ async def update_product_info(db: AsyncSession, product_uuid: str, data: dict) -
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
 
-    for field in ("brand", "bullet_points", "technical_specs", "contents"):
+    for field in ("description", "brand", "bullet_points", "technical_specs", "contents"):
         if field in data:
             setattr(product, field, data[field])
 
     await db.commit()
     await db.refresh(product)
-    logger.info(f"Producto {product_uuid}: informacion (marca/bullets/especificaciones/contenido) actualizada via /admin.")
+    logger.info(f"Producto {product_uuid}: informacion (descripcion/marca/bullets/especificaciones/contenido) actualizada via /admin.")
     return product

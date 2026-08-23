@@ -19,7 +19,6 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
     graphql_query = f"""{{
         product(uuid: "{safe_uuid}") {{
             skus
-            details
             tags
             salesUnitUuid
         }}
@@ -71,7 +70,6 @@ async def fetch_full_details_from_sicar(uuid: str) -> dict:
 
         return {
             "skus": product_data.get("skus"),
-            "details": product_data.get("details"),
             "tags": product_data.get("tags"),
             "sales_unit_uuid": sales_unit_uuid,
             "unit_short_name": unit_short_name,

@@ -79,7 +79,7 @@ async def admin_list_attribute_products(
             sicar_uuid=p.sicar_uuid,
             sku=p.sku,
             name=p.name,
-            description_details=p.description_details,
+            description=p.description,
             image_url=p.image_url,
             price=p.price,
             stock=p.stock,

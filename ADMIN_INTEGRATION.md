@@ -1056,7 +1056,7 @@ Respuesta `200`:
 {
   "total": 2,
   "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "descriptionDetails": null, "imageUrl": "https://.../taladro.jpg", "price": 899.00, "stock": 12, "availableStock": 9, "salesCount": 34 }
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "description": null, "imageUrl": "https://.../taladro.jpg", "price": 899.00, "stock": 12, "availableStock": 9, "salesCount": 34 }
   ]
 }
 ```
@@ -1715,7 +1715,7 @@ de abajo:
 {
   "total": 2,
   "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "descriptionDetails": null, "imageUrl": null, "price": 8.62, "stock": 2.0, "availableStock": 2.0, "salesCount": 15.0, "value": "Rojo" }
+    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "description": null, "imageUrl": null, "price": 8.62, "stock": 2.0, "availableStock": 2.0, "salesCount": 15.0, "value": "Rojo" }
   ]
 }
 ```
@@ -2020,27 +2020,39 @@ Respuesta `200`:
 - `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
 - `404` si el grupo no existe, o si algún `productUuid` de `add` no resuelve.
 
-### Información propia de producto (marca/bullets/especificaciones/contenido)
+### Información propia de producto (descripción/marca/bullets/especificaciones/contenido)
 
 **Nuevo (2026-08-22), independiente de Atributos/Grupos de variantes de arriba** — no es EAV
-ni necesita un catálogo de definiciones previo: son cuatro columnas directas y libres en
-`Product` (`brand`, `bulletPoints`, `technicalSpecs`, `contents`), pensadas para el contenido
-de un distribuidor (marca del fabricante, viñetas de puntos clave, ficha técnica en texto,
-qué incluye la caja) que hoy no tiene dónde vivir en el catálogo. Los cuatro son
-`string | null`, totalmente independientes entre sí — se puede llenar cualquier subconjunto.
-Esta es la **única** superficie admin para editarlos uno a la vez; para un lote grande, ver la
-hoja `InfoProducto` en "Importación masiva por Excel" más abajo. No hay `GET` dedicado aquí —
-`GET /v1/products/{uuid}` (storefront, ver `FRONTEND_INTEGRATION.md`) ya expone los cuatro
-campos y solo necesita `x-api-key`, no un token de admin.
+ni necesita un catálogo de definiciones previo: son cinco columnas directas y libres en
+`Product` (`description`, `brand`, `bulletPoints`, `technicalSpecs`, `contents`), pensadas
+para el contenido de un distribuidor (descripción larga, marca del fabricante, viñetas de
+puntos clave, ficha técnica en texto, qué incluye la caja) que hoy no tiene dónde vivir en
+el catálogo. Las cinco son `string | null`, totalmente independientes entre sí — se puede
+llenar cualquier subconjunto. Esta es la **única** superficie admin para editarlas uno a la
+vez; para un lote grande, ver la hoja `InfoProducto` en "Importación masiva por Excel" más
+abajo. No hay `GET` dedicado aquí — `GET /v1/products/{uuid}` (storefront, ver
+`FRONTEND_INTEGRATION.md`) ya expone los cinco campos y solo necesita `x-api-key`, no un
+token de admin.
 
-#### `PATCH /v1/admin/products/{productUuid}/info` — actualizar marca/bullets/especificaciones/contenido
+**`description` es distinto de las otras cuatro en dos sentidos (2026-08-22, mismo día,
+cambio separado):** antes se llamaba `descriptionDetails` y era la **única** de estas
+columnas realmente sincronizada desde Sicar X (vía el GraphQL lazy-refresh de
+`GET /v1/products/{uuid}`) — ese sync se eliminó por completo (Sicar X ya ni siquiera se
+consulta por este campo) y el valor de cada producto se **borró** al renombrarla (no fue una
+migración que preservara datos — confirmado con el negocio que empezar de cero era lo
+deseado, no arrastrar el texto que traía Sicar X). Y a diferencia de
+`brand`/`bulletPoints`/`technicalSpecs`/`contents` (detalle únicamente), `description` **sí
+sigue apareciendo en `POST /v1/products`/`POST /v1/search`** (`ProductBasic`) además del
+detalle — eso no cambió, solo cambió quién la escribe.
+
+#### `PATCH /v1/admin/products/{productUuid}/info` — actualizar descripción/marca/bullets/especificaciones/contenido
 
 ```http
 PATCH /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/info
 Authorization: Bearer <admin-token>
 Content-Type: application/json
 
-{ "brand": "Surtek", "bulletPoints": "-Fabricado en acero.\n-Soporte fijo." }
+{ "description": "Taladro percutor de 1/2\" con motor de 800W.", "brand": "Surtek", "bulletPoints": "-Fabricado en acero.\n-Soporte fijo." }
 ```
 
 **Actualización parcial** (`exclude_unset`, mismo criterio que `PATCH /v1/admin/attributes/{uuid}`)
@@ -2048,10 +2060,11 @@ Content-Type: application/json
 se borra**. `technicalSpecs`/`contents` no incluidos arriba quedan exactamente como estaban.
 `404` si `productUuid` no corresponde a un producto real y no eliminado.
 
-Respuesta `200` — los cuatro campos ya con el estado final (no solo lo que venía en el body):
+Respuesta `200` — los cinco campos ya con el estado final (no solo lo que venía en el body):
 ```json
 {
   "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+  "description": "Taladro percutor de 1/2\" con motor de 800W.",
   "brand": "Surtek",
   "bulletPoints": "-Fabricado en acero.\n-Soporte fijo.",
   "technicalSpecs": null,
@@ -2113,19 +2126,22 @@ para esa hoja, no como error:
   `name` del grupo (mismo slugify que categorías/atributos — `VariantGroup` no tiene una
   columna `slug` propia, ver `GET /v1/admin/variant-groups` arriba para los nombres
   existentes).
-- **`InfoProducto`** (nuevo, 2026-08-22) — columna `sku` requerida, más `brand`,
-  `bulletPoints`, `technicalSpecs` y `contents`, **todas opcionales** — una fila puede
-  llenar cualquier subconjunto de las cuatro (una fila con solo `brand` no toca las otras
-  tres). Al menos una de las cuatro debe traer algo, si no la fila entera se reporta como
-  `MISSING_FIELDS`. Mismo destino que `PATCH /v1/admin/products/{uuid}/info` de arriba —
-  útil para cargar el contenido de un distribuidor (marca, viñetas, ficha técnica, qué
-  incluye) de golpe en vez de producto por producto. Para texto multilínea en
-  `bulletPoints`/`technicalSpecs`, usa Alt+Enter dentro de la celda de Excel — el salto de
-  línea se preserva tal cual en el valor guardado. **Celda vacía vs. borrar un campo (nuevo,
-  2026-08-23)**: una celda vacía nunca toca el campo (ver la semántica de re-subida abajo);
-  para borrar explícitamente un campo ya guardado, escribe el texto literal `NULL` en la
-  celda (sin comillas, insensible a mayúsculas — `null`/`Null`/`NULL` funcionan igual) — ese
-  campo queda `null` en `Product`, igual que enviarlo así en `PATCH .../info`.
+- **`InfoProducto`** (nuevo, 2026-08-22) — columna `sku` requerida, más `description`,
+  `brand`, `bulletPoints`, `technicalSpecs` y `contents`, **todas opcionales** — una fila
+  puede llenar cualquier subconjunto de las cinco (una fila con solo `brand` no toca las
+  otras cuatro). Al menos una de las cinco debe traer algo, si no la fila entera se reporta
+  como `MISSING_FIELDS`. Mismo destino que `PATCH /v1/admin/products/{uuid}/info` de arriba
+  — útil para cargar el contenido de un distribuidor (descripción, marca, viñetas, ficha
+  técnica, qué incluye) de golpe en vez de producto por producto. Para texto multilínea en
+  `description`/`bulletPoints`/`technicalSpecs`, usa Alt+Enter dentro de la celda de Excel —
+  el salto de línea se preserva tal cual en el valor guardado. **Celda vacía vs. borrar un
+  campo (nuevo, 2026-08-23)**: una celda vacía nunca toca el campo (ver la semántica de
+  re-subida abajo); para borrar explícitamente un campo ya guardado, escribe el texto
+  literal `NULL` en la celda (sin comillas, insensible a mayúsculas — `null`/`Null`/`NULL`
+  funcionan igual) — ese campo queda `null` en `Product`, igual que enviarlo así en
+  `PATCH .../info`. `description` (agregada el mismo día, ver la nota arriba) es la única de
+  las cinco que reemplaza una fuente previa (Sicar X) en vez de ser puramente nueva — ya no
+  hay ningún otro lugar que la escriba.
 
 Cada fila de `Vehiculos`/`Atributos`/`Variantes` es una sola asignación (formato largo). En `Categorias`, la
 celda `categorySlug` puede traer **un solo slug o varios separados por coma o punto y
@@ -2146,7 +2162,7 @@ se resuelve contra los fitments ya existentes cuyo rango contenga ese año, exac
 igual que `POST /admin/vehicles/assign-by-model` de arriba. Si `engine` se omite, la fila
 aplica a **todas** las variantes de motor de esa marca/modelo/año.
 
-**Semántica de re-subida distinta por hoja — no asumas que las cuatro se comportan igual:**
+**Semántica de re-subida distinta por hoja — no asumas que las cinco se comportan igual:**
 
 - **`Categorias`/`Vehiculos` son ADITIVAS** (igual que `assign-by-model`): los vínculos ya
   existentes de un producto (de esta u otra carga) nunca se eliminan, solo se agregan los
@@ -2160,9 +2176,9 @@ aplica a **todas** las variantes de motor de esa marca/modelo/año.
   dos veces sigue siendo seguro (mismo valor → sin cambio real), pero no es "ignorar si ya
   existe" como `Categorias`/`Vehiculos`. En `InfoProducto` esto es por **campo individual**,
   no por fila entera: una fila que solo trae `brand` corrige solo `brand` y deja
-  `bulletPoints`/`technicalSpecs`/`contents` exactamente como estaban (de esta hoja en otra
-  carga, o de un `PATCH .../info` anterior) — una celda vacía nunca borra un valor ya
-  guardado. Para borrar un campo explícitamente sí hay una forma dentro de esta misma
+  `description`/`bulletPoints`/`technicalSpecs`/`contents` exactamente como estaban (de esta
+  hoja en otra carga, o de un `PATCH .../info` anterior) — una celda vacía nunca borra un
+  valor ya guardado. Para borrar un campo explícitamente sí hay una forma dentro de esta misma
   hoja (no hace falta usar `PATCH .../info` aparte): escribe el texto literal `NULL` en la
   celda — ese campo se guarda como `null`, distinto de dejarlo vacío.
 - **`Variantes` REEMPLAZA** — `variantGroupUuid` es un solo valor por producto (columna
@@ -2214,7 +2230,7 @@ Respuesta `200`:
     "processedRows": 45,
     "assignedCount": 52,
     "errors": [
-      { "sheet": "InfoProducto", "row": 6, "reasonCode": "MISSING_FIELDS", "reason": "Fila incompleta: no trae ningun valor en brand/bulletPoints/technicalSpecs/contents.", "sku": "PR2057" }
+      { "sheet": "InfoProducto", "row": 6, "reasonCode": "MISSING_FIELDS", "reason": "Fila incompleta: no trae ningun valor en description/brand/bulletPoints/technicalSpecs/contents.", "sku": "PR2057" }
     ]
   }
 }
@@ -2225,13 +2241,13 @@ algo ligeramente distinto por hoja: en `categories`/`vehicles` son vínculos **n
 realmente insertados (no cuenta pares que ya existían); en `attributes`/`productInfo` son
 pares (producto, campo) **escritos** en total (incluye valores corregidos sobre un campo que
 ya existía, no solo campos nuevos — en `productInfo` puede superar `processedRows`, como en
-el ejemplo de arriba, porque una sola fila con los cuatro campos llenos cuenta 4); en
+el ejemplo de arriba, porque una sola fila con los cinco campos llenos cuenta 5); en
 `variants` es la cantidad de **productos** cuyo `variantGroupUuid` se aplicó. En cualquier
 caso puede ser menor a `processedRows` incluso sin ningún error (fila válida mandada dos
 veces, incluye la fila de ejemplo de la plantilla, etc.).
 
 Errores de fila (`errors[].reasonCode`): `MISSING_FIELDS` (celda requerida vacía, o en
-`InfoProducto` una fila con `sku` pero ningún valor en las cuatro columnas de info),
+`InfoProducto` una fila con `sku` pero ningún valor en las cinco columnas de info),
 `SKU_NOT_FOUND`, `CATEGORY_SLUG_NOT_FOUND`, `INVALID_YEAR` (`year` no es un entero),
 `VEHICLE_NOT_FOUND` (ningún fitment coincide con marca/modelo/año/motor — también cubre
 un `vehicleType` mal escrito, que da el mismo resultado observable que no coincidir),

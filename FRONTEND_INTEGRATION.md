@@ -605,7 +605,7 @@ Respuesta `200`:
       "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
       "sku": "PR2057",
       "name": "PORTAROLLO",
-      "descriptionDetails": null,
+      "description": null,
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
@@ -702,7 +702,7 @@ Respuesta `200` con la misma forma que `/v1/products`:
       "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
       "sku": "PR2057",
       "name": "PORTAROLLO",
-      "descriptionDetails": null,
+      "description": null,
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
@@ -728,7 +728,7 @@ x-api-key: <api-key>
 (`isDeleted`/`isActive` — mismo filtro que `/v1/products`/`/v1/search`).
 
 Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `sku`, `name`,
-`descriptionDetails`, `imageUrl`, `price`, `stock`) más varios que solo trae el detalle:
+`description`, `imageUrl`, `price`, `stock`) más varios que solo trae el detalle:
 
 ```json
 {
@@ -737,7 +737,7 @@ Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `s
   "sku": "PR2057",
   "additionalSkus": null,
   "name": "PORTAROLLO",
-  "descriptionDetails": "Portarollo de acero inoxidable...",
+  "description": "Portarollo de acero inoxidable...",
   "imageUrl": null,
   "tags": ["oferta"],
   "additionalImages": null,
@@ -769,8 +769,12 @@ falta revisarlos en el frontend, solo se incluyen porque son parte del modelo in
 `id`/`lastSyncId` son identificadores internos de sincronización, no pensados para mostrarse
 en la UI. Puede tardar un poco más la primera vez que se pide un producto (o si
 `detailsUpdatedAt` tiene más de 24h) — internamente refresca `tags`/`additionalImages`/
-`additionalSkus`/`descriptionDetails`/`salesUnitUuid`/`unitShortName` desde Sicar X antes de
-responder. `unitShortName` (p. ej. `"PZA"`/`"MTR"`) es el nombre legible de la unidad de venta
+`additionalSkus`/`salesUnitUuid`/`unitShortName` desde Sicar X antes de responder.
+**`description` ya no forma parte de este refresco (2026-08-22)** — antes se llamaba
+`descriptionDetails` y sí venía de Sicar X; ahora es contenido propio cargado desde el panel
+admin (ver `attributes`/`variantGroup` abajo, mismo tratamiento), así que puede quedarse en
+`null` indefinidamente para un producto que el admin todavía no ha editado, sin que eso
+dispare ningún refresco. `unitShortName` (p. ej. `"PZA"`/`"MTR"`) es el nombre legible de la unidad de venta
 resuelto a partir de `salesUnitUuid` — puede venir `null` si nunca se resolvió (fallback a
 `"PZA"` en el checkout, ver `POST /v1/orders`); antes solo se resolvía efímeramente en cada
 llamada a `/v1/orders`, ahora queda persistido aquí en el primer refresco de detalle.
@@ -869,7 +873,7 @@ Respuesta `200`:
       "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
       "sku": "PR2057",
       "name": "PORTAROLLO",
-      "descriptionDetails": null,
+      "description": null,
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,

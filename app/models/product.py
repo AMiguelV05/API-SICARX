@@ -28,7 +28,7 @@ class Product(Base):
     additional_skus = Column(JSON, nullable=True)
 
     name = Column(String, nullable=False)
-    description_details = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)  # PIM propio (admin), no sincronizado desde Sicar X - ver "Info de producto propia" en CLAUDE.md
     image_url = Column(String, nullable=True)
 
     tags = Column(JSONB, nullable=True)  # JSONB (no JSON): permite filtrar por contencion con indice GIN

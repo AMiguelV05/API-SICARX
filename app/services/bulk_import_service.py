@@ -32,9 +32,9 @@ CATEGORIES_REQUIRED_COLUMNS = ("sku", "categorySlug")
 VEHICLES_REQUIRED_COLUMNS = ("sku", "make", "model", "year")  # vehicleType/engine son opcionales
 ATTRIBUTES_REQUIRED_COLUMNS = ("sku", "attributeSlug", "value")
 VARIANTS_REQUIRED_COLUMNS = ("sku", "variantGroupSlug")
-PRODUCT_INFO_REQUIRED_COLUMNS = ("sku",)  # brand/bulletPoints/technicalSpecs/contents son opcionales, ver _process_product_info_rows
-PRODUCT_INFO_COLUMNS = ("brand", "bulletPoints", "technicalSpecs", "contents")
-PRODUCT_INFO_FIELD_BY_COLUMN = {"brand": "brand", "bulletPoints": "bullet_points", "technicalSpecs": "technical_specs", "contents": "contents"}
+PRODUCT_INFO_REQUIRED_COLUMNS = ("sku",)  # description/brand/bulletPoints/technicalSpecs/contents son opcionales, ver _process_product_info_rows
+PRODUCT_INFO_COLUMNS = ("description", "brand", "bulletPoints", "technicalSpecs", "contents")
+PRODUCT_INFO_FIELD_BY_COLUMN = {"description": "description", "brand": "brand", "bulletPoints": "bullet_points", "technicalSpecs": "technical_specs", "contents": "contents"}
 PRODUCT_INFO_NULL_MARKER = "NULL"  # texto literal (insensible a mayusculas) para borrar un campo explicitamente - ver _process_product_info_rows
 
 
@@ -494,7 +494,7 @@ def _process_product_info_rows(
             field = PRODUCT_INFO_FIELD_BY_COLUMN[column]
             values[field] = None if cleaned.upper() == PRODUCT_INFO_NULL_MARKER else cleaned
         if not values:
-            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: no trae ningun valor en brand/bulletPoints/technicalSpecs/contents.", sku))
+            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: no trae ningun valor en description/brand/bulletPoints/technicalSpecs/contents.", sku))
             continue
 
         product_id = product_map.get(sku.upper())
@@ -674,12 +674,13 @@ def build_template_workbook() -> bytes:
     ws_info = wb.create_sheet(PRODUCT_INFO_SHEET)
     info_columns = PRODUCT_INFO_REQUIRED_COLUMNS + PRODUCT_INFO_COLUMNS
     _write_header(ws_info, info_columns, {
+        "description": "Opcional - deja la celda vacia para no tocar el valor ya guardado. Ya no se sincroniza desde Sicar X (ver CLAUDE.md), este es el unico lugar (junto con PATCH .../info) para cargarla. Igual que Atributos, MERGE: un valor corregido en una corrida posterior SI se aplica. Escribe NULL (sin comillas) para borrar un valor ya guardado.",
         "brand": "Opcional - deja la celda vacia para no tocar el valor ya guardado. Igual que Atributos, MERGE: un valor corregido en una corrida posterior SI se aplica. Escribe NULL (sin comillas) para borrar un valor ya guardado.",
         "bulletPoints": "Opcional. Texto libre; usa saltos de linea dentro de la celda (Alt+Enter en Excel) para separar cada punto. Escribe NULL para borrar el valor ya guardado.",
         "technicalSpecs": "Opcional. Texto libre, multilinea igual que bulletPoints. Escribe NULL para borrar el valor ya guardado.",
         "contents": "Opcional. Texto libre - que incluye/accesorios trae el producto. Escribe NULL para borrar el valor ya guardado.",
     })
-    ws_info.append(["SKU-EJEMPLO-1", "Marca-Ejemplo", "-Punto clave 1\n-Punto clave 2", "-Especificacion 1\n-Especificacion 2", "Incluye manual de usuario"])
+    ws_info.append(["SKU-EJEMPLO-1", "Descripcion larga de ejemplo del producto.", "Marca-Ejemplo", "-Punto clave 1\n-Punto clave 2", "-Especificacion 1\n-Especificacion 2", "Incluye manual de usuario"])
 
     buffer = BytesIO()
     wb.save(buffer)

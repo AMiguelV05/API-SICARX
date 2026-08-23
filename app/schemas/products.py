@@ -52,7 +52,7 @@ class ProductBasic(CamelModel):
     sicar_uuid: str
     sku: str
     name: str
-    description_details: Optional[str]
+    description: Optional[str]
     image_url: Optional[str]
     price: float
     # Fuente real es Product.available_stock (stock - reserved), no Product.stock crudo -
@@ -89,7 +89,7 @@ class ProductDetail(CamelModel):
     sku: Optional[str]
     additional_skus: Optional[list[str]]
     name: str
-    description_details: Optional[str]
+    description: Optional[str]
     image_url: Optional[str]
     tags: Optional[list[str]]
     additional_images: Optional[list[str]]
@@ -118,8 +118,11 @@ class ProductDetail(CamelModel):
 
 class ProductInfoUpdateRequest(CamelModel):
     """Actualizacion parcial (exclude_unset=True) de los campos PIM propios de Product
-    (brand/bullet_points/technical_specs/contents) - un campo omitido no se toca, un campo
-    enviado explicitamente como null lo borra. Ver PATCH /admin/products/{uuid}/info."""
+    (description/brand/bullet_points/technical_specs/contents) - un campo omitido no se
+    toca, un campo enviado explicitamente como null lo borra. Ver
+    PATCH /admin/products/{uuid}/info. `description` (renombrado de description_details,
+    2026-08-22) ya no se sincroniza desde Sicar X - ver CLAUDE.md."""
+    description: Optional[str] = None
     brand: Optional[str] = None
     bullet_points: Optional[str] = None
     technical_specs: Optional[str] = None
@@ -128,6 +131,7 @@ class ProductInfoUpdateRequest(CamelModel):
 
 class ProductInfoPublic(CamelModel):
     product_uuid: str
+    description: Optional[str] = None
     brand: Optional[str] = None
     bullet_points: Optional[str] = None
     technical_specs: Optional[str] = None

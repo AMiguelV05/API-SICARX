@@ -70,7 +70,6 @@ async def get_product_details(uuid: str, db: DbDep):
 
         if full_data:
             product.additional_skus = full_data.get("skus")
-            product.description_details = full_data.get("details")
             product.tags = full_data.get("tags")
             product.sales_unit_uuid = full_data.get("sales_unit_uuid")
             product.unit_short_name = full_data.get("unit_short_name")
@@ -98,7 +97,7 @@ async def get_product_details(uuid: str, db: DbDep):
         sku=product.sku,
         additional_skus=product.additional_skus,
         name=product.name,
-        description_details=product.description_details,
+        description=product.description,
         image_url=product.image_url,
         tags=product.tags,
         additional_images=product.additional_images,
