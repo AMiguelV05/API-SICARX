@@ -441,7 +441,12 @@ async def _apply_attribute_updates(db: AsyncSession, updates: dict[int, dict[str
         rows_to_update.append({"pid": product_id, "attrs": merged})
         written += len(new_values)
 
-    stmt = update(Product).where(Product.id == bindparam("pid")).values(attributes=bindparam("attrs", type_=JSONB))
+    stmt = (
+        update(Product)
+        .where(Product.id == bindparam("pid"))
+        .values(attributes=bindparam("attrs", type_=JSONB))
+        .execution_options(dml_strategy="core_only")
+    )
     await db.execute(stmt, rows_to_update)
     return written
 
@@ -449,7 +454,12 @@ async def _apply_attribute_updates(db: AsyncSession, updates: dict[int, dict[str
 async def _apply_variant_group_updates(db: AsyncSession, updates: dict[int, str]) -> int:
     if not updates:
         return 0
-    stmt = update(Product).where(Product.id == bindparam("pid")).values(variant_group_uuid=bindparam("vgu"))
+    stmt = (
+        update(Product)
+        .where(Product.id == bindparam("pid"))
+        .values(variant_group_uuid=bindparam("vgu"))
+        .execution_options(dml_strategy="core_only")
+    )
     await db.execute(stmt, [{"pid": pid, "vgu": vgu} for pid, vgu in updates.items()])
     return len(updates)
 
@@ -503,7 +513,12 @@ async def _apply_product_info_updates(db: AsyncSession, updates: dict[int, dict[
         rows_to_update.append({"pid": product_id, **merged})
         written += len(new_values)
 
-    stmt = update(Product).where(Product.id == bindparam("pid")).values({f: bindparam(f) for f in fields})
+    stmt = (
+        update(Product)
+        .where(Product.id == bindparam("pid"))
+        .values({f: bindparam(f) for f in fields})
+        .execution_options(dml_strategy="core_only")
+    )
     await db.execute(stmt, rows_to_update)
     return written
 
