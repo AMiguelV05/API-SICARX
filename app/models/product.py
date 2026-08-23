@@ -43,6 +43,14 @@ class Product(Base):
     attributes = Column(JSONB, nullable=True)
     variant_group_uuid = Column(String, ForeignKey("variant_groups.uuid"), nullable=True, index=True)
 
+    # PIM propio (no sincronizado desde Sicar X), igual que attributes/variant_group_uuid -
+    # editables via PATCH /admin/products/{uuid}/info o la hoja "InfoProducto" de la
+    # importacion masiva. Solo detalle de producto (GET /products/{uuid}), no catalogo/busqueda.
+    brand = Column(String, nullable=True)  # "Marca"
+    bullet_points = Column(Text, nullable=True)  # "Bullets / Puntos Clave" - texto libre, multilinea
+    technical_specs = Column(Text, nullable=True)  # "Especificaciones técnicas" - texto libre, multilinea
+    contents = Column(Text, nullable=True)  # "Contenido (incluye/accesorios)"
+
     price = Column(Numeric(10, 2), nullable=False)
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
     # Verdad de Sicar X: solo lo escribe el upsert de sync_task.py y los dos "espejos"

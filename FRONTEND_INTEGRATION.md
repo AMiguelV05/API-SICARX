@@ -754,7 +754,11 @@ Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `s
   "detailsUpdatedAt": "2026-07-27T10:15:00Z",
   "deletedAt": null,
   "attributes": [],
-  "variantGroup": null
+  "variantGroup": null,
+  "brand": null,
+  "bulletPoints": null,
+  "technicalSpecs": null,
+  "contents": null
 }
 ```
 
@@ -814,6 +818,27 @@ variante (swatches, botones de talla) sin una llamada aparte por cada opción.
 `variantAttributeSlug` puede venir `null` si el grupo no tiene un atributo distintivo
 configurado — en ese caso no hay un valor estándar para etiquetar cada opción del selector,
 usa `siblings[].name`/`sku` en su lugar.
+
+**`brand`/`bulletPoints`/`technicalSpecs`/`contents` (nuevo, 2026-08-22) — PIM propio, no
+viene de Sicar X.** Igual que `attributes`/`variantGroup` arriba: administrados desde el
+panel admin (ver `ADMIN_INTEGRATION.md`, sección "Información propia de producto"), solo
+en esta ruta de detalle — `POST /v1/products` y `POST /v1/search` no los traen (payload de
+listado sin cambios). Los cuatro son `string | null`, independientes entre sí (cualquier
+subconjunto puede venir lleno mientras el resto sigue `null`) y casi todo el catálogo
+empieza sin ninguno cargado — nunca un error, solo significa que esa sección no tiene nada
+que mostrar todavía. `bulletPoints`/`technicalSpecs` suelen venir con saltos de línea
+(`\n`) separando cada punto/especificación — respétalos al renderizar (p. ej. partiendo por
+`\n` para una lista, o `white-space: pre-line` en CSS) en vez de mostrar el string tal cual
+en una sola línea:
+
+```json
+{
+  "brand": "Surtek",
+  "bulletPoints": "-Fabricado en acero.\n-Soporte fijo.\n-Incluye tornillería para montaje.",
+  "technicalSpecs": "-Capacidad: 26 - 65\"\n-Color: Negro\n-Material: Acero",
+  "contents": "Manual de usuario"
+}
+```
 
 ### `GET /v1/products/best-sellers` — más vendidos (nuevo, para la página principal)
 

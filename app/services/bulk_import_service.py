@@ -27,10 +27,14 @@ CATEGORIES_SHEET = "Categorias"
 VEHICLES_SHEET = "Vehiculos"
 ATTRIBUTES_SHEET = "Atributos"
 VARIANTS_SHEET = "Variantes"
+PRODUCT_INFO_SHEET = "InfoProducto"
 CATEGORIES_REQUIRED_COLUMNS = ("sku", "categorySlug")
 VEHICLES_REQUIRED_COLUMNS = ("sku", "make", "model", "year")  # vehicleType/engine son opcionales
 ATTRIBUTES_REQUIRED_COLUMNS = ("sku", "attributeSlug", "value")
 VARIANTS_REQUIRED_COLUMNS = ("sku", "variantGroupSlug")
+PRODUCT_INFO_REQUIRED_COLUMNS = ("sku",)  # brand/bulletPoints/technicalSpecs/contents son opcionales, ver _process_product_info_rows
+PRODUCT_INFO_COLUMNS = ("brand", "bulletPoints", "technicalSpecs", "contents")
+PRODUCT_INFO_FIELD_BY_COLUMN = {"brand": "brand", "bulletPoints": "bullet_points", "technicalSpecs": "technical_specs", "contents": "contents"}
 
 
 @dataclass
@@ -55,6 +59,7 @@ class BulkImportOutcome:
     vehicles: _SheetOutcome
     attributes: _SheetOutcome
     variants: _SheetOutcome
+    product_info: _SheetOutcome
 
 
 def _load_workbook(file_bytes: bytes):
@@ -115,6 +120,7 @@ def _parse_workbook(file_bytes: bytes):
             _read_sheet(wb, VEHICLES_SHEET, VEHICLES_REQUIRED_COLUMNS),
             _read_sheet(wb, ATTRIBUTES_SHEET, ATTRIBUTES_REQUIRED_COLUMNS),
             _read_sheet(wb, VARIANTS_SHEET, VARIANTS_REQUIRED_COLUMNS),
+            _read_sheet(wb, PRODUCT_INFO_SHEET, PRODUCT_INFO_REQUIRED_COLUMNS),
         )
     finally:
         wb.close()
@@ -448,27 +454,82 @@ async def _apply_variant_group_updates(db: AsyncSession, updates: dict[int, str]
     return len(updates)
 
 
+def _process_product_info_rows(
+    rows: list[tuple[int, dict]], product_map: dict[str, int]
+) -> tuple[dict[int, dict[str, str]], list[_RowError]]:
+    """Devuelve product_id -> {campo_de_Product: valor} (varias filas del mismo sku se
+    acumulan en el mismo dict, igual que _process_attributes_rows - un sku repetido que solo
+    trae 'brand' en una fila y 'contents' en otra actualiza ambos, no se pisan entre si)."""
+    updates: dict[int, dict[str, str]] = {}
+    errors: list[_RowError] = []
+    for row_num, data in rows:
+        sku = _clean_str(data.get("sku"))
+        if not sku:
+            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: falta sku.", None))
+            continue
+
+        values = {}
+        for column in PRODUCT_INFO_COLUMNS:
+            cleaned = _clean_str(data.get(column))
+            if cleaned:
+                values[PRODUCT_INFO_FIELD_BY_COLUMN[column]] = cleaned
+        if not values:
+            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: no trae ningun valor en brand/bulletPoints/technicalSpecs/contents.", sku))
+            continue
+
+        product_id = product_map.get(sku.upper())
+        if product_id is None:
+            errors.append(_RowError(row_num, "SKU_NOT_FOUND", f"SKU no encontrado: {sku}.", sku))
+            continue
+
+        updates.setdefault(product_id, {}).update(values)
+    return updates, errors
+
+
+async def _apply_product_info_updates(db: AsyncSession, updates: dict[int, dict[str, str]]) -> int:
+    """Mismo patron lee-mezcla-escribe que _apply_attribute_updates: un valor nuevo gana por
+    campo, un campo no incluido en `updates` conserva lo que el producto ya tenia."""
+    if not updates:
+        return 0
+    product_ids = list(updates.keys())
+    fields = list(PRODUCT_INFO_FIELD_BY_COLUMN.values())
+    result = await db.execute(select(Product.id, *[getattr(Product, f) for f in fields]).where(Product.id.in_(product_ids)))
+    current = {row[0]: dict(zip(fields, row[1:])) for row in result.all()}
+
+    rows_to_update = []
+    written = 0
+    for product_id, new_values in updates.items():
+        merged = {**current.get(product_id, {}), **new_values}
+        rows_to_update.append({"pid": product_id, **merged})
+        written += len(new_values)
+
+    stmt = update(Product).where(Product.id == bindparam("pid")).values({f: bindparam(f) for f in fields})
+    await db.execute(stmt, rows_to_update)
+    return written
+
+
 async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkImportOutcome:
     """Orquestador: parsea el .xlsx, resuelve productos/categorias/vehiculos/atributos/
-    grupos de variantes en un numero constante de consultas, y hace un solo commit final.
-    Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos hace merge
-    (no pisa claves de una corrida anterior) y Variantes REEMPLAZA (variant_group_uuid es
-    un solo valor por producto, no un tag) - ver los docstrings de cada _process_*_rows.
-    Las validaciones por fila nunca tocan la base de datos."""
+    grupos de variantes/info de producto en un numero constante de consultas, y hace un solo
+    commit final. Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos e
+    InfoProducto hacen merge (no pisan campos de una corrida anterior) y Variantes REEMPLAZA
+    (variant_group_uuid es un solo valor por producto, no un tag) - ver los docstrings de
+    cada _process_*_rows. Las validaciones por fila nunca tocan la base de datos."""
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Archivo demasiado grande (limite {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB).",
         )
 
-    (cat_found, cat_rows), (veh_found, veh_rows), (attr_found, attr_rows), (var_found, var_rows) = (
-        await asyncio.to_thread(_parse_workbook, file_bytes)
-    )
+    (
+        (cat_found, cat_rows), (veh_found, veh_rows), (attr_found, attr_rows), (var_found, var_rows),
+        (info_found, info_rows),
+    ) = await asyncio.to_thread(_parse_workbook, file_bytes)
 
-    if not cat_found and not veh_found and not attr_found and not var_found:
+    if not cat_found and not veh_found and not attr_found and not var_found and not info_found:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"El archivo no contiene ninguna hoja '{CATEGORIES_SHEET}', '{VEHICLES_SHEET}', '{ATTRIBUTES_SHEET}' ni '{VARIANTS_SHEET}'.",
+            detail=f"El archivo no contiene ninguna hoja '{CATEGORIES_SHEET}', '{VEHICLES_SHEET}', '{ATTRIBUTES_SHEET}', '{VARIANTS_SHEET}' ni '{PRODUCT_INFO_SHEET}'.",
         )
 
     all_skus = (
@@ -476,6 +537,7 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
         | {_clean_str(r.get("sku")) for _, r in veh_rows if _clean_str(r.get("sku"))}
         | {_clean_str(r.get("sku")) for _, r in attr_rows if _clean_str(r.get("sku"))}
         | {_clean_str(r.get("sku")) for _, r in var_rows if _clean_str(r.get("sku"))}
+        | {_clean_str(r.get("sku")) for _, r in info_rows if _clean_str(r.get("sku"))}
     )
     product_map = await _resolve_products(db, all_skus)
 
@@ -504,24 +566,28 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
     veh_pairs, veh_errors = _process_vehicles_rows(veh_rows, product_map, combo_map)
     attr_updates, attr_errors = _process_attributes_rows(attr_rows, product_map, attribute_map)
     var_updates, var_errors = _process_variantes_rows(var_rows, product_map, variant_group_map)
+    info_updates, info_errors = _process_product_info_rows(info_rows, product_map)
 
     cat_assigned = await _bulk_insert_pairs(db, product_categories, cat_pairs, ["category_uuid", "product_id"], product_categories.c.category_uuid)
     veh_assigned = await _bulk_insert_pairs(db, product_vehicles, veh_pairs, ["vehicle_uuid", "product_id"], product_vehicles.c.vehicle_uuid)
     attr_assigned = await _apply_attribute_updates(db, attr_updates)
     var_assigned = await _apply_variant_group_updates(db, var_updates)
+    info_assigned = await _apply_product_info_updates(db, info_updates)
     await db.commit()
 
     logger.info(
         f"Bulk import via /admin: Categorias={len(cat_rows)} filas/{cat_assigned} nuevos/{len(cat_errors)} errores, "
         f"Vehiculos={len(veh_rows)} filas/{veh_assigned} nuevos/{len(veh_errors)} errores, "
         f"Atributos={len(attr_rows)} filas/{attr_assigned} escritos/{len(attr_errors)} errores, "
-        f"Variantes={len(var_rows)} filas/{var_assigned} productos/{len(var_errors)} errores."
+        f"Variantes={len(var_rows)} filas/{var_assigned} productos/{len(var_errors)} errores, "
+        f"InfoProducto={len(info_rows)} filas/{info_assigned} escritos/{len(info_errors)} errores."
     )
     return BulkImportOutcome(
         categories=_SheetOutcome(cat_found, len(cat_rows), cat_assigned, cat_errors),
         vehicles=_SheetOutcome(veh_found, len(veh_rows), veh_assigned, veh_errors),
         attributes=_SheetOutcome(attr_found, len(attr_rows), attr_assigned, attr_errors),
         variants=_SheetOutcome(var_found, len(var_rows), var_assigned, var_errors),
+        product_info=_SheetOutcome(info_found, len(info_rows), info_assigned, info_errors),
     )
 
 
@@ -577,6 +643,16 @@ def build_template_workbook() -> bytes:
     })
     ws_var.append(["SKU-EJEMPLO-1", "grupo-de-variantes-ejemplo"])
     ws_var.append(["SKU-EJEMPLO-3", "grupo-de-variantes-ejemplo"])
+
+    ws_info = wb.create_sheet(PRODUCT_INFO_SHEET)
+    info_columns = PRODUCT_INFO_REQUIRED_COLUMNS + PRODUCT_INFO_COLUMNS
+    _write_header(ws_info, info_columns, {
+        "brand": "Opcional - deja la celda vacia para no tocar el valor ya guardado. Igual que Atributos, MERGE: un valor corregido en una corrida posterior SI se aplica.",
+        "bulletPoints": "Opcional. Texto libre; usa saltos de linea dentro de la celda (Alt+Enter en Excel) para separar cada punto.",
+        "technicalSpecs": "Opcional. Texto libre, multilinea igual que bulletPoints.",
+        "contents": "Opcional. Texto libre - que incluye/accesorios trae el producto.",
+    })
+    ws_info.append(["SKU-EJEMPLO-1", "Marca-Ejemplo", "-Punto clave 1\n-Punto clave 2", "-Especificacion 1\n-Especificacion 2", "Incluye manual de usuario"])
 
     buffer = BytesIO()
     wb.save(buffer)

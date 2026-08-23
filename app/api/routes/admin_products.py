@@ -9,14 +9,16 @@ from app.schemas.attribute import (
     SetProductVariantGroupRequest,
     SetProductVariantGroupResponse,
 )
+from app.schemas.products import ProductInfoUpdateRequest, ProductInfoPublic
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependencies=[Depends(get_current_admin)])
 
-# No hay superficie admin para editar los campos propios del producto (name/price/stock/...)
-# - esos siguen siendo propiedad de Sicar X, sincronizados por el worker. Este router solo
-# cubre lo que este PIM administra localmente: atributos EAV y agrupacion de variantes.
+# La mayoria de los campos propios del producto (name/price/stock/...) siguen siendo
+# propiedad de Sicar X, sincronizados por el worker - no editables aqui. Este router cubre
+# lo que este PIM administra localmente: atributos EAV, agrupacion de variantes, y (abajo)
+# marca/bullets/especificaciones/contenido.
 
 
 @router.get("/{product_uuid}/attributes", response_model=ProductAttributesResponse, summary="Ver los atributos guardados de un producto")
@@ -44,3 +46,18 @@ async def admin_set_product_variant_group(product_uuid: str, db: DbDep, data: Se
     producto de cualquier grupo."""
     product = await attribute_service.set_product_variant_group(db, product_uuid, data.variant_group_uuid)
     return SetProductVariantGroupResponse(product_uuid=product_uuid, variant_group_uuid=product.variant_group_uuid)
+
+
+@router.patch("/{product_uuid}/info", response_model=ProductInfoPublic, summary="Actualizar marca/bullets/especificaciones tecnicas/contenido de un producto")
+async def admin_update_product_info(product_uuid: str, db: DbDep, data: ProductInfoUpdateRequest = Body()):
+    """Actualizacion parcial (exclude_unset=True) - un campo omitido no se toca, enviado
+    explicitamente como null se borra. `404` si el producto no existe/esta eliminado. No hay
+    GET equivalente aqui: `GET /products/{uuid}` (publico) ya expone estos mismos campos."""
+    product = await attribute_service.update_product_info(db, product_uuid, data.model_dump(exclude_unset=True))
+    return ProductInfoPublic(
+        product_uuid=product_uuid,
+        brand=product.brand,
+        bullet_points=product.bullet_points,
+        technical_specs=product.technical_specs,
+        contents=product.contents,
+    )

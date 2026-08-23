@@ -108,3 +108,27 @@ class ProductDetail(CamelModel):
     # PIM propio (no sincronizado desde Sicar X) - aditivo, nunca en ProductBasic (solo detalle).
     attributes: List[AttributeValuePublic] = []
     variant_group: Optional[VariantGroupDetail] = None
+    # PIM propio, igual que attributes/variant_group arriba - ver Product.brand/bullet_points/
+    # technical_specs/contents. Solo detalle de producto, deliberadamente ausente de ProductBasic.
+    brand: Optional[str] = None
+    bullet_points: Optional[str] = None
+    technical_specs: Optional[str] = None
+    contents: Optional[str] = None
+
+
+class ProductInfoUpdateRequest(CamelModel):
+    """Actualizacion parcial (exclude_unset=True) de los campos PIM propios de Product
+    (brand/bullet_points/technical_specs/contents) - un campo omitido no se toca, un campo
+    enviado explicitamente como null lo borra. Ver PATCH /admin/products/{uuid}/info."""
+    brand: Optional[str] = None
+    bullet_points: Optional[str] = None
+    technical_specs: Optional[str] = None
+    contents: Optional[str] = None
+
+
+class ProductInfoPublic(CamelModel):
+    product_uuid: str
+    brand: Optional[str] = None
+    bullet_points: Optional[str] = None
+    technical_specs: Optional[str] = None
+    contents: Optional[str] = None

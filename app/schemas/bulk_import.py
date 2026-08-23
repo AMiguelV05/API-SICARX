@@ -3,10 +3,10 @@ from typing import List, Literal, Optional
 from app.schemas.base import CamelModel
 
 # Carga masiva desde .xlsx; resuelve productos por sku (+ additional_skus), no por sicar_uuid - el admin no conoce los uuids internos.
-# Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos hace MERGE (una corrida posterior con un valor corregido SI se aplica);
+# Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos e InfoProducto hacen MERGE (una corrida posterior con un valor corregido SI se aplica);
 # Variantes REEMPLAZA (variant_group_uuid es un solo valor por producto, no un tag) - ver bulk_import_service.import_bulk_assignments.
 
-SheetName = Literal["Categorias", "Vehiculos", "Atributos", "Variantes"]
+SheetName = Literal["Categorias", "Vehiculos", "Atributos", "Variantes", "InfoProducto"]
 
 ReasonCode = Literal[
     "MISSING_FIELDS",
@@ -40,3 +40,4 @@ class BulkImportProductsResponse(CamelModel):
     vehicles: BulkImportSheetResult
     attributes: BulkImportSheetResult
     variants: BulkImportSheetResult
+    product_info: BulkImportSheetResult

@@ -71,12 +71,13 @@ async def admin_bulk_import_template():
 )
 async def admin_bulk_import_products(request: Request, db: DbDep, file: UploadFile = File(...)):
     """Importacion masiva desde un .xlsx (hojas opcionales 'Categorias'/'Vehiculos'/
-    'Atributos'/'Variantes'), resolviendo productos por `sku` (+ `additional_skus` como
-    fallback). Exito parcial: filas invalidas se omiten y se reportan individualmente,
-    solo problemas a nivel de archivo completo rechazan todo. Semantica de re-subida
-    distinta por hoja: Categorias/Vehiculos son ADITIVOS (`ON CONFLICT DO NOTHING`,
-    no-op seguro); Atributos hace MERGE (un valor corregido SI se aplica); Variantes
-    REEMPLAZA (`variantGroupUuid` es un solo valor por producto, no un tag)."""
+    'Atributos'/'Variantes'/'InfoProducto'), resolviendo productos por `sku` (+
+    `additional_skus` como fallback). Exito parcial: filas invalidas se omiten y se
+    reportan individualmente, solo problemas a nivel de archivo completo rechazan todo.
+    Semantica de re-subida distinta por hoja: Categorias/Vehiculos son ADITIVOS (`ON
+    CONFLICT DO NOTHING`, no-op seguro); Atributos e InfoProducto hacen MERGE (un valor
+    corregido SI se aplica); Variantes REEMPLAZA (`variantGroupUuid` es un solo valor por
+    producto, no un tag)."""
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Se espera un archivo .xlsx.")
 
@@ -97,4 +98,5 @@ async def admin_bulk_import_products(request: Request, db: DbDep, file: UploadFi
         vehicles=_sheet_result(outcome.vehicles, "Vehiculos"),
         attributes=_sheet_result(outcome.attributes, "Atributos"),
         variants=_sheet_result(outcome.variants, "Variantes"),
+        product_info=_sheet_result(outcome.product_info, "InfoProducto"),
     )

@@ -116,6 +116,10 @@ async def get_product_details(uuid: str, db: DbDep):
         deleted_at=product.deleted_at,
         attributes=[AttributeValuePublic.model_validate(d) for d in attribute_docs],
         variant_group=VariantGroupDetail.model_validate(variant_group) if variant_group else None,
+        brand=product.brand,
+        bullet_points=product.bullet_points,
+        technical_specs=product.technical_specs,
+        contents=product.contents,
     )
     return detail
 

@@ -2020,6 +2020,45 @@ Respuesta `200`:
 - `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
 - `404` si el grupo no existe, o si algún `productUuid` de `add` no resuelve.
 
+### Información propia de producto (marca/bullets/especificaciones/contenido)
+
+**Nuevo (2026-08-22), independiente de Atributos/Grupos de variantes de arriba** — no es EAV
+ni necesita un catálogo de definiciones previo: son cuatro columnas directas y libres en
+`Product` (`brand`, `bulletPoints`, `technicalSpecs`, `contents`), pensadas para el contenido
+de un distribuidor (marca del fabricante, viñetas de puntos clave, ficha técnica en texto,
+qué incluye la caja) que hoy no tiene dónde vivir en el catálogo. Los cuatro son
+`string | null`, totalmente independientes entre sí — se puede llenar cualquier subconjunto.
+Esta es la **única** superficie admin para editarlos uno a la vez; para un lote grande, ver la
+hoja `InfoProducto` en "Importación masiva por Excel" más abajo. No hay `GET` dedicado aquí —
+`GET /v1/products/{uuid}` (storefront, ver `FRONTEND_INTEGRATION.md`) ya expone los cuatro
+campos y solo necesita `x-api-key`, no un token de admin.
+
+#### `PATCH /v1/admin/products/{productUuid}/info` — actualizar marca/bullets/especificaciones/contenido
+
+```http
+PATCH /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/info
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+{ "brand": "Surtek", "bulletPoints": "-Fabricado en acero.\n-Soporte fijo." }
+```
+
+**Actualización parcial** (`exclude_unset`, mismo criterio que `PATCH /v1/admin/attributes/{uuid}`)
+— un campo **omitido** del body no se toca; un campo enviado explícitamente como `null` **sí
+se borra**. `technicalSpecs`/`contents` no incluidos arriba quedan exactamente como estaban.
+`404` si `productUuid` no corresponde a un producto real y no eliminado.
+
+Respuesta `200` — los cuatro campos ya con el estado final (no solo lo que venía en el body):
+```json
+{
+  "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+  "brand": "Surtek",
+  "bulletPoints": "-Fabricado en acero.\n-Soporte fijo.",
+  "technicalSpecs": null,
+  "contents": null
+}
+```
+
 ### Importación masiva por Excel
 
 #### `GET /v1/admin/bulk-import/template` — descargar una plantilla de ejemplo
@@ -2032,24 +2071,25 @@ Authorization: Bearer <admin-token>
 Respuesta `200`: el archivo `.xlsx` en sí (`Content-Type:
 application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, no JSON), con
 `Content-Disposition: attachment; filename=plantilla_importacion_masiva.xlsx` — un botón
-"Descargar plantilla" en el dashboard puede apuntar directo aquí. Trae las mismas cuatro
+"Descargar plantilla" en el dashboard puede apuntar directo aquí. Trae las mismas cinco
 hojas/columnas que `POST .../products` espera (nunca puede desalinearse: ambos lados
 comparten las mismas constantes en `bulk_import_service.py`), con encabezados en negritas,
 comentarios de celda explicando las columnas menos obvias (`categorySlug`, `make`/`model`
 insensibles a mayúsculas, `year` como año único no rango, `engine`/`vehicleType`
 opcionales, formato de `value` según `dataType`, `variantGroupSlug` derivado del `name` del
-grupo), y una o dos filas de ejemplo con datos **claramente ficticios** (`sku`
-`"SKU-EJEMPLO-1"`, marca `"Marca-Ejemplo"`, etc.) — hay que reemplazarlas o borrarlas
-antes de subir datos reales; si se sube tal cual sin editar, cada fila de ejemplo
-simplemente sale como un error por fila (nada coincide con datos ficticios), no un fallo
-del archivo completo.
+grupo, columnas de `InfoProducto` todas opcionales), y una o dos filas de ejemplo con datos
+**claramente ficticios** (`sku` `"SKU-EJEMPLO-1"`, marca `"Marca-Ejemplo"`, etc.) — hay que
+reemplazarlas o borrarlas antes de subir datos reales; si se sube tal cual sin editar, cada
+fila de ejemplo simplemente sale como un error por fila (nada coincide con datos ficticios),
+no un fallo del archivo completo.
 
 `POST /v1/admin/bulk-import/products` — asigna categorías, compatibilidad de vehículos,
-valores de atributos y/o grupos de variantes a muchos productos de una sola vez desde un
-archivo `.xlsx`, en vez de una asignación a la vez vía los endpoints de arriba. Pensado
-para poblar `product_categories`/`product_vehicles`/`Product.attributes`/
-`Product.variantGroupUuid` sobre el catálogo real (hoy todas siguen vacías/sin clasificar
-— ver CLAUDE.md).
+valores de atributos, grupos de variantes y/o información propia de producto a muchos
+productos de una sola vez desde un archivo `.xlsx`, en vez de una asignación a la vez vía
+los endpoints de arriba. Pensado para poblar `product_categories`/`product_vehicles`/
+`Product.attributes`/`Product.variantGroupUuid`/`Product.brand`/`Product.bulletPoints`/
+`Product.technicalSpecs`/`Product.contents` sobre el catálogo real (hoy todas siguen
+vacías/sin clasificar — ver CLAUDE.md).
 
 ```http
 POST /v1/admin/bulk-import/products
@@ -2059,7 +2099,7 @@ Content-Type: multipart/form-data
 file: <archivo .xlsx>
 ```
 
-El archivo puede traer cualquier subconjunto de estas cuatro hojas (por nombre exacto, sin
+El archivo puede traer cualquier subconjunto de estas cinco hojas (por nombre exacto, sin
 importar en qué orden estén dentro del archivo); si falta alguna, se trata como "0 filas"
 para esa hoja, no como error:
 
@@ -2073,6 +2113,15 @@ para esa hoja, no como error:
   `name` del grupo (mismo slugify que categorías/atributos — `VariantGroup` no tiene una
   columna `slug` propia, ver `GET /v1/admin/variant-groups` arriba para los nombres
   existentes).
+- **`InfoProducto`** (nuevo, 2026-08-22) — columna `sku` requerida, más `brand`,
+  `bulletPoints`, `technicalSpecs` y `contents`, **todas opcionales** — una fila puede
+  llenar cualquier subconjunto de las cuatro (una fila con solo `brand` no toca las otras
+  tres). Al menos una de las cuatro debe traer algo, si no la fila entera se reporta como
+  `MISSING_FIELDS`. Mismo destino que `PATCH /v1/admin/products/{uuid}/info` de arriba —
+  útil para cargar el contenido de un distribuidor (marca, viñetas, ficha técnica, qué
+  incluye) de golpe en vez de producto por producto. Para texto multilínea en
+  `bulletPoints`/`technicalSpecs`, usa Alt+Enter dentro de la celda de Excel — el salto de
+  línea se preserva tal cual en el valor guardado.
 
 Cada fila de `Vehiculos`/`Atributos`/`Variantes` es una sola asignación (formato largo). En `Categorias`, la
 celda `categorySlug` puede traer **un solo slug o varios separados por coma o punto y
@@ -2100,12 +2149,17 @@ aplica a **todas** las variantes de motor de esa marca/modelo/año.
   nuevos. Subir el mismo archivo dos veces es seguro — la segunda vez `assignedCount` da `0`
   en ambas hojas sin duplicar nada ni fallar (`ON CONFLICT DO NOTHING` sobre las mismas PKs
   compuestas que usa `assign-by-model`).
-- **`Atributos` hace MERGE** — a diferencia de las dos de arriba, un valor **corregido** en una
-  corrida posterior SÍ se aplica (no se ignora como un vínculo ya existente); solo se
-  preservan las claves que esta hoja no menciona, de una carga anterior o de
-  `PUT /v1/admin/products/{uuid}/attributes`. Subir el mismo archivo dos veces sigue siendo
-  seguro (mismo valor → sin cambio real), pero no es "ignorar si ya existe" como
-  `Categorias`/`Vehiculos`.
+- **`Atributos`/`InfoProducto` hacen MERGE** — a diferencia de las dos de arriba, un valor
+  **corregido** en una corrida posterior SÍ se aplica (no se ignora como un vínculo ya
+  existente); solo se preservan los campos que esta hoja no menciona, de una carga anterior
+  o de `PUT /v1/admin/products/{uuid}/attributes`/`PATCH .../info`. Subir el mismo archivo
+  dos veces sigue siendo seguro (mismo valor → sin cambio real), pero no es "ignorar si ya
+  existe" como `Categorias`/`Vehiculos`. En `InfoProducto` esto es por **campo individual**,
+  no por fila entera: una fila que solo trae `brand` corrige solo `brand` y deja
+  `bulletPoints`/`technicalSpecs`/`contents` exactamente como estaban (de esta hoja en otra
+  carga, o de un `PATCH .../info` anterior) — una celda vacía nunca borra un valor ya
+  guardado; para borrar un campo explícitamente usa `PATCH .../info` con ese campo en
+  `null`.
 - **`Variantes` REEMPLAZA** — `variantGroupUuid` es un solo valor por producto (columna
   directa, no un tag vía tabla pivote), así que no existe "aditivo" aquí: la fila más
   reciente para un `sku` dado gana, y esa carga sobreescribe lo que el producto ya tuviera.
@@ -2114,7 +2168,7 @@ aplica a **todas** las variantes de motor de esa marca/modelo/año.
 atributo/grupo inexistente, valor con tipo incorrecto, ningún vehículo coincide) no bloquea
 el resto del archivo: se omite esa fila (o, en `Categorias` con varios slugs en una celda,
 solo el slug que falló) y se reporta en `errors`, el resto se aplica igual. Solo un problema
-a nivel de archivo completo (no es un `.xlsx` real, falta cualquiera de las cuatro hojas, o
+a nivel de archivo completo (no es un `.xlsx` real, falta cualquiera de las cinco hojas, o
 una hoja presente le falta una columna requerida) rechaza la solicitud entera.
 
 Respuesta `200`:
@@ -2149,19 +2203,30 @@ Respuesta `200`:
     "processedRows": 0,
     "assignedCount": 0,
     "errors": []
+  },
+  "productInfo": {
+    "found": true,
+    "processedRows": 45,
+    "assignedCount": 52,
+    "errors": [
+      { "sheet": "InfoProducto", "row": 6, "reasonCode": "MISSING_FIELDS", "reason": "Fila incompleta: no trae ningun valor en brand/bulletPoints/technicalSpecs/contents.", "sku": "PR2057" }
+    ]
   }
 }
 ```
-`found: false` en cualquiera de las cuatro (en vez de `errors: []`) significa que esa hoja no
+`found: false` en cualquiera de las cinco (en vez de `errors: []`) significa que esa hoja no
 venía en el archivo, distinto de "venía pero con 0 filas de datos". `assignedCount` significa
 algo ligeramente distinto por hoja: en `categories`/`vehicles` son vínculos **nuevos**
-realmente insertados (no cuenta pares que ya existían); en `attributes` son pares
-(producto, atributo) **escritos** en total (incluye valores corregidos sobre una clave que ya
-existía, no solo claves nuevas); en `variants` es la cantidad de **productos** cuyo
-`variantGroupUuid` se aplicó. En cualquier caso puede ser menor a `processedRows` incluso sin
-ningún error (fila válida mandada dos veces, incluye la fila de ejemplo de la plantilla, etc.).
+realmente insertados (no cuenta pares que ya existían); en `attributes`/`productInfo` son
+pares (producto, campo) **escritos** en total (incluye valores corregidos sobre un campo que
+ya existía, no solo campos nuevos — en `productInfo` puede superar `processedRows`, como en
+el ejemplo de arriba, porque una sola fila con los cuatro campos llenos cuenta 4); en
+`variants` es la cantidad de **productos** cuyo `variantGroupUuid` se aplicó. En cualquier
+caso puede ser menor a `processedRows` incluso sin ningún error (fila válida mandada dos
+veces, incluye la fila de ejemplo de la plantilla, etc.).
 
-Errores de fila (`errors[].reasonCode`): `MISSING_FIELDS` (celda requerida vacía),
+Errores de fila (`errors[].reasonCode`): `MISSING_FIELDS` (celda requerida vacía, o en
+`InfoProducto` una fila con `sku` pero ningún valor en las cuatro columnas de info),
 `SKU_NOT_FOUND`, `CATEGORY_SLUG_NOT_FOUND`, `INVALID_YEAR` (`year` no es un entero),
 `VEHICLE_NOT_FOUND` (ningún fitment coincide con marca/modelo/año/motor — también cubre
 un `vehicleType` mal escrito, que da el mismo resultado observable que no coincidir),
@@ -2170,10 +2235,11 @@ atributo, o no está entre sus `allowedValues` si es `ENUM`), `VARIANT_GROUP_SLU
 
 Errores de archivo completo (rechazan toda la solicitud, no generan `errors` por fila):
 - `400` si el archivo no es un `.xlsx` válido, o pesa más de 4 MB.
-- `400` si no contiene ninguna hoja `Categorias`, `Vehiculos`, `Atributos` ni `Variantes`.
+- `400` si no contiene ninguna hoja `Categorias`, `Vehiculos`, `Atributos`, `Variantes` ni
+  `InfoProducto`.
 - `400` si alguna hoja excede 20,000 filas de datos.
 - `422` si una hoja presente no tiene todas sus columnas requeridas (nombra la hoja y las
-  columnas que faltan).
+  columnas que faltan) — en `InfoProducto` la única columna requerida es `sku`.
 
 ### Dashboard de ventas
 
