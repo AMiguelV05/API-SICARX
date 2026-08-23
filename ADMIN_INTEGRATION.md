@@ -2121,7 +2121,11 @@ para esa hoja, no como error:
   útil para cargar el contenido de un distribuidor (marca, viñetas, ficha técnica, qué
   incluye) de golpe en vez de producto por producto. Para texto multilínea en
   `bulletPoints`/`technicalSpecs`, usa Alt+Enter dentro de la celda de Excel — el salto de
-  línea se preserva tal cual en el valor guardado.
+  línea se preserva tal cual en el valor guardado. **Celda vacía vs. borrar un campo (nuevo,
+  2026-08-23)**: una celda vacía nunca toca el campo (ver la semántica de re-subida abajo);
+  para borrar explícitamente un campo ya guardado, escribe el texto literal `NULL` en la
+  celda (sin comillas, insensible a mayúsculas — `null`/`Null`/`NULL` funcionan igual) — ese
+  campo queda `null` en `Product`, igual que enviarlo así en `PATCH .../info`.
 
 Cada fila de `Vehiculos`/`Atributos`/`Variantes` es una sola asignación (formato largo). En `Categorias`, la
 celda `categorySlug` puede traer **un solo slug o varios separados por coma o punto y
@@ -2158,8 +2162,9 @@ aplica a **todas** las variantes de motor de esa marca/modelo/año.
   no por fila entera: una fila que solo trae `brand` corrige solo `brand` y deja
   `bulletPoints`/`technicalSpecs`/`contents` exactamente como estaban (de esta hoja en otra
   carga, o de un `PATCH .../info` anterior) — una celda vacía nunca borra un valor ya
-  guardado; para borrar un campo explícitamente usa `PATCH .../info` con ese campo en
-  `null`.
+  guardado. Para borrar un campo explícitamente sí hay una forma dentro de esta misma
+  hoja (no hace falta usar `PATCH .../info` aparte): escribe el texto literal `NULL` en la
+  celda — ese campo se guarda como `null`, distinto de dejarlo vacío.
 - **`Variantes` REEMPLAZA** — `variantGroupUuid` es un solo valor por producto (columna
   directa, no un tag vía tabla pivote), así que no existe "aditivo" aquí: la fila más
   reciente para un `sku` dado gana, y esa carga sobreescribe lo que el producto ya tuviera.

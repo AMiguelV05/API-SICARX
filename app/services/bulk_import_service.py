@@ -35,6 +35,7 @@ VARIANTS_REQUIRED_COLUMNS = ("sku", "variantGroupSlug")
 PRODUCT_INFO_REQUIRED_COLUMNS = ("sku",)  # brand/bulletPoints/technicalSpecs/contents son opcionales, ver _process_product_info_rows
 PRODUCT_INFO_COLUMNS = ("brand", "bulletPoints", "technicalSpecs", "contents")
 PRODUCT_INFO_FIELD_BY_COLUMN = {"brand": "brand", "bulletPoints": "bullet_points", "technicalSpecs": "technical_specs", "contents": "contents"}
+PRODUCT_INFO_NULL_MARKER = "NULL"  # texto literal (insensible a mayusculas) para borrar un campo explicitamente - ver _process_product_info_rows
 
 
 @dataclass
@@ -466,11 +467,18 @@ async def _apply_variant_group_updates(db: AsyncSession, updates: dict[int, str]
 
 def _process_product_info_rows(
     rows: list[tuple[int, dict]], product_map: dict[str, int]
-) -> tuple[dict[int, dict[str, str]], list[_RowError]]:
+) -> tuple[dict[int, dict[str, str | None]], list[_RowError]]:
     """Devuelve product_id -> {campo_de_Product: valor} (varias filas del mismo sku se
     acumulan en el mismo dict, igual que _process_attributes_rows - un sku repetido que solo
-    trae 'brand' en una fila y 'contents' en otra actualiza ambos, no se pisan entre si)."""
-    updates: dict[int, dict[str, str]] = {}
+    trae 'brand' en una fila y 'contents' en otra actualiza ambos, no se pisan entre si).
+
+    Una celda vacia sigue sin tocar el campo (no forma parte del dict devuelto para esa
+    fila) - subir una fila donde el admin solo lleno 'brand' no borra bulletPoints/
+    technicalSpecs/contents ya guardados. Para borrar un campo explicitamente, la celda
+    debe traer el texto literal "NULL" (insensible a mayusculas, sin comillas) - ese campo
+    entra al dict con valor None, que _apply_product_info_updates aplica igual que
+    cualquier otro valor (lo escribe, no lo omite)."""
+    updates: dict[int, dict[str, str | None]] = {}
     errors: list[_RowError] = []
     for row_num, data in rows:
         sku = _clean_str(data.get("sku"))
@@ -478,11 +486,13 @@ def _process_product_info_rows(
             errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: falta sku.", None))
             continue
 
-        values = {}
+        values: dict[str, str | None] = {}
         for column in PRODUCT_INFO_COLUMNS:
             cleaned = _clean_str(data.get(column))
-            if cleaned:
-                values[PRODUCT_INFO_FIELD_BY_COLUMN[column]] = cleaned
+            if not cleaned:
+                continue  # celda vacia - no toca el campo
+            field = PRODUCT_INFO_FIELD_BY_COLUMN[column]
+            values[field] = None if cleaned.upper() == PRODUCT_INFO_NULL_MARKER else cleaned
         if not values:
             errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: no trae ningun valor en brand/bulletPoints/technicalSpecs/contents.", sku))
             continue
@@ -496,9 +506,11 @@ def _process_product_info_rows(
     return updates, errors
 
 
-async def _apply_product_info_updates(db: AsyncSession, updates: dict[int, dict[str, str]]) -> int:
+async def _apply_product_info_updates(db: AsyncSession, updates: dict[int, dict[str, str | None]]) -> int:
     """Mismo patron lee-mezcla-escribe que _apply_attribute_updates: un valor nuevo gana por
-    campo, un campo no incluido en `updates` conserva lo que el producto ya tenia."""
+    campo, un campo no incluido en `updates` conserva lo que el producto ya tenia. Un campo
+    SI incluido con valor `None` (marcador "NULL" en la celda, ver _process_product_info_rows)
+    se escribe como tal - borra lo que el producto ya tuviera guardado en ese campo."""
     if not updates:
         return 0
     product_ids = list(updates.keys())
@@ -662,10 +674,10 @@ def build_template_workbook() -> bytes:
     ws_info = wb.create_sheet(PRODUCT_INFO_SHEET)
     info_columns = PRODUCT_INFO_REQUIRED_COLUMNS + PRODUCT_INFO_COLUMNS
     _write_header(ws_info, info_columns, {
-        "brand": "Opcional - deja la celda vacia para no tocar el valor ya guardado. Igual que Atributos, MERGE: un valor corregido en una corrida posterior SI se aplica.",
-        "bulletPoints": "Opcional. Texto libre; usa saltos de linea dentro de la celda (Alt+Enter en Excel) para separar cada punto.",
-        "technicalSpecs": "Opcional. Texto libre, multilinea igual que bulletPoints.",
-        "contents": "Opcional. Texto libre - que incluye/accesorios trae el producto.",
+        "brand": "Opcional - deja la celda vacia para no tocar el valor ya guardado. Igual que Atributos, MERGE: un valor corregido en una corrida posterior SI se aplica. Escribe NULL (sin comillas) para borrar un valor ya guardado.",
+        "bulletPoints": "Opcional. Texto libre; usa saltos de linea dentro de la celda (Alt+Enter en Excel) para separar cada punto. Escribe NULL para borrar el valor ya guardado.",
+        "technicalSpecs": "Opcional. Texto libre, multilinea igual que bulletPoints. Escribe NULL para borrar el valor ya guardado.",
+        "contents": "Opcional. Texto libre - que incluye/accesorios trae el producto. Escribe NULL para borrar el valor ya guardado.",
     })
     ws_info.append(["SKU-EJEMPLO-1", "Marca-Ejemplo", "-Punto clave 1\n-Punto clave 2", "-Especificacion 1\n-Especificacion 2", "Incluye manual de usuario"])
 
