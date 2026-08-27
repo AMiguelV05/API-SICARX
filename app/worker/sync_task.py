@@ -1,5 +1,6 @@
 import httpx
 import asyncio
+import json
 import logging
 from decimal import Decimal
 from logging.handlers import RotatingFileHandler
@@ -16,7 +17,9 @@ from app.models.attribute import VariantGroup  # noqa: F401
 from datetime import datetime, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
-from app.core.sicar_headers import bearer_json_headers
+from app.core.sicar_headers import bearer_json_headers, graphql_bearer_headers
+from app.core.sicar_validation import is_safe_sicar_id
+from app.core.retry import request_with_backoff
 from app.core.error_tracking import capture_exception, init_error_tracking
 from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
 from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
@@ -51,8 +54,47 @@ logger = logging.getLogger(__name__)
 init_error_tracking("worker")
 
 SICAR_LIST_URL = "https://api.sicarx.com/product/v1/product/list"
+GRAPHQL_URL = "https://api.sicarx.com/graph/v1/"
 PRICE_LIST_ID = settings.SICAR_PRICE_LIST_ID
 MAX_RETRIES = 4
+
+
+async def _fetch_hidden_map(client: httpx.AsyncClient, uuids: list) -> dict:
+    safe_uuids = [u for u in uuids if is_safe_sicar_id(u)]
+    if not safe_uuids:
+        return {}
+
+    query = f"""{{
+        products(uuids: {json.dumps(safe_uuids)}, priceListId: {json.dumps(PRICE_LIST_ID)}) {{
+            uuid
+            hidden
+        }}
+    }}"""
+
+    async def attempt_fetch(token: str):
+        headers = graphql_bearer_headers(token)
+        return await client.post(GRAPHQL_URL, content=query, headers=headers)
+
+    try:
+        async def call_with_auth():
+            return await sicar_auth.request_with_retry(attempt_fetch)
+
+        response = await request_with_backoff(call_with_auth, max_attempts=2, context="Sicar X hidden status en bloque")
+
+        if response.status_code != 200:
+            logger.warning(f"No se pudo obtener el estado 'hidden' en bloque (status {response.status_code}). Se asumira visible para este bloque.")
+            return {}
+
+        data = response.json()
+        if "errors" in data:
+            logger.warning(f"Errores GraphQL consultando 'hidden' en bloque: {data['errors']}")
+            return {}
+
+        products = data.get("data", {}).get("products") or []
+        return {p["uuid"]: bool(p.get("hidden", False)) for p in products if p.get("uuid")}
+    except httpx.RequestError as e:
+        logger.warning(f"Error de red consultando el estado 'hidden' en bloque: {e}")
+        return {}
 
 async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     items_per_page = 300
@@ -134,6 +176,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 has_more_products = False
                 break
 
+            hidden_map = await _fetch_hidden_map(client, [p.get("uuid") for p in items if p.get("uuid")])
+
             product_values = []
             for p in items:
                 prices_obj = p.get("prices") or {}
@@ -153,7 +197,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "department_uuid": p.get("departmentUuid"),
                     "category_uuid": p.get("categoryUuid"),
                     "is_bulk": p.get("bulk", False),
-                    "is_active": not p.get("hidden", False),
+                    "is_active": not hidden_map.get(p.get("uuid"), False),
                     "price": Decimal(str(prices_obj.get(price_key, 0.0))),
                     "stock": Decimal(str(p.get("stock", 0.0))),
                     "is_deleted": False,
