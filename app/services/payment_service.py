@@ -14,6 +14,7 @@ from app.core.webhook_signing import verify_hmac_sha256
 
 PREFERENCES_URL = "https://api.mercadopago.com/checkout/preferences"
 PAYMENTS_URL = "https://api.mercadopago.com/v1/payments"
+CHARGEBACKS_URL = "https://api.mercadopago.com/v1/chargebacks"
 MP_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,21 @@ async def get_payment(payment_id: str) -> dict:
 
     if response.status_code != 200:
         raise_upstream_error(response, f"Error al consultar el pago {payment_id} en Mercado Pago", "No se pudo consultar el estado del pago en Mercado Pago.")
+
+    return response.json()
+
+async def get_chargeback(chargeback_id: str) -> dict:
+    """Consulta el detalle de un contracargo ("Compra no reconocida") - coverage_eligible/
+    documentation_required/date_documentation_deadline y coverage_applied (None mientras
+    esta en proceso, true/false al resolverse). Ver chargeback_service.py."""
+    async def attempt():
+        async with httpx.AsyncClient(timeout=MP_TIMEOUT) as client:
+            return await client.get(f"{CHARGEBACKS_URL}/{chargeback_id}", headers=_mp_headers())
+
+    response = await request_with_backoff(attempt, context=f"MP get_chargeback {chargeback_id}")
+
+    if response.status_code != 200:
+        raise_upstream_error(response, f"Error al consultar el contracargo {chargeback_id} en Mercado Pago", "No se pudo consultar el contracargo en Mercado Pago.")
 
     return response.json()
 

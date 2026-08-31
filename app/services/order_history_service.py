@@ -12,6 +12,7 @@ from app.services.order_cancellation_notification_service import notify_order_ca
 from app.services.order_service import _to_decimal
 from app.services.product_stock_service import apply_reserved_deltas, apply_sales_count_deltas
 from app.services import coupon_service
+from app.services import admin_notification_service
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,8 @@ logger = logging.getLogger(__name__)
 MP_APPROVED_STATUSES = {"approved"}
 MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
+# Contracargo ("Compra no reconocida") - ver CLAUDE.md, "Contracargos de Mercado Pago".
+MP_CHARGEBACK_STATUSES = {"charged_back"}
 
 async def create_local_order(
     db: AsyncSession, client_account_id: int | None, order_payload_dict: dict, local_products: dict | None = None,
@@ -283,6 +286,7 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
 
     became_paid = False
     became_cancelled = False
+    became_disputed = False
     if mp_status in MP_APPROVED_STATUSES:
         if order.status != "PAID":
             became_paid = True
@@ -303,6 +307,17 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
         if order.status == "TO_PAY":
             became_cancelled = True
             order = await prepare_local_cancellation(db, order)
+    elif mp_status in MP_CHARGEBACK_STATUSES:
+        # order.status se queda como esta (PAID) - un contracargo es un evento monetario,
+        # mismo criterio que un reembolso parcial. Solo la PRIMERA notificacion "charged_back"
+        # marca disputed_at y avisa al admin - un reintento del webhook para la misma orden ya
+        # marcada no debe repetir la alerta. Este es el camino de deteccion por defecto (via el
+        # topic "payment", siempre disponible); el detalle enriquecido (deadline, resultado
+        # final) llega por separado via chargeback_service.py si el topic "chargebacks" esta
+        # habilitado en el dashboard de Mercado Pago.
+        if order.disputed_at is None:
+            became_disputed = True
+            order.disputed_at = datetime.now(timezone.utc)
 
     try:
         await db.commit()
@@ -327,6 +342,12 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             await notify_order_cancelled(order, background_tasks)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_order_cancelled) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
+    if became_disputed:
+        logger.critical(f"Orden {order.uuid} recibio un contracargo (payment {order.mp_payment_id}).")
+        try:
+            await admin_notification_service.notify_admin_chargeback_received(order, background_tasks)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_admin_chargeback_received) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

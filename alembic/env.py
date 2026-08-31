@@ -23,6 +23,7 @@ from app.models.coupon import Coupon, CouponRedemption, coupon_categories, coupo
 from app.models.admin_user import AdminUser
 from app.models.audit_log import AdminAuditLog
 from app.models.refund import Refund
+from app.models.chargeback import Chargeback
 from app.models.wishlist import WishlistCollection, WishlistItem
 
 # this is the Alembic Config object, which provides

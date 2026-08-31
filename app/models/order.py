@@ -108,6 +108,12 @@ class Order(Base):
     # NULL para cancelaciones del cliente (POST /orders/{id}/cancel, DELETE, pago rechazado).
     cancellation_reason = Column(Text, nullable=True)
 
+    # Poblado una sola vez al detectar el primer contracargo ("Compra no reconocida") sobre
+    # esta orden - nunca se vuelve a limpiar despues de resolverse (marcador historico,
+    # misma filosofia que el resto de columnas de timestamp de este modelo). No cambia
+    # `status` (se queda PAID) - ver Chargeback y CLAUDE.md, "Contracargos de Mercado Pago".
+    disputed_at = Column(DateTime(timezone=True), nullable=True)
+
     # Cupon aplicado, si hubo uno - ver CouponRedemption para el ciclo de vida del uso.
     # coupon_code es una foto fija del texto usado (el Coupon puede editarse/borrarse despues).
     # subtotal es el total ANTES del descuento; NULL en ordenes historicas (tratar como == total).

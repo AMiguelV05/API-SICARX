@@ -186,6 +186,48 @@ el pedido correspondiente).
 }
 ```
 
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-chargeback-received`
+
+Senal **urgente** de que se abrio un contracargo ("Compra no reconocida") sobre una orden ya
+pagada - ver "Contracargos de Mercado Pago" en CLAUDE.md para el detalle completo de los dos
+caminos de deteccion. Mismo body (`OrderPublic` mas `clientEmail`/`clientName`) que
+`order-cancelled` arriba - `disputedAt` en el body es el dato nuevo a observar.
+
+```json
+{
+  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "status": "PAID",
+  "disputedAt": "2026-08-31T14:22:03Z",
+  "total": 129.99,
+  "totalQuantity": 3,
+  "clientEmail": "cliente@example.com",
+  "clientName": "Juan Pérez"
+}
+```
+
+`status` se queda en `"PAID"` - un contracargo no cancela ni reembolsa nada
+automáticamente, es solo una señal de que hay que revisar el caso (usar
+`GET /v1/admin/orders/{uuid}/chargebacks` para el detalle/deadline si el topic
+"Chargebacks" está habilitado en el dashboard de Mercado Pago).
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-chargeback-resolved`
+
+Se dispara solo si el topic "Chargebacks" de Mercado Pago está habilitado (ver arriba) - el
+camino de detección por defecto nunca por sí solo confirma una resolución. `chargebackStatus`
+es `"WON"` (a favor, dinero devuelto) o `"LOST"` (en contra, dinero retirado) - nunca vuelve a
+`"IN_PROCESS"`.
+
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "chargebackStatus": "LOST",
+  "amount": 129.99,
+  "resolvedAt": "2026-09-15T10:03:11Z"
+}
+```
+
 ## Referencia de endpoints
 
 ### `POST /v1/admin/auth/login` — login
@@ -412,9 +454,15 @@ Respuesta `200`:
   "acceptedBy": null,
   "deliveryCompany": null,
   "deliveryAssignedAt": null,
-  "cancellationReason": null
+  "cancellationReason": null,
+  "disputedAt": null
 }
 ```
+
+`disputedAt` es un marcador histórico: se puebla la primera vez que se detecta un contracargo
+sobre esta orden y nunca se vuelve a limpiar después, aunque el contracargo ya se haya resuelto
+- usar `GET .../chargebacks` (abajo) para el detalle/resultado. Ver "Contracargos de Mercado
+Pago" en CLAUDE.md.
 
 Mismo shape base que `GET /v1/auth/me/orders/{orderUuid}` en el storefront (ver
 `FRONTEND_INTEGRATION.md`), más los campos exclusivos de este panel: `clientEmail`/`clientName`
@@ -664,6 +712,45 @@ nuevo, ver arriba). Incluye tanto reembolsos parciales explícitos como el reemb
 (`reason` en ese caso es `"Cancelación de orden"` o `"Cancelación de orden (admin)"`, y
 `issuedByAdminId` es `null` si fue el propio cliente quien canceló). Respuesta `200`: mismo
 shape que el objeto de arriba, dentro de `{"total": ..., "docs": [...]}`.
+
+### `GET /v1/admin/orders/{orderUuid}/chargebacks` — historial de contracargos de un pedido
+
+```http
+GET /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/chargebacks?limit=50&offset=0
+Authorization: Bearer <admin-token>
+```
+
+Cualquier admin autenticado puede leer esto - a diferencia de `.../refunds`, no hay una ruta
+`POST` equivalente para emitir uno a mano: esta API detecta los contracargos sola vía el
+webhook de Mercado Pago (ver "Contracargos de Mercado Pago" en CLAUDE.md). Respuesta `200`:
+
+```json
+{
+  "total": 1,
+  "docs": [
+    {
+      "id": 7,
+      "orderId": 42,
+      "mpChargebackId": "234000062890459000",
+      "mpPaymentId": "86439942806",
+      "amount": 129.99,
+      "reason": "general",
+      "status": "IN_PROCESS",
+      "coverageEligible": true,
+      "documentationRequired": false,
+      "documentationDeadline": null,
+      "createdAt": "2026-08-31T14:22:03Z",
+      "resolvedAt": null
+    }
+  ]
+}
+```
+
+`status` es `"IN_PROCESS"` (en curso), `"WON"` (a favor - dinero devuelto) o `"LOST"` (en
+contra - dinero retirado). `mpChargebackId`/`coverageEligible`/`documentationRequired`/
+`documentationDeadline` quedan en `null` si el contracargo solo se detectó por el camino por
+defecto (topic "payment" de Mercado Pago) y el topic "Chargebacks" nunca se habilitó en su
+dashboard - ver CLAUDE.md para el detalle de ambos caminos.
 
 ### Guía de envío con envia.com
 

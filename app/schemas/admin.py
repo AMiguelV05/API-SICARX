@@ -64,6 +64,9 @@ class AdminOrderPublic(CamelModel):
     # Poblados solo si POST .../shipping/cancel se uso alguna vez sobre esta orden - ver Order.shipping_cancellation_reason.
     shipping_cancellation_reason: Optional[str] = None
     shipping_label_cancelled_at: Optional[datetime] = None
+    # Marcador historico: poblado desde el primer contracargo detectado sobre esta orden,
+    # nunca se limpia despues - ver GET .../chargebacks para el detalle/resultado.
+    disputed_at: Optional[datetime] = None
 
 class AdminOrderListResponse(CamelModel):
     total: int

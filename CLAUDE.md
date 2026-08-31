@@ -460,6 +460,74 @@ The webhook payload reuses `OrderPublic` (`app/schemas/orders.py`, `model_valida
 
 `POST /orders/{order_id}/cancel` also got a payment-cleanup step: before the local cancellation (`prepare_local_cancellation`), if the order has an `mp_payment_id`, it refunds (`payment_service.refund_payment`) an already-`approved` payment or cancels (`payment_service.cancel_payment`) a still-`pending`/`in_process` one — the real-world, non-reversible money fact resolves before local bookkeeping, same ordering principle used throughout "Local-first order cancellation" below.
 
+### Contracargos de Mercado Pago ("Compra no reconocida") (2026-08-31)
+
+What happens when a buyer flags an already-confirmed order as "Compra no reconocida"
+with their bank/Mercado Pago. Before this, **nothing** — the webhook route always
+assumed every notification was about a `payment` and called `get_payment()`, and even
+after adding a branch for it, the route's own `if order.status in ("PAID", "CANCELLED"):
+return "already final"` short-circuit would have swallowed it anyway, since a chargeback
+by definition only ever happens on an order that's already `PAID`. That guard is now
+just `if order.status == "CANCELLED"` — safe, because `finalize_order_payment`'s own
+branches already guard each transition (`if order.status != "PAID"` / `if order.status
+== "TO_PAY"`), so it was already tolerant of repeat calls on a `PAID` order; the
+short-circuit was purely an optimization that happened to also (wrongly) block the one
+case that legitimately needs to reach a `PAID` order.
+
+Two independent detection paths, for robustness — Mercado Pago's own docs confirm a
+chargeback flips the associated **payment's** `status` to `charged_back` regardless of
+dashboard config, while richer detail (deadline, `coverage_eligible`/
+`documentation_required`, and the final `coverage_applied` outcome) only arrives via a
+**separate `chargebacks` webhook topic** that must be enabled explicitly in the Mercado
+Pago dashboard (a manual, external, non-code step — do this in production or path 2
+below never fires):
+
+1. **Default path, always active** — `MP_CHARGEBACK_STATUSES = {"charged_back"}` in
+   `order_history_service.py`; `finalize_order_payment` sets `Order.disputed_at` (once,
+   on first detection — never cleared back to `None`, same historical-marker philosophy
+   as every other timestamp column on `Order`) and fires
+   `admin_notification_service.notify_admin_chargeback_received`. `Order.status` is
+   deliberately untouched (stays `PAID`) — same "money-only event" policy as partial
+   refunds (see "Admin RBAC, audit log, and partial refunds" below).
+2. **Enriched path, needs the dashboard topic enabled** — `POST /payments/webhook`
+   branches on `topic`/`type` before assuming `payment`; a `chargebacks` topic calls
+   `payment_service.get_chargeback(id)` (`GET /v1/chargebacks/{id}`, a **different**
+   Mercado Pago resource/id than a payment) and hands the response to
+   `chargeback_service.process_chargeback_notification`, which resolves the `Order` via
+   the chargeback's own `payments[0]` → `Order.mp_payment_id`, upserts a `Chargeback` row
+   (`app/models/chargeback.py`, one row per event — mirrors `Refund`'s shape exactly,
+   including "no accumulator column, derive from the rows") keyed on `mp_chargeback_id`
+   (idempotent — a repeat/resolution notification just refreshes the existing row), and
+   maps Mercado Pago's `coverage_applied` (`None`/`true`/`false`) onto this codebase's own
+   `Chargeback.status` vocabulary: `IN_PROCESS`/`WON`/`LOST`. On a real
+   `IN_PROCESS`→`WON`/`LOST` transition it fires
+   `notify_admin_chargeback_resolved`. **Gotcha**: Mercado Pago's own API returns the
+   field misspelled `coverage_elegible` (missing the second "i") — confirmed in their
+   docs, not a typo on this side; `chargeback_service.py` reads that exact key while the
+   local column stays correctly spelled `coverage_eligible`.
+
+**Deliberately out of scope for this pass** (confirm with the user before building
+either, priorities may have changed):
+- Submitting dispute-fighting documentation (`POST /v1/chargebacks/{id}/documentation`)
+  — needs real proof-of-delivery assets and admin-dashboard UI that doesn't exist yet,
+  same reasoning as why `/shipping/*` never got document uploads either.
+- Any automatic `Order.status`/`Product.stock`/`Product.reserved` change on a **lost**
+  (`LOST`) chargeback — same "money-only event, a human decides next steps" policy as
+  partial refunds. A lost dispute becomes visible to the admin (`Order.disputed_at`, the
+  `Chargeback` row, the `order-chargeback-resolved` webhook); whether to also restock or
+  otherwise adjust the order is a business call, not automated here.
+
+Admin visibility mirrors the `Refund` surface exactly: `GET
+/admin/orders/{uuid}/chargebacks` (any authenticated admin, no `require_super_admin` —
+unlike refunds there's no "who can issue" restriction to mirror, since a chargeback is
+system-detected, never admin-issued) and `AdminOrderPublic.disputedAt`. **No audit-log
+entry** — `audit_service.log_action` is only ever called with a real `AdminUser` from a
+route handler; a chargeback is a system event with no admin actor, so it follows the
+`logger.critical` + admin-webhook pattern instead, same as
+`notify_admin_sicar_sync_failed`/`notify_admin_stock_drift`. See `ADMIN_INTEGRATION.md`
+for the two new outbound webhooks' full payload shape
+(`order-chargeback-received`/`order-chargeback-resolved`).
+
 ### Endpoints (all verified live end-to-end)
 
 All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted in `app/api/v1_router.py`, omitted from the table below for brevity.
@@ -538,6 +606,7 @@ Built for operational visibility (queue depth/failures were previously invisible
 | `POST /admin/orders/{order_uuid}/shipping/cancel` | Cancela ante envia.com (`POST /ship/cancel/`) una guía ya generada, reconstruyendo la petición solo con `carrier`/`trackingNumber` ya persistidos en `Order.shipping_label` — el admin no los vuelve a capturar. Si envia.com confirma, en una sola transacción limpia `Order.shipping_label` a `null` y revierte `Order.dispatch_status` de `"DISPATCHED"` a `"COMPLETE"` — la única forma de desbloquear ese camino, ya que `/advance-status` se niega a revertir esa transición mientras `shipping_label` siga poblado. `reason` se persiste en `Order.shipping_cancellation_reason`/`shipping_label_cancelled_at` (mismo patrón que `Order.cancellation_reason`), expuesto en `AdminOrderPublic`, pero — a diferencia de ese — nunca se le notifica al cliente, es auditoría interna. Sin `SicarSyncOutbox`, mismo motivo que `/shipping/generate`. `409` si el pedido no tiene guía. `502` si envia.com rechaza la cancelación (típicamente: la guía ya fue recogida por el carrier o pasó la ventana de cancelación) — mensaje real de envia.com entre paréntesis, mismo tratamiento de `meta:"error"` que `/shipping/generate`. Ver ADMIN_INTEGRATION.md. |
 | `POST /admin/orders/{order_uuid}/refund` | Emite un reembolso parcial o total (Mercado Pago) sobre una orden `PAID` — **solo `super_admin`**. `409` si la orden no está `PAID`/no tiene `mp_payment_id`; `400` si `amount` excede lo restante (`order.total` menos la suma de `Refund` previos). No toca `Order.status` (se queda `PAID`) ni `Product.stock`/`reserved` — evento solo monetario. Ver "Admin RBAC, audit log, and partial refunds" abajo. |
 | `GET /admin/orders/{order_uuid}/refunds` | Lista los `Refund` de una orden (parciales explícitos + el automático de una cancelación completa). Cualquier admin autenticado puede ver; solo `super_admin` puede emitir. |
+| `GET /admin/orders/{order_uuid}/chargebacks` | Lista los `Chargeback` ("Compra no reconocida") detectados sobre una orden — ver "Contracargos de Mercado Pago" arriba. Sin ruta de emisión: esta API los detecta sola vía el webhook de Mercado Pago, ningún admin los crea a mano. |
 | `POST /admin/categories` | Crea un nodo del árbol de categorías (`app/api/routes/admin_categories.py`, `taxonomy_service.create_category`). `name` requerido, `parentUuid` opcional (root si se omite). `slug` siempre se deriva de `name` (nunca lo manda el admin) — mismo slugify de la migración `5cbd5e4aa1be`, desambiguado en runtime contra los slugs actuales. `uuid` generado localmente (`uuid4()`). `404` si `parentUuid` no existe. |
 | `PATCH /admin/categories/{uuid}` | Actualización parcial (`exclude_unset=True`, mismo patrón que `PATCH /auth/me/addresses/{uuid}`): `name` y/o `parentUuid` en la misma llamada — no hay endpoint de "mover" separado. Renombrar recalcula el `slug`. Mover valida que el nuevo padre no sea el nodo mismo ni uno de sus propios descendientes (`409`, vía `get_descendant_uuids`) — guarda contra ciclos en el árbol. |
 | `DELETE /admin/categories/{uuid}` | Borrado real (no soft-delete), **solo `super_admin`**, auditado (`category.delete`). `409` si el nodo todavía tiene subcategorías o productos asignados en `product_categories` — hay que reasignarlos/quitarlos primero; deliberadamente no hay cascada ni reparenteo automático. |

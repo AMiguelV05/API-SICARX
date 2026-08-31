@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from app.models.order import Order, SicarSyncOutbox
 from app.models.product import SyncStatus
 from app.models.refund import Refund
+from app.models.chargeback import Chargeback
 from app.models.admin_user import AdminUser
 from app.schemas.admin import (
     AdminHealthResponse,
@@ -339,6 +340,21 @@ async def list_order_refunds(db: AsyncSession, order_uuid: str, limit: int, offs
     total = await db.scalar(select(func.count()).select_from(Refund).where(Refund.order_id == order))
     result = await db.execute(
         select(Refund).where(Refund.order_id == order).order_by(Refund.created_at.desc()).limit(limit).offset(offset)
+    )
+    return total or 0, list(result.scalars().all())
+
+
+async def list_order_chargebacks(db: AsyncSession, order_uuid: str, limit: int, offset: int) -> tuple[int, list[Chargeback]]:
+    """Contracargos ("Compra no reconocida") registrados sobre una orden - detectados por
+    finalize_order_payment/chargeback_service.py via el webhook de Mercado Pago, nunca
+    emitidos por un admin (a diferencia de refunds, no hay ruta POST equivalente aqui)."""
+    order = await db.scalar(select(Order.id).where(Order.uuid == order_uuid))
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Orden no encontrada.")
+
+    total = await db.scalar(select(func.count()).select_from(Chargeback).where(Chargeback.order_id == order))
+    result = await db.execute(
+        select(Chargeback).where(Chargeback.order_id == order).order_by(Chargeback.created_at.desc()).limit(limit).offset(offset)
     )
     return total or 0, list(result.scalars().all())
 

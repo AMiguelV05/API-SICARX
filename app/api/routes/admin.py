@@ -28,6 +28,7 @@ from app.schemas.admin import (
     ShippingCancelRefund,
 )
 from app.schemas.refund import RefundCreateRequest, RefundPublic, RefundListResponse
+from app.schemas.chargeback import ChargebackPublic, ChargebackListResponse
 from app.services import admin_service, audit_service
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,21 @@ async def admin_list_order_refunds(
     cancelacion completa (`reason="Cancelación de orden"`/`"Cancelación de orden (admin)"`)."""
     total, refunds = await admin_service.list_order_refunds(db, order_uuid, limit, offset)
     return RefundListResponse(total=total, docs=[RefundPublic.model_validate(r) for r in refunds])
+
+
+@router.get("/orders/{order_uuid}/chargebacks", response_model=ChargebackListResponse, summary="Listar los contracargos registrados sobre una orden")
+async def admin_list_order_chargebacks(
+    order_uuid: str,
+    db: DbDep,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Cualquier admin autenticado puede ver. Los contracargos ("Compra no reconocida")
+    los detecta esta API sola via el webhook de Mercado Pago (ver CLAUDE.md, "Contracargos
+    de Mercado Pago") - no hay ruta para que un admin cree uno a mano, a diferencia de
+    los reembolsos parciales de arriba."""
+    total, chargebacks = await admin_service.list_order_chargebacks(db, order_uuid, limit, offset)
+    return ChargebackListResponse(total=total, docs=[ChargebackPublic.model_validate(c) for c in chargebacks])
 
 
 @router.post("/orders/{order_uuid}/advance-status", response_model=AdvanceDispatchStatusResponse, summary="Avanzar (o revertir un paso) el dispatchStatus de una orden")
