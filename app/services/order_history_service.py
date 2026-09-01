@@ -7,6 +7,7 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.order import Order, SicarSyncOutbox
+from app.models.refund import Refund
 from app.services.order_notification_service import notify_order_confirmed
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_service import _to_decimal
@@ -22,6 +23,12 @@ MP_PENDING_STATUSES = {"pending", "in_process"}
 MP_FAILED_STATUSES = {"rejected", "cancelled"}
 # Contracargo ("Compra no reconocida") - ver CLAUDE.md, "Contracargos de Mercado Pago".
 MP_CHARGEBACK_STATUSES = {"charged_back"}
+# Mediacion (etapa previa a un contracargo formal) y reembolso registrado directamente en
+# el dashboard de Mercado Pago (fuera de POST /admin/orders/{uuid}/refund) - mismo criterio
+# que un contracargo: solo informan/registran, nunca tocan order.status. Ver CLAUDE.md,
+# "Contracargos de Mercado Pago".
+MP_MEDIATION_STATUSES = {"in_mediation"}
+MP_REFUNDED_STATUSES = {"refunded"}
 
 async def create_local_order(
     db: AsyncSession, client_account_id: int | None, order_payload_dict: dict, local_products: dict | None = None,
@@ -275,6 +282,11 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     order = locked_result.scalar_one()
 
     mp_status = mp_payment.get("status")
+    # Capturado ANTES de sobreescribir order.mp_status abajo - las ramas de disputa (mas
+    # abajo) necesitan saber si ESTA notificacion es una transicion real o un reintento,
+    # y order.disputed_at (marcador compartido por varias ramas) ya no sirve para eso solo
+    # (ver nota de la rama MP_CHARGEBACK_STATUSES).
+    previous_mp_status = order.mp_status
 
     order.mp_payment_id = str(mp_payment.get("id")) if mp_payment.get("id") is not None else order.mp_payment_id
     order.mp_status = mp_status
@@ -287,17 +299,24 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
     became_paid = False
     became_cancelled = False
     became_disputed = False
+    became_in_mediation = False
+    became_out_of_band_refund = False
+    out_of_band_refund_amount = None
     if mp_status in MP_APPROVED_STATUSES:
-        if order.status != "PAID":
-            became_paid = True
-        order.status = "PAID"
-        if became_paid:
-            # Registro de "mas vendidos" (Product.sales_count) - solo en la transicion real, nunca en un reintento del webhook para una orden ya PAID.
-            deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
-            await apply_sales_count_deltas(db, deltas)
-            # Idem para la redencion del cupon: consumo permanente solo en la transicion real a PAID.
-            if order.coupon_id:
-                await coupon_service.confirm_redemption(db, order)
+        # order.status != "CANCELLED": una notificacion "approved" tardia/repetida (replay,
+        # u otro intento de pago) nunca debe resucitar una orden ya cancelada (y
+        # probablemente ya reembolsada) de vuelta a PAID.
+        if order.status != "CANCELLED":
+            if order.status != "PAID":
+                became_paid = True
+            order.status = "PAID"
+            if became_paid:
+                # Registro de "mas vendidos" (Product.sales_count) - solo en la transicion real, nunca en un reintento del webhook para una orden ya PAID.
+                deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
+                await apply_sales_count_deltas(db, deltas)
+                # Idem para la redencion del cupon: consumo permanente solo en la transicion real a PAID.
+                if order.coupon_id:
+                    await coupon_service.confirm_redemption(db, order)
     elif mp_status in MP_PENDING_STATUSES:
         # Solo aplica si sigue TO_PAY - una notificacion pending/in_process tardia de OTRO intento de pago no debe regresar una orden ya resuelta a TO_PAY.
         if order.status == "TO_PAY":
@@ -308,16 +327,40 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             became_cancelled = True
             order = await prepare_local_cancellation(db, order)
     elif mp_status in MP_CHARGEBACK_STATUSES:
-        # order.status se queda como esta (PAID) - un contracargo es un evento monetario,
-        # mismo criterio que un reembolso parcial. Solo la PRIMERA notificacion "charged_back"
-        # marca disputed_at y avisa al admin - un reintento del webhook para la misma orden ya
-        # marcada no debe repetir la alerta. Este es el camino de deteccion por defecto (via el
-        # topic "payment", siempre disponible); el detalle enriquecido (deadline, resultado
-        # final) llega por separado via chargeback_service.py si el topic "chargebacks" esta
-        # habilitado en el dashboard de Mercado Pago.
-        if order.disputed_at is None:
+        # order.status se queda como esta (PAID o incluso CANCELLED - un contracargo puede
+        # llegar sobre una orden ya cancelada/reembolsada por otra via, p. ej. "disputa
+        # despues de un reembolso") - un contracargo es un evento monetario, mismo criterio
+        # que un reembolso parcial. Se gatilla por TRANSICION REAL (previous_mp_status),
+        # no por "disputed_at is None" - ese marcador ahora tambien lo puede setear la rama
+        # de mediacion de abajo, y una escalacion real mediacion->contracargo sobre la
+        # misma orden SI debe re-avisar, aunque disputed_at ya estuviera puesto.
+        if previous_mp_status != "charged_back":
             became_disputed = True
-            order.disputed_at = datetime.now(timezone.utc)
+            if order.disputed_at is None:
+                order.disputed_at = datetime.now(timezone.utc)
+    elif mp_status in MP_MEDIATION_STATUSES:
+        # Etapa previa a un contracargo formal - mismo tratamiento que arriba: solo informa,
+        # nunca toca order.status, se gatilla por transicion real.
+        if previous_mp_status != "in_mediation":
+            became_in_mediation = True
+            if order.disputed_at is None:
+                order.disputed_at = datetime.now(timezone.utc)
+    elif mp_status in MP_REFUNDED_STATUSES:
+        # Reembolso registrado directamente en el dashboard de Mercado Pago, fuera de
+        # POST /admin/orders/{uuid}/refund - sin este Refund, SUM(Refund.amount) (la unica
+        # fuente de verdad de "cuanto se ha reembolsado", ver CLAUDE.md "Reembolsos
+        # parciales") subestimaria silenciosamente lo ya reembolsado. No toca order.status
+        # ni stock - un humano decide despues si esto tambien amerita cancelar la orden.
+        if previous_mp_status != "refunded":
+            became_out_of_band_refund = True
+            out_of_band_refund_amount = Decimal(str(mp_payment.get("transaction_amount_refunded", order.total)))
+            db.add(Refund(
+                order_id=order.id,
+                amount=out_of_band_refund_amount,
+                reason="Reembolso registrado directamente en Mercado Pago",
+                mp_refund_id=None,
+                issued_by_admin_id=None,
+            ))
 
     try:
         await db.commit()
@@ -348,6 +391,18 @@ async def finalize_order_payment(db: AsyncSession, order: Order, mp_payment: dic
             await admin_notification_service.notify_admin_chargeback_received(order, background_tasks)
         except Exception as e:
             logger.error(f"Fallo inesperado (no manejado por notify_admin_chargeback_received) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
+    if became_in_mediation:
+        logger.critical(f"Orden {order.uuid} entro en mediacion con Mercado Pago (payment {order.mp_payment_id}).")
+        try:
+            await admin_notification_service.notify_admin_payment_in_mediation(order, background_tasks)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_admin_payment_in_mediation) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
+    if became_out_of_band_refund:
+        logger.critical(f"Orden {order.uuid} fue reembolsada directamente en Mercado Pago (payment {order.mp_payment_id}).")
+        try:
+            await admin_notification_service.notify_admin_out_of_band_refund(order, out_of_band_refund_amount, background_tasks)
+        except Exception as e:
+            logger.error(f"Fallo inesperado (no manejado por notify_admin_out_of_band_refund) notificando la orden {order.uuid}: {type(e).__name__}: {e!r}")
 
     logger.info(f"Orden local {order.uuid} finalizada con estado de Mercado Pago '{mp_status}' -> status local '{order.status}'.")
     return order

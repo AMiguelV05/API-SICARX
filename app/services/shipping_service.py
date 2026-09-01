@@ -255,7 +255,8 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
             return []
 
         body = response.json()
-        if isinstance(body, dict) and body.get("meta") == "error":
+        response_meta = body.get("meta") if isinstance(body, dict) else None
+        if response_meta == "error":
             message = (body.get("error") or {}).get("message")
             logger.warning(
                 f"envia.com: carrier '{carrier}' no disponible para la orden {order.uuid}: {message}"
@@ -263,6 +264,12 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
             if isinstance(message, str) and message:
                 meta_error_messages.append(message)
             return []
+        if response_meta is not None and response_meta != "rate":
+            # No hay un valor de exito confirmado en vivo para /ship/rate/ (a diferencia de
+            # "generate" en generate_shipping_label) - no se levanta como fallo para no
+            # arriesgar rechazar una respuesta valida por adivinar mal el valor esperado,
+            # pero se deja visible en logs por si envia.com empieza a mandar algo distinto.
+            logger.warning(f"envia.com: carrier '{carrier}' devolvio un meta inesperado ('{response_meta}') cotizando la orden {order.uuid} - tratado como exito de todos modos, revisar si esto se repite.")
 
         raw_options = body.get("data") if isinstance(body, dict) else body
         if isinstance(raw_options, dict):
@@ -356,12 +363,23 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
         )
 
     body = response.json()
-    if isinstance(body, dict) and body.get("meta") == "error":
+    response_meta = body.get("meta") if isinstance(body, dict) else None
+    if response_meta == "error":
         message = (body.get("error") or {}).get("message")
         logger.error(f"envia.com rechazo la generacion de guia para la orden {order.uuid}: {message}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"No se pudo generar la guía de envío con envia.com (envia respondió: {(message or '')[:300]}).",
+        )
+    if response_meta != "generate":
+        # "generate" es el unico valor de exito confirmado en vivo para este endpoint (ver
+        # CLAUDE.md, incidente 2026-07-30) - cualquier otro valor (ni "error" ni "generate")
+        # se trata como fallo real en vez de asumir exito silenciosamente, para no repetir
+        # la misma clase de bug que ese incidente ya expuso una vez.
+        logger.error(f"envia.com respondio un meta inesperado ('{response_meta}') generando la guia de la orden {order.uuid} - tratado como fallo, no como exito.")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="No se pudo confirmar la generación de la guía de envío con envia.com (respuesta inesperada).",
         )
 
     data = body.get("data") if isinstance(body, dict) else body
@@ -411,13 +429,19 @@ async def cancel_shipping_label(order: Order, carrier: str, tracking_number: str
         )
 
     body = response.json()
-    if isinstance(body, dict) and body.get("meta") == "error":
+    response_meta = body.get("meta") if isinstance(body, dict) else None
+    if response_meta == "error":
         message = (body.get("error") or {}).get("message")
         logger.error(f"envia.com rechazo la cancelacion de guia para la orden {order.uuid}: {message}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"No se pudo cancelar la guía de envío con envia.com (envia respondió: {(message or '')[:300]}).",
         )
+    if response_meta is not None and response_meta != "cancel":
+        # Mismo criterio que get_shipping_quote: sin un valor de exito confirmado en vivo
+        # para /ship/cancel/, no se levanta como fallo (evita rechazar una respuesta valida
+        # por adivinar mal), pero se deja visible en logs.
+        logger.warning(f"envia.com respondio un meta inesperado ('{response_meta}') cancelando la guia de la orden {order.uuid} - tratado como exito de todos modos, revisar si esto se repite.")
 
     data = body.get("data") if isinstance(body, dict) else body
     if isinstance(data, list):

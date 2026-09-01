@@ -4,7 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, status
 from app.core.database import DbDep
 from app.core.rate_limit import limiter
 from app.services import payment_service, chargeback_service
-from app.services.order_history_service import get_order_by_uuid, finalize_order_payment
+from app.services.order_history_service import get_order_by_uuid, finalize_order_payment, MP_CHARGEBACK_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +63,15 @@ async def mercado_pago_webhook(request: Request, db: DbDep, background_tasks: Ba
         logger.warning(f"Notificacion de Mercado Pago para una orden desconocida: {order_uuid} (payment {payment_id}).")
         return {"status": "ignored"}
 
-    # CANCELLED es el unico estado realmente terminal aqui: un contracargo (payment.status
-    # == "charged_back") solo puede ocurrir sobre una orden YA PAID, asi que PAID no puede
-    # tratarse como "nada mas por hacer" - finalize_order_payment ya es idempotente ante
-    # reintentos sobre una orden PAID (sus propias ramas revisan order.status antes de
-    # mutar nada), asi que quitar PAID de aqui no reintroduce el riesgo de notificar doble.
-    if order.status == "CANCELLED":
+    # CANCELLED tampoco es un estado realmente terminal para un contracargo: una orden
+    # PAID puede ser cancelada+reembolsada por otra via (admin, cliente) y el cardholder
+    # disputar el cargo original despues de todos modos ("disputa tras reembolso", un
+    # patron real) - esa notificacion no debe descartarse solo porque la orden ya este
+    # CANCELLED. finalize_order_payment ya es idempotente ante reintentos sobre cualquier
+    # estado (sus propias ramas revisan order.status/la transicion antes de mutar nada),
+    # asi que dejar pasar unicamente un contracargo aqui no reintroduce el riesgo de
+    # notificar doble ni de resucitar la orden.
+    if order.status == "CANCELLED" and mp_payment.get("status") not in MP_CHARGEBACK_STATUSES:
         logger.info(f"Notificacion de Mercado Pago para la orden {order_uuid} ignorada: ya esta en estado terminal ({order.status}).")
         return {"status": "already final"}
 

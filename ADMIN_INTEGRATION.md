@@ -228,6 +228,42 @@ es `"WON"` (a favor, dinero devuelto) o `"LOST"` (en contra, dinero retirado) - 
 }
 ```
 
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-payment-in-mediation`
+
+Etapa previa a un contracargo formal - Mercado Pago abrió una mediación sobre el pago de
+esta orden. Mismo body (`OrderPublic` más `clientEmail`/`clientName`) que
+`order-chargeback-received` - `status` se queda en `"PAID"`, esto es solo una alerta
+temprana, no cancela ni reembolsa nada.
+
+```json
+{
+  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "status": "PAID",
+  "disputedAt": "2026-08-31T14:22:03Z",
+  "total": 129.99,
+  "totalQuantity": 3,
+  "clientEmail": "cliente@example.com",
+  "clientName": "Juan Pérez"
+}
+```
+
+### Webhook saliente: `POST {tu dominio}/api/webhooks/order-out-of-band-refund`
+
+Señal de que el pago de esta orden fue reembolsado directamente en el dashboard de Mercado
+Pago, fuera de `POST /admin/orders/{uuid}/refund` - la fila `Refund` correspondiente ya se
+creó antes de este webhook (visible vía `GET /admin/orders/{uuid}/refunds`), esto solo
+avisa. `status` se queda en `"PAID"` - un reembolso fuera de banda no cancela la orden
+automáticamente, un admin decide si también amerita eso.
+
+```json
+{
+  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
+  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
+  "amount": 129.99
+}
+```
+
 ## Referencia de endpoints
 
 ### `POST /v1/admin/auth/login` — login

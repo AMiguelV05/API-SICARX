@@ -247,7 +247,9 @@ async def cancel_order_admin(db: AsyncSession, order_uuid: str, reason: str, bac
                     mp_refund_id=str(mp_refund.get("id")) if mp_refund.get("id") is not None else None,
                     issued_by_admin_id=None,
                 ))
-            elif order.mp_status in ("pending", "in_process"):
+            elif order.mp_status in ("pending", "in_process", "authorized"):
+                # "authorized" (pago de dos pasos, autorizado sin capturar) se cancela
+                # igual que pending/in_process - mismo criterio que routes/orders.py::cancel_order.
                 await payment_service.cancel_payment(order.mp_payment_id)
                 order.mp_status = "cancelled"
                 mp_resolved_here = True

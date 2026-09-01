@@ -6,6 +6,7 @@ monetario/de registro, mismo criterio que un reembolso parcial. Ver CLAUDE.md,
 "Contracargos de Mercado Pago"."""
 import uuid
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 from fastapi import BackgroundTasks
 from sqlalchemy import select
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from app.models.order import Order
 from app.models.chargeback import Chargeback
 from app.services.order_history_service import finalize_order_payment
-from app.services import chargeback_service
+from app.services import chargeback_service, order_history_service
 
 
 def _make_paid_order(*, total="200.00", mp_payment_id="mp-123") -> Order:
@@ -149,3 +150,67 @@ async def test_chargeback_notification_for_unknown_payment_id_is_ignored(db):
     )
     result = await db.execute(select(Chargeback))
     assert result.scalars().all() == []
+
+
+async def test_charged_back_payment_on_cancelled_order_still_marks_disputed(db):
+    """Regresion: una orden PAID puede ser cancelada+reembolsada por otra via y el
+    cardholder disputar el cargo original de todos modos ("disputa tras reembolso") -
+    finalize_order_payment debe seguir marcando disputed_at aunque order.status ya sea
+    CANCELLED (el guard en payments.py que decide si esto se llega a invocar se prueba
+    aparte a nivel de ruta - ver la nota en payments.py; esto prueba que la logica que ese
+    guard protege es efectivamente segura de invocar en este estado)."""
+    order = _make_paid_order()
+    order.status = "CANCELLED"
+    db.add(order)
+    await db.flush()
+
+    mp_payment = {"id": order.mp_payment_id, "status": "charged_back", "status_detail": "in_process"}
+    updated = await finalize_order_payment(db, order, mp_payment, BackgroundTasks())
+
+    assert updated.status == "CANCELLED"  # el contracargo no resucita la orden
+    assert updated.disputed_at is not None
+
+
+async def test_approved_replay_does_not_resurrect_a_cancelled_order(db, monkeypatch):
+    """Una notificacion "approved" tardia/repetida nunca debe regresar una orden CANCELLED
+    a PAID - protege el carve-out de la prueba anterior contra el riesgo señalado en la
+    auditoria (permitir contracargos sobre ordenes CANCELLED no debe abrir la puerta a
+    que otros estados si las resuciten)."""
+    order = _make_paid_order()
+    order.status = "CANCELLED"
+    db.add(order)
+    await db.flush()
+
+    mp_payment = {"id": order.mp_payment_id, "status": "approved", "status_detail": "accredited"}
+    updated = await finalize_order_payment(db, order, mp_payment, BackgroundTasks())
+
+    assert updated.status == "CANCELLED"
+
+
+async def test_mediation_then_real_chargeback_fires_both_alerts(db, monkeypatch):
+    """Escalacion real mediacion -> contracargo sobre la MISMA orden debe disparar las dos
+    alertas - antes de este fix, la segunda se habria suprimido porque disputed_at ya
+    quedaba puesto por la mediacion (mismo defecto que el resto de esta auditoria, solo
+    que este lo encontre disenando el propio fix en vez de grepeando por el)."""
+    order = _make_paid_order()
+    db.add(order)
+    await db.flush()
+
+    mock_mediation = AsyncMock()
+    mock_chargeback = AsyncMock()
+    monkeypatch.setattr(order_history_service.admin_notification_service, "notify_admin_payment_in_mediation", mock_mediation)
+    monkeypatch.setattr(order_history_service.admin_notification_service, "notify_admin_chargeback_received", mock_chargeback)
+
+    mediation_payment = {"id": order.mp_payment_id, "status": "in_mediation", "status_detail": "in_process"}
+    await finalize_order_payment(db, order, mediation_payment, BackgroundTasks())
+    await db.refresh(order)
+    first_disputed_at = order.disputed_at
+    assert first_disputed_at is not None
+    mock_mediation.assert_awaited_once()
+
+    chargeback_payment = {"id": order.mp_payment_id, "status": "charged_back", "status_detail": "in_process"}
+    await finalize_order_payment(db, order, chargeback_payment, BackgroundTasks())
+    await db.refresh(order)
+
+    mock_chargeback.assert_awaited_once()  # la escalacion SI debe re-avisar
+    assert order.disputed_at == first_disputed_at  # marcador historico, no se pisa

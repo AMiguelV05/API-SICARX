@@ -456,7 +456,10 @@ async def cancel_order(
                     mp_refund_id=str(mp_refund.get("id")) if mp_refund.get("id") is not None else None,
                     issued_by_admin_id=None,
                 ))
-            elif local_order.mp_status in ("pending", "in_process"):
+            elif local_order.mp_status in ("pending", "in_process", "authorized"):
+                # "authorized" (pago de dos pasos, autorizado sin capturar) se cancela
+                # igual que pending/in_process - Mercado Pago trata ambos como "no
+                # capturado", el mismo caso que cancel_payment ya cubre.
                 await payment_service.cancel_payment(local_order.mp_payment_id)
                 local_order.mp_status = "cancelled"
                 mp_resolved_here = True
@@ -536,7 +539,7 @@ async def delete_order(
     mp_resolved_here = False
 
     try:
-        if local_order.mp_payment_id and local_order.mp_status in ("pending", "in_process"):
+        if local_order.mp_payment_id and local_order.mp_status in ("pending", "in_process", "authorized"):
             await payment_service.cancel_payment(local_order.mp_payment_id)
             local_order.mp_status = "cancelled"
             mp_resolved_here = True

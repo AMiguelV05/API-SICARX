@@ -4,13 +4,15 @@ cancellation"."""
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select, func
 
 from app.models.order import Order, SicarSyncOutbox
 from app.services.order_history_service import prepare_local_cancellation
+from app.services import admin_service
 from tests.conftest import make_product
 
 
@@ -107,3 +109,29 @@ async def test_cancel_require_status_mismatch_raises_409(db):
     with pytest.raises(HTTPException) as exc_info:
         await prepare_local_cancellation(db, order, require_status="TO_PAY")
     assert exc_info.value.status_code == 409
+
+
+async def test_cancel_authorized_payment_voids_it_instead_of_being_skipped(db, monkeypatch):
+    """mp_status == "authorized" (pago de dos pasos, autorizado sin capturar) debe pasar
+    por payment_service.cancel_payment igual que pending/in_process, no quedar silenciosamente
+    sin resolver en Mercado Pago. Mismo camino usado por routes/orders.py::cancel_order y
+    DELETE /orders/{order_id} (ramas identicas, no cubiertas por un test de ruta aparte -
+    este suite no tiene fixtures de TestClient)."""
+    product = make_product(stock=Decimal("10"), reserved=Decimal("2"))
+    db.add(product)
+    await db.flush()
+
+    order = _make_order(product_uuid=product.sicar_uuid, status="PAID")
+    order.mp_payment_id = "mp-authorized-1"
+    order.mp_status = "authorized"
+    db.add(order)
+    await db.flush()
+
+    mock_cancel = AsyncMock(return_value={"id": "mp-authorized-1", "status": "cancelled"})
+    monkeypatch.setattr(admin_service.payment_service, "cancel_payment", mock_cancel)
+
+    updated, _ = await admin_service.cancel_order_admin(db, order.uuid, "Cancelado por prueba", BackgroundTasks())
+
+    mock_cancel.assert_awaited_once_with("mp-authorized-1")
+    assert updated.mp_status == "cancelled"
+    assert updated.status == "CANCELLED"

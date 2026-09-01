@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import BackgroundTasks
@@ -17,6 +18,8 @@ SICAR_SYNC_FAILED_WEBHOOK_PATH = "/api/webhooks/order-sicar-sync-failed"
 STOCK_DRIFT_WEBHOOK_PATH = "/api/webhooks/product-stock-drift"
 CHARGEBACK_RECEIVED_WEBHOOK_PATH = "/api/webhooks/order-chargeback-received"
 CHARGEBACK_RESOLVED_WEBHOOK_PATH = "/api/webhooks/order-chargeback-resolved"
+PAYMENT_IN_MEDIATION_WEBHOOK_PATH = "/api/webhooks/order-payment-in-mediation"
+OUT_OF_BAND_REFUND_WEBHOOK_PATH = "/api/webhooks/order-out-of-band-refund"
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,38 @@ async def notify_admin_chargeback_resolved(order: Order, chargeback: Chargeback,
     }
     log_context = f"Contracargo resuelto ({chargeback.status}) en la orden {order.uuid}"
     request = _build_admin_request(CHARGEBACK_RESOLVED_WEBHOOK_PATH, body)
+    if request is None:
+        logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
+        return
+    background_tasks.add_task(send_signed_webhook, *request, log_context)
+
+async def notify_admin_payment_in_mediation(order: Order, background_tasks: BackgroundTasks) -> None:
+    """Señal de que Mercado Pago abrio una mediacion sobre el pago de esta orden - etapa
+    previa a un contracargo formal, misma urgencia razonable que uno. Solo llamada desde
+    finalize_order_payment (mp_status == "in_mediation"), siempre dentro de un request."""
+    client_account = await order.awaitable_attrs.client_account
+    body = OrderPublic.model_validate(order).model_dump(by_alias=True, mode="json")
+    body["clientEmail"] = client_account.email if client_account else None
+    body["clientName"] = client_account.name if client_account else None
+    log_context = f"Mediacion de Mercado Pago abierta en la orden {order.uuid}"
+    request = _build_admin_request(PAYMENT_IN_MEDIATION_WEBHOOK_PATH, body)
+    if request is None:
+        logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
+        return
+    background_tasks.add_task(send_signed_webhook, *request, log_context)
+
+async def notify_admin_out_of_band_refund(order: Order, amount: Decimal, background_tasks: BackgroundTasks) -> None:
+    """Señal de que el pago de esta orden fue reembolsado directamente en el dashboard de
+    Mercado Pago, fuera de POST /admin/orders/{uuid}/refund - la fila Refund correspondiente
+    ya se creo (ver finalize_order_payment) antes de llamar esto, con este mismo `amount`;
+    aqui solo falta avisar."""
+    body = {
+        "orderUuid": order.uuid,
+        "sicarOrderId": order.sicar_order_id,
+        "amount": float(amount),
+    }
+    log_context = f"Reembolso fuera de banda detectado en la orden {order.uuid}"
+    request = _build_admin_request(OUT_OF_BAND_REFUND_WEBHOOK_PATH, body)
     if request is None:
         logger.info(f"{log_context}: ADMIN_DASHBOARD_BASE_URL/ADMIN_WEBHOOK_SECRET no configurados todavia (el dashboard admin no existe aun), se omite el webhook.")
         return
