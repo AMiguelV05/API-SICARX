@@ -64,3 +64,7 @@ class PatchCategoryProductsResponse(CamelModel):
     removed: List[str]
     added_count: int
     removed_count: int
+
+class ClearCategoryProductsResponse(CamelModel):
+    category_uuid: str
+    removed_count: int

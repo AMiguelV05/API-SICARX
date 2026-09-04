@@ -329,6 +329,24 @@ async def patch_category_products(db: AsyncSession, category_uuid: str, add_uuid
     return unique_add, unique_remove, added_count, removed_count
 
 
+async def clear_category_products(db: AsyncSession, category_uuid: str) -> int:
+    """Desasigna TODOS los productos de la categoria (borra sus filas en product_categories)
+    - equivalente a replace_category_products(db, category_uuid, []) pero sin exigir que el
+    cliente conozca/mande el conjunto completo primero. No toca los productos en si (solo
+    el vinculo categoria-producto) ni la categoria misma."""
+    category = await db.get(Category, category_uuid)
+    if category is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categoria no encontrada.")
+
+    result = await db.execute(
+        delete(product_categories).where(product_categories.c.category_uuid == category_uuid).returning(product_categories.c.product_id)
+    )
+    removed_count = len(result.all())
+    await db.commit()
+    logger.info(f"Categoria {category_uuid}: {removed_count} producto(s) desasignado(s) via DELETE /admin .../products.")
+    return removed_count
+
+
 async def list_category_products(db: AsyncSession, category_uuid: str, limit: int, offset: int) -> tuple[int, list[Product]]:
     """Solo productos asignados DIRECTAMENTE (sin descendientes, a diferencia del filtro taxonomy_uuid) - para la UI de edicion, no para el storefront."""
     category = await db.get(Category, category_uuid)

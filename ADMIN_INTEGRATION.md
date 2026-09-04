@@ -1154,6 +1154,38 @@ mandado) — p. ej. un `add` de un producto ya asignado no incrementa `addedCoun
 - `404` si la categoría no existe, o si algún `productUuid` de `add` no resuelve a un
   producto real y no eliminado (nombra cuáles).
 
+#### `DELETE /v1/admin/categories/{uuid}/products` — desasignar todos los productos
+
+```http
+DELETE /v1/admin/categories/3f9a1c2e-.../products
+Authorization: Bearer <admin-token>
+```
+
+Vacía la categoría de un solo golpe — equivalente a un `PUT .../products` con
+`productUuids: []`, pero sin que el dashboard necesite conocer/traer primero el conjunto
+completo asignado (útil para categorías con más productos que el límite de
+`GET .../products`). Pensado para un botón tipo "quitar todos los productos de esta
+categoría".
+
+**Solo desasigna** — borra las filas de `product_categories` de esta categoría, nada más:
+los productos en sí no se tocan (siguen existiendo, siguen vendibles, solo dejan de estar
+bajo este nodo) y la categoría misma tampoco se elimina. Distinto de
+`DELETE /v1/admin/categories/{uuid}` (arriba), que sí borra el nodo — y que de hecho
+exige que ya no tenga productos asignados antes de dejarse borrar; este endpoint es una
+forma de cumplir esa condición sin ir quitando productos uno por uno.
+
+Respuesta `200`:
+```json
+{ "categoryUuid": "3f9a1c2e-...", "removedCount": 47 }
+```
+`removedCount` es cuántos vínculos categoría-producto se borraron realmente (0 si la
+categoría ya no tenía ninguno asignado — no es un error).
+
+No requiere rol `super_admin` (mismo nivel de acceso que el `PUT`/`PATCH` de arriba, a
+diferencia del `DELETE` del nodo).
+
+`404` si la categoría no existe.
+
 #### `GET /v1/admin/categories/{uuid}/products` — listar productos asignados directamente
 
 ```http

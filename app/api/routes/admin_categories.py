@@ -12,6 +12,7 @@ from app.schemas.taxonomy import (
     PatchCategoryProductsRequest,
     PatchCategoryProductsResponse,
     CategoryProductsResponse,
+    ClearCategoryProductsResponse,
 )
 from app.schemas.products import ProductAdminBasic
 from app.services import taxonomy_service, audit_service
@@ -103,6 +104,17 @@ async def admin_patch_category_products(category_uuid: str, db: DbDep, data: Pat
     return PatchCategoryProductsResponse(
         category_uuid=category_uuid, added=added, removed=removed, added_count=added_count, removed_count=removed_count
     )
+
+
+@router.delete("/{category_uuid}/products", response_model=ClearCategoryProductsResponse, summary="Desasignar TODOS los productos de una categoria")
+async def admin_clear_category_products(category_uuid: str, db: DbDep):
+    """Quita de un solo golpe todos los productos asignados directamente a la categoria
+    (equivalente a un PUT .../products con lista vacia, sin tener que conocer el conjunto
+    completo primero). Solo borra el vinculo en `product_categories` - los productos en si
+    no se tocan (siguen existiendo, siguen vendibles, solo dejan de estar bajo esta
+    categoria) y la categoria misma tampoco se elimina. `404` si la categoria no existe."""
+    removed_count = await taxonomy_service.clear_category_products(db, category_uuid)
+    return ClearCategoryProductsResponse(category_uuid=category_uuid, removed_count=removed_count)
 
 
 @router.get("/{category_uuid}/products", response_model=CategoryProductsResponse, summary="Listar productos asignados directamente a una categoria (sin incluir descendientes)")
