@@ -1,5 +1,6 @@
 import uuid
 from sqlalchemy import Column, Integer, String, Text, Numeric, JSON, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -60,7 +61,11 @@ class Order(Base):
 
     # Snapshot al crear la orden (mismo shape de build_order_payload); items agrega imageUrl por linea, no enviado a Sicar X.
     delivery_info = Column(JSON, nullable=False)
-    items = Column(JSON, nullable=False)
+    # JSONB (no JSON): dashboard_service.get_top_products/get_top_categories agregan sobre
+    # esta columna via jsonb_array_elements - nativamente jsonb evita que Postgres tenga que
+    # re-parsear el texto JSON de cada fila a jsonb en cada llamada al dashboard. delivery_info
+    # se queda JSON, sigue sin que nada consulte dentro de el.
+    items = Column(JSONB, nullable=False)
 
     # Foto fija (ClientAddressPublic) de la direccion al crear la orden, solo DELIVERYMAN - evita usar una direccion editada despues.
     delivery_address_snapshot = Column(JSON, nullable=True)
@@ -173,6 +178,13 @@ class SicarSyncOutbox(Base):
     status = Column(String, nullable=False, default="PENDING")  # PENDING/IN_PROGRESS/SUCCEEDED/FAILED
     attempts = Column(Integer, nullable=False, default=0)
     last_error = Column(String, nullable=True)
+    # product_uuid ya aplicados con exito contra Sicar X en un intento previo de esta misma
+    # fila - permite que un reintento tras fallo parcial (item 3 de 5 fallo) solo reprocese
+    # los items que faltan, en vez de volver a aplicar TODOS los items (lo que doble-ajustaria
+    # el stock real de los que ya tuvieron exito). Ver sicar_stock_service.apply_order_stock_delta
+    # y sicar_sync_worker.py::_process_claimed_row. Reasignado completo (nunca mutado
+    # in-place) en cada intento, mismo patron que Cart.items.
+    completed_uuids = Column(JSON, nullable=False, default=list, server_default="[]")
     next_attempt_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())

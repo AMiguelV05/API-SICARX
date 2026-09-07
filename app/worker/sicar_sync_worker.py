@@ -68,12 +68,20 @@ async def _process_claimed_row(row_id: int) -> None:
             await session.commit()
             return
 
+        # Progreso de un intento previo de ESTA fila (lista propia, mutada in-place por
+        # apply_order_stock_delta) - un reintento tras fallo parcial solo reprocesa los items
+        # que faltan, ver el docstring de apply_order_stock_delta. Se re-persiste completa
+        # (nunca in-place sobre row.completed_uuids) tanto en el commit de exito como en el
+        # de fallo de abajo, para que el progreso sobreviva al reintento sea cual sea el
+        # desenlace de este intento.
+        completed = list(row.completed_uuids or [])
+
         try:
             item_deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in (order.items or [])]
 
             if row.action == "ACCEPT":
                 # Unico punto donde este backend le avisa algo a Sicar X: descuento de inventario.
-                await apply_order_stock_delta(order.items, order.branch_id, sign=-1)
+                await apply_order_stock_delta(order.items, order.branch_id, sign=-1, completed=completed)
                 # Espejo local, en el mismo commit que SUCCEEDED (ver comentario de atomicidad
                 # abajo): descuenta Product.stock de inmediato (en vez de esperar el proximo
                 # sync de 5 min) y libera el hold en Product.reserved - la reserva ya quedo
@@ -82,7 +90,7 @@ async def _process_claimed_row(row_id: int) -> None:
                 await apply_reserved_deltas(session, [(uuid, -qty) for uuid, qty in item_deltas])
             elif row.action == "CANCEL":
                 # Reversion del descuento; solo se encola si la orden ya habia sido aceptada.
-                await apply_order_stock_delta(order.items, order.branch_id, sign=1)
+                await apply_order_stock_delta(order.items, order.branch_id, sign=1, completed=completed)
                 # Espejo local de la restauracion - reserved no se toca aqui, ya se libero al
                 # aceptar (rama ACCEPT arriba).
                 await apply_stock_deltas(session, item_deltas)
@@ -90,6 +98,7 @@ async def _process_claimed_row(row_id: int) -> None:
                 raise ValueError(f"Accion de sincronizacion desconocida: {row.action!r}")
 
             row.status = "SUCCEEDED"
+            row.completed_uuids = completed
             # Atomico junto con el espejo local de stock/reserved arriba: si el proceso
             # muere antes de este commit, la fila sigue IN_PROGRESS y se vuelve a reclamar
             # tras STALE_LEASE_MINUTES, reintentando la llamada a Sicar X y el espejo local
@@ -97,6 +106,10 @@ async def _process_claimed_row(row_id: int) -> None:
             await session.commit()
             logger.info(f"Sincronizacion con Sicar X exitosa para la orden {order.uuid} (sicar_sync_outbox {row.id}, accion={row.action}).")
         except Exception as e:
+            # Persistido incluso en fallo: si apply_order_stock_delta alcanzo a aplicar
+            # algunos items antes de que uno fallara, el proximo reintento debe saltarselos
+            # en vez de volver a ajustar el stock real de Sicar X para ellos.
+            row.completed_uuids = completed
             row.attempts += 1
             row.last_error = str(e)[:2000]
             if row.attempts >= MAX_ATTEMPTS:

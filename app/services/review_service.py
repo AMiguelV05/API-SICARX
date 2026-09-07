@@ -265,9 +265,29 @@ async def _get_visible_review(db: AsyncSession, review_uuid: str) -> ProductRevi
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reseña no encontrada.")
     return review
 
+async def _lock_review(db: AsyncSession, review_id: int) -> ProductReview:
+    """SELECT...FOR UPDATE antes de tocar helpful_count - sin esto, dos clientes marcando
+    'util' la misma reseña casi al mismo tiempo pueden perder una actualizacion (ambos leen
+    5, ambos escriben 6; el valor real era 7), mismo patron de lock que cart_service._lock_cart."""
+    result = await db.execute(
+        select(ProductReview).where(ProductReview.id == review_id).with_for_update().execution_options(populate_existing=True)
+    )
+    return result.scalar_one()
+
+async def _recompute_helpful_count(db: AsyncSession, review: ProductReview) -> int:
+    """Recalcula helpful_count desde COUNT(*) sobre product_review_helpful_votes, en vez de
+    incrementar/decrementar el valor cacheado - mismo criterio anti-deriva que
+    recompute_product_rating (ver CLAUDE.md, 'Reserva local de stock')."""
+    count = await db.scalar(
+        select(func.count()).select_from(ReviewHelpfulVote).where(ReviewHelpfulVote.review_id == review.id)
+    )
+    review.helpful_count = count or 0
+    return review.helpful_count
+
 async def mark_helpful(db: AsyncSession, client: ClientAccount, review_uuid: str) -> HelpfulVoteResponse:
     """Idempotente: si el cliente ya la habia marcado, no-op (no duplica el voto ni el conteo)."""
     review = await _get_visible_review(db, review_uuid)
+    review = await _lock_review(db, review.id)
 
     existing_vote = await db.scalar(
         select(ReviewHelpfulVote).where(
@@ -276,7 +296,8 @@ async def mark_helpful(db: AsyncSession, client: ClientAccount, review_uuid: str
     )
     if not existing_vote:
         db.add(ReviewHelpfulVote(review_id=review.id, client_account_id=client.id))
-        review.helpful_count += 1
+        await db.flush()
+        await _recompute_helpful_count(db, review)
         await db.commit()
         await db.refresh(review)
 
@@ -285,6 +306,7 @@ async def mark_helpful(db: AsyncSession, client: ClientAccount, review_uuid: str
 async def unmark_helpful(db: AsyncSession, client: ClientAccount, review_uuid: str) -> HelpfulVoteResponse:
     """Idempotente: si el cliente no la habia marcado, no-op."""
     review = await _get_visible_review(db, review_uuid)
+    review = await _lock_review(db, review.id)
 
     existing_vote = await db.scalar(
         select(ReviewHelpfulVote).where(
@@ -293,7 +315,8 @@ async def unmark_helpful(db: AsyncSession, client: ClientAccount, review_uuid: s
     )
     if existing_vote:
         await db.delete(existing_vote)
-        review.helpful_count = max(review.helpful_count - 1, 0)
+        await db.flush()
+        await _recompute_helpful_count(db, review)
         await db.commit()
         await db.refresh(review)
 

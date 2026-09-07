@@ -65,8 +65,23 @@ async def _patch_stock(product_uuid: str, current_stock: Decimal, new_stock: Dec
         )
 
 
-async def apply_order_stock_delta(order_items: list[dict], branch_id: int | None, *, sign: int) -> None:
-    """sign=-1 al aceptar, sign=+1 al cancelar; unica via por la que este backend le avisa algo a Sicar X sobre una orden (solo inventario, ver CLAUDE.md). Riesgo conocido: un reintento tras falla parcial reprocesa TODAS las lineas, incluida la ya aplicada (no idempotente)."""
+async def apply_order_stock_delta(
+    order_items: list[dict], branch_id: int | None, *, sign: int, completed: list[str] | None = None,
+) -> None:
+    """sign=-1 al aceptar, sign=+1 al cancelar; unica via por la que este backend le avisa
+    algo a Sicar X sobre una orden (solo inventario, ver CLAUDE.md).
+
+    Reanudable: `completed` (opcional) es la lista de product_uuid ya aplicados con exito en
+    un intento previo de esta misma fila de sicar_sync_outbox - se mutan IN-PLACE (append) a
+    medida que cada item tiene exito, así que si esta funcion levanta una excepcion a medio
+    camino, el llamador sigue viendo el progreso parcial en la misma lista que le paso, y
+    puede persistirlo para que el proximo reintento no vuelva a aplicar los items que ya se
+    reflejaron en el stock real de Sicar X (antes: un fallo en el item 3 de 5 hacia que el
+    reintento reprocesara los 5, doble-ajustando los 2 primeros)."""
+    if completed is None:
+        completed = []
+    already_done = set(completed)
+
     for item in order_items or []:
         product_uuid = item.get("uuid")
         try:
@@ -76,10 +91,15 @@ async def apply_order_stock_delta(order_items: list[dict], branch_id: int | None
 
         if not product_uuid or not is_safe_sicar_id(product_uuid) or quantity == 0:
             continue
+        if product_uuid in already_done:
+            logger.debug(f"Sicar X: {product_uuid} ya se habia ajustado en un intento previo de esta orden, se omite.")
+            continue
 
         current_stock = await _read_current_stock(product_uuid, branch_id)
         new_stock = current_stock + (sign * quantity)
         await _patch_stock(product_uuid, current_stock, new_stock)
+        completed.append(product_uuid)
+        already_done.add(product_uuid)
         logger.info(
             f"Sicar X: existencia de {product_uuid} ajustada {current_stock} -> {new_stock} "
             f"(sign={sign:+d}, quantity={quantity})."

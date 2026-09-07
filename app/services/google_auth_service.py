@@ -12,7 +12,10 @@ GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 GOOGLE_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
 
 # Instancia a nivel de modulo para reusar el cache interno de PyJWKClient entre requests.
-_jwks_client = PyJWKClient(GOOGLE_JWKS_URL)
+# timeout=10 explicito (PyJWT por defecto usa 30s) - mismo orden de magnitud que el resto de
+# los timeouts de salida de este codebase (httpx AUTH_TIMEOUT/STOCK_TIMEOUT/MP_TIMEOUT), en
+# vez de heredar el default generico de la libreria sin que nadie lo haya decidido aqui.
+_jwks_client = PyJWKClient(GOOGLE_JWKS_URL, timeout=10)
 
 class GoogleIdentity(TypedDict):
     sub: str

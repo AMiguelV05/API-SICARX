@@ -115,7 +115,9 @@ app.add_middleware(
     allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allow_headers=["Content-Type", "Authorization", "x-api-key", "X-Client-Token", "Idempotency-Key", "X-Admin-Key"],
+    # X-Admin-Key retirado: el esquema de admin compartido que usaba esa cabecera fue
+    # reemplazado por AdminUser + JWT (Authorization), ver security.py::get_current_admin.
+    allow_headers=["Content-Type", "Authorization", "x-api-key", "X-Client-Token", "Idempotency-Key"],
 )
 
 # Toda la API vive bajo /v1 (ver app/api/v1_router.py) -- cada sub-router ya trae su

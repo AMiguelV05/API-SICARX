@@ -98,7 +98,7 @@ async def get_top_products(
                MAX(item->>'imageUrl') AS image_url,
                SUM((item->>'quantity')::numeric) AS units_sold,
                SUM((item->>'amountTax')::numeric) AS revenue
-        FROM orders o, jsonb_array_elements(o.items::jsonb) AS item
+        FROM orders o, jsonb_array_elements(o.items) AS item
         WHERE o.status = 'PAID' AND o.deleted_at IS NULL
           AND o.created_at >= :start_dt AND o.created_at < :end_dt
         GROUP BY item->>'uuid'
@@ -150,7 +150,7 @@ async def get_top_categories(
             SELECT item->>'uuid' AS product_uuid,
                    (item->>'quantity')::numeric AS quantity,
                    (item->>'amountTax')::numeric AS revenue
-            FROM orders o, jsonb_array_elements(o.items::jsonb) AS item
+            FROM orders o, jsonb_array_elements(o.items) AS item
             WHERE o.status = 'PAID' AND o.deleted_at IS NULL
               AND o.created_at >= :start_dt AND o.created_at < :end_dt
         )

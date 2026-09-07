@@ -26,4 +26,14 @@ def get_client_ip(request: Request) -> str:
 
 # En memoria por IP - valido solo mientras `api` corra como una sola instancia;
 # necesitaria un backend compartido (p. ej. Redis) si eso cambia.
-limiter = Limiter(key_func=get_client_ip)
+#
+# default_limits: red de seguridad para CUALQUIER ruta sin su propio @limiter.limit(...) -
+# antes solo orders/payments/auth/admin_auth tenian limite, dejando todo el catalogo/busqueda
+# publico (incluido GET /products/{uuid}, que puede disparar una llamada GraphQL en vivo a
+# Sicar X) y casi todo /v1/admin/* sin ningun limite, protegidos solo por la x-api-key
+# estatica (que vive en el propio frontend, no es un secreto real) o el JWT de AdminUser.
+# SlowAPIMiddleware aplica este default automaticamente a cualquier ruta SIN decorador propio
+# (una ruta con @limiter.limit(...) queda exenta del default y solo obedece su propio limite,
+# mas estricto - ver slowapi.middleware._should_exempt) asi que esto no cambia el
+# comportamiento de las rutas que ya tenian su propio limite (10-60/min).
+limiter = Limiter(key_func=get_client_ip, default_limits=["120/minute"])
