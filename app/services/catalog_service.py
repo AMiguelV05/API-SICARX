@@ -125,6 +125,49 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         "docs": products
     }
 
+async def get_available_now_products(db: AsyncSession, limit: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, sort_by: str = None):
+    """Productos con stock disponible e imagen, para la seccion "Disponible Ahora" de la
+    pagina principal. Sin paginacion, igual que get_best_selling_products - un feed acotado
+    de top-N, no un browse."""
+    stmt = select(Product).where(
+        Product.is_deleted == False,
+        Product.is_active == True,
+        Product.available_stock > 0,
+        Product.image_url.isnot(None),
+        Product.image_url != "",
+    )
+
+    if department_uuid:
+        stmt = stmt.where(Product.department_uuid == department_uuid)
+
+    if category_uuid:
+        stmt = stmt.where(Product.category_uuid == category_uuid)
+
+    if taxonomy_uuid:
+        descendant_uuids = await get_descendant_uuids(db, taxonomy_uuid)
+        stmt = stmt.where(Product.id.in_(
+            select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
+
+    if vehicle_uuid:
+        stmt = stmt.where(Product.id.in_(
+            select(product_vehicles.c.product_id).where(product_vehicles.c.vehicle_uuid == vehicle_uuid)
+        ))
+
+    if sort_by == "price_asc":
+        stmt = stmt.order_by(Product.price.asc())
+    elif sort_by == "price_desc":
+        stmt = stmt.order_by(Product.price.desc())
+    elif sort_by == "name_asc":
+        stmt = stmt.order_by(Product.name.asc())
+    elif sort_by == "relevance":
+        stmt = stmt.order_by(Product.sales_count.desc(), Product.name.asc())
+
+    stmt = stmt.limit(limit)
+
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
 async def get_best_selling_products(db: AsyncSession, limit: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False):
     """Productos mas vendidos (Product.sales_count > 0), para la seccion de la pagina principal - ver order_history_service.py para como se mantiene sales_count al dia."""
     stmt = select(Product).where(

@@ -892,6 +892,51 @@ mostrarla vacía. `salesCount` se cuenta desde pedidos que llegaron a `status: "
 haber sido pagado — así que este feed puede cambiar de un día a otro, no lo caches de forma
 agresiva.
 
+### `GET /v1/products/available-now` — disponible ahora (nuevo, para la página principal)
+
+```http
+GET /v1/products/available-now?limit=12
+x-api-key: <api-key>
+```
+
+Pensado para una sección "Disponible Ahora" en la página principal — mismo estilo que
+`best-sellers` arriba: `GET` con query params, sin paginación, feed acotado de top-N. Todos
+los parámetros son opcionales:
+
+| Query param | Tipo | Default | Descripción |
+|---|---|---|---|
+| `limit` | int (1-50) | `12` | Cuántos productos devolver |
+| `departmentUuid` | string | — | Igual que en `/v1/products` |
+| `categoryUuid` | string | — | Igual que en `/v1/products` |
+| `taxonomyUuid` | string | — | Igual que en `/v1/products` (nodo del árbol de `GET /v1/taxonomy`) |
+| `vehicleUuid` | string | — | Igual que en `/v1/products` (fitment resuelto de `GET /v1/vehicles`) |
+| `sortBy` | string | — | `price_asc`, `price_desc`, `name_asc` o `relevance` (más vendidos primero); si se omite, orden natural de la base de datos |
+
+Respuesta `200` (mismo shape que `best-sellers`, mismo objeto `ProductBasic` por línea):
+```json
+{
+  "docs": [
+    {
+      "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sku": "PR2057",
+      "name": "PORTAROLLO",
+      "description": null,
+      "imageUrl": "https://.../portarollo.jpg",
+      "price": 8.62069,
+      "stock": 2.0,
+      "salesCount": 14.0
+    }
+  ]
+}
+```
+
+Sin `total`, mismo motivo que `best-sellers` — no es un listado paginado. A diferencia de
+`best-sellers` (que filtra por `salesCount > 0`), este feed filtra por `stock > 0` (el
+disponible neto de reservas, igual que en cualquier otro listado cara al cliente) **y**
+`imageUrl` no nulo/vacío, así la sección nunca muestra una tarjeta sin foto. Puede venir
+`docs: []` si ningún producto combina con los filtros usados — en ese caso la UI debería
+ocultar la sección en vez de mostrarla vacía, mismo criterio que `best-sellers`.
+
 ### `GET /v1/taxonomy` — árbol de categorías (para filtros)
 
 ```http
@@ -2372,6 +2417,9 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
   `sortBy` hoy. Todo esto se apoya en un campo nuevo y aditivo, `salesCount`, en cada producto
   de `POST /v1/products`/`POST /v1/search`/`GET /v1/products/best-sellers` (no en
   `GET /v1/products/{uuid}`).
+- **Nuevo: `GET /v1/products/available-now`**, para una sección "Disponible Ahora" en la
+  página principal (ver referencia arriba) — mismo estilo `GET`/sin paginación que
+  `best-sellers`, pero filtrando por stock disponible + imagen en vez de ventas.
 - **Ya no existe `X-Cart-Token` ni almacenamiento manual del carrito anónimo** — si el frontend
   todavía tiene un `lib/cartToken.ts` o similar guardando ese header en `localStorage`, puede
   eliminarse: la identidad anónima ahora es 100% automática vía cookie (ver el punto 3 de "Dos

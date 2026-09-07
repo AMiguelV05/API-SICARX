@@ -8,8 +8,8 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse
-from app.services.catalog_service import get_local_catalog, get_best_selling_products
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse
+from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
@@ -39,6 +39,32 @@ async def get_best_sellers(
         in_stock=in_stock,
     )
     return BestSellersResponse(docs=docs)
+
+# Declarado antes de GET /{uuid} - mismo motivo que best-sellers arriba.
+@router.get("/available-now", response_model=AvailableNowResponse, summary="Productos disponibles ahora (con stock e imagen)")
+async def get_available_now(
+    db: DbDep,
+    limit: int = Query(default=12, ge=1, le=50, description="Cantidad de productos a devolver (1-50)"),
+    department_uuid: Optional[str] = Query(default=None, alias="departmentUuid"),
+    category_uuid: Optional[str] = Query(default=None, alias="categoryUuid"),
+    taxonomy_uuid: Optional[str] = Query(default=None, alias="taxonomyUuid"),
+    vehicle_uuid: Optional[str] = Query(default=None, alias="vehicleUuid"),
+    sort_by: Optional[str] = Query(default=None, alias="sortBy", description="price_asc, price_desc, name_asc o relevance (mas vendidos primero); si se omite, orden natural de la base de datos"),
+):
+    """
+    Productos con stock disponible (Product.available_stock > 0) y con imagen
+    (Product.image_url no nulo/vacio), pensado para la seccion "Disponible Ahora" de la
+    pagina principal. Sin paginacion - es un feed acotado de top-N, no un browse.
+    """
+    docs = await get_available_now_products(
+        db, limit,
+        department_uuid=department_uuid,
+        category_uuid=category_uuid,
+        taxonomy_uuid=taxonomy_uuid,
+        vehicle_uuid=vehicle_uuid,
+        sort_by=sort_by,
+    )
+    return AvailableNowResponse(docs=docs)
 
 @router.get("/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
 async def get_product_details(uuid: str, db: DbDep):

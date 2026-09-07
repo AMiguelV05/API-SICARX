@@ -83,6 +83,9 @@ class LocalCatalogResponse(CamelModel):
 class BestSellersResponse(CamelModel):
     docs: List[ProductBasic]
 
+class AvailableNowResponse(CamelModel):
+    docs: List[ProductBasic]
+
 class ProductDetail(CamelModel):
     id: int
     sicar_uuid: str
