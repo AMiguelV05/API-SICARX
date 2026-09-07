@@ -40,9 +40,6 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     if filters.get("tag"):
         stmt = stmt.where(Product.tags.contains([filters["tag"]]))
 
-    count_stmt = select(func.count()).select_from(stmt.subquery())
-    total_items = await db.scalar(count_stmt)
-
     sort_by = filters.get("sort_by")
     if sort_by == "price_asc":
         stmt = stmt.order_by(Product.price.asc())
@@ -54,10 +51,32 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         # Sin texto de busqueda aqui, "relevance" = popularidad (sales_count) - el proxy estandar de e-commerce para el orden por defecto de una categoria.
         stmt = stmt.order_by(Product.sales_count.desc(), Product.name.asc())
 
-    stmt = stmt.limit(filters.get("limit", 60)).offset(filters.get("offset", 0))
+    offset = filters.get("offset", 0)
 
-    result = await db.execute(stmt)
-    products = result.scalars().all()
+    # count(*) OVER() en la MISMA consulta que trae la pagina, en vez de un SELECT COUNT(*)
+    # aparte contra una subconsulta identica - una sola ida a Postgres por llamada en el
+    # endpoint mas usado de la API, en vez de dos. El total sigue siendo sobre el conjunto
+    # filtrado COMPLETO (antes de LIMIT/OFFSET) - la ventana no lleva PARTITION BY/ORDER BY,
+    # asi que cuenta todas las filas que matchean el WHERE sin importar el orden/pagina.
+    paged_stmt = stmt.add_columns(func.count().over().label("total_count")).limit(filters.get("limit", 60)).offset(offset)
+
+    result = await db.execute(paged_stmt)
+    rows = result.all()
+    products = [row[0] for row in rows]
+
+    if rows:
+        total_items = rows[0].total_count
+    elif offset == 0:
+        # Sin filas y sin offset: el filtro genuinamente no matchea nada - total es 0, sin
+        # necesidad de una segunda consulta.
+        total_items = 0
+    else:
+        # offset mas alla del conjunto filtrado (se pidio una pagina que ya no existe) - la
+        # ventana count()OVER() no aparece en ninguna fila si esta pagina viene vacia, asi
+        # que la unica forma de que `total` siga siendo correcto (cuantas paginas hay EN
+        # TOTAL, no solo si esta pagina esta vacia) es un COUNT(*) aparte aqui - el precio de
+        # colapsar a una sola consulta lo paga solo este caso, no el camino comun.
+        total_items = await db.scalar(select(func.count()).select_from(stmt.subquery()))
 
     logger.info(f"Consulta de catalogo exitosa. Filtros: {filters}. Total encontrados: {total_items}")
 
@@ -99,9 +118,6 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
     if in_stock:
         stmt = stmt.where(Product.available_stock > 0)
 
-    count_stmt = select(func.count()).select_from(stmt.subquery())
-    total_items = await db.scalar(count_stmt)
-
     if sort_by == "price_asc":
         stmt = stmt.order_by(Product.price.asc())
     elif sort_by == "price_desc":
@@ -113,10 +129,22 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         priority = case((starts_with, 0), else_=1)
         stmt = stmt.order_by(priority, Product.sales_count.desc(), Product.name.asc())
 
-    stmt = stmt.limit(limit).offset(offset)
+    # count(*) OVER() en la misma consulta que la pagina - mismo motivo/tradeoff que
+    # get_local_catalog arriba: una sola ida a Postgres en el camino comun, con fallback a un
+    # COUNT(*) aparte solo si offset cae mas alla del conjunto filtrado (ninguna fila que
+    # traiga la ventana consigo).
+    paged_stmt = stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)
 
-    result = await db.execute(stmt)
-    products = result.scalars().all()
+    result = await db.execute(paged_stmt)
+    rows = result.all()
+    products = [row[0] for row in rows]
+
+    if rows:
+        total_items = rows[0].total_count
+    elif offset == 0:
+        total_items = 0
+    else:
+        total_items = await db.scalar(select(func.count()).select_from(stmt.subquery()))
 
     logger.info(f"Busqueda '{q}' exitosa. Total encontrados: {total_items}")
 

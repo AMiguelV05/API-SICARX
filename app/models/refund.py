@@ -23,6 +23,8 @@ class Refund(Base):
     # NULL para el reembolso automatico de una cancelacion iniciada por el propio
     # cliente/invitado (POST /orders/{id}/cancel) - ahi no hay un AdminUser real
     # involucrado. Poblado para un reembolso parcial emitido via /admin (require_super_admin).
-    issued_by_admin_id = Column(Integer, ForeignKey("admin_users.id"), nullable=True)
+    # index=True: unica FK del esquema que se habia quedado sin indexar (todo el resto -
+    # admin_audit_log.admin_user_id, coupon_redemptions.client_account_id, etc. - ya lo tiene).
+    issued_by_admin_id = Column(Integer, ForeignKey("admin_users.id"), nullable=True, index=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
