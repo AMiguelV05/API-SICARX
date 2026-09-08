@@ -86,16 +86,27 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     }
 
 async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance"):
-    """Substring search (ILIKE) en sku/name via GIN pg_trgm; prefix matches ordenan primero. `q` se escapa para que %/_ no se interpreten como comodines ILIKE."""
+    """Substring search (ILIKE) en sku/name via GIN pg_trgm, insensible a acentos (immutable_unaccent
+    en ambos lados de la comparacion, ver migracion f1a3c7e9b2d4) - "camion" y "camión" matchean
+    igual. Prefix matches ordenan primero. `q` se escapa para que %/_ no se interpreten como
+    comodines ILIKE."""
     escaped_q = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped_q}%"
     prefix_pattern = f"{escaped_q}%"
-    starts_with = or_(Product.sku.ilike(prefix_pattern, escape="\\"), Product.name.ilike(prefix_pattern, escape="\\"))
+    unaccented_sku = func.immutable_unaccent(Product.sku)
+    unaccented_name = func.immutable_unaccent(Product.name)
+    starts_with = or_(
+        unaccented_sku.ilike(func.immutable_unaccent(prefix_pattern), escape="\\"),
+        unaccented_name.ilike(func.immutable_unaccent(prefix_pattern), escape="\\"),
+    )
 
     stmt = select(Product).where(
         Product.is_deleted == False,
         Product.is_active == True,
-        or_(Product.sku.ilike(pattern, escape="\\"), Product.name.ilike(pattern, escape="\\"))
+        or_(
+            unaccented_sku.ilike(func.immutable_unaccent(pattern), escape="\\"),
+            unaccented_name.ilike(func.immutable_unaccent(pattern), escape="\\"),
+        )
     )
 
     if department_uuid:

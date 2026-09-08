@@ -11,8 +11,10 @@ class Product(Base):
         Index("ix_products_tags_gin", "tags", postgresql_using="gin", postgresql_ops={"tags": "jsonb_path_ops"}),
         Index("ix_products_attributes_gin", "attributes", postgresql_using="gin", postgresql_ops={"attributes": "jsonb_path_ops"}),
         # Declarados aqui (no solo en la migracion que los creo) para que autogenerate no proponga su drop como falso positivo - ver 806cd48b3b2a.
-        Index("ix_products_sku_trgm", "sku", postgresql_using="gin", postgresql_ops={"sku": "gin_trgm_ops"}),
-        Index("ix_products_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
+        # Sobre immutable_unaccent(sku)/immutable_unaccent(name), no la columna cruda - busqueda insensible a acentos, ver f1a3c7e9b2d4.
+        # El opclass va embebido en el text() (no via postgresql_ops, que solo mapea por nombre de columna real) - mismo patron que ix_products_available_stock abajo.
+        Index("ix_products_sku_trgm_unaccent", text("immutable_unaccent(sku) gin_trgm_ops"), postgresql_using="gin"),
+        Index("ix_products_name_trgm_unaccent", text("immutable_unaccent(name) gin_trgm_ops"), postgresql_using="gin"),
         # Parcial: solo cubre lo que consulta GET /products/best-sellers y sort_by=relevance (mismo patron que ix_client_addresses_one_default en client.py).
         Index("ix_products_sales_count", "sales_count", postgresql_where=text("is_deleted = false AND is_active = true")),
         # Expresion, no columna: debe coincidir EXACTAMENTE con available_stock.expression
