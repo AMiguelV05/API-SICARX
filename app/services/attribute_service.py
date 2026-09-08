@@ -1,4 +1,3 @@
-import json
 import logging
 import re
 import unicodedata
@@ -426,14 +425,24 @@ async def apply_preset_to_products(db: AsyncSession, preset_uuid: str, product_u
         product_ids.append(row.id)
 
     if product_ids:
-        # El operando IZQUIERDO gana en `||` para claves duplicadas en Postgres - por eso las
+        # El operando DERECHO gana en `||` para claves duplicadas en Postgres - por eso las
         # claves nuevas (con valor null) van a la izquierda y attributes existente a la derecha,
         # asi un valor ya guardado nunca se pisa con null.
-        new_keys_json = json.dumps({slug: None for slug in preset_slugs})
+        # BUG (encontrado via Sentry, corrupcion real en produccion): pasar un str ya
+        # serializado (json.dumps(...)) a func.cast(valor, JSONB) lo hace pasar DOS VECES
+        # por el bind_processor de JSONB (que llama json.dumps de nuevo sobre lo que sea que
+        # reciba) - el resultado es un jsonb de tipo string, no objeto. `object_string || {}`
+        # ya no matchea el caso "ambos son objetos" del operador `||`, cae al fallback que
+        # envuelve cada operando en un arreglo de un elemento y los concatena - de ahi que
+        # Product.attributes terminara siendo una LISTA (["<json como texto>", {}]) en vez
+        # de un dict, y get_attributes_for_product reventara en stored.keys(). Pasar el
+        # dict de Python crudo (sin json.dumps previo) deja que el bind_processor lo
+        # serialice una sola vez, como corresponde.
+        new_keys = {slug: None for slug in preset_slugs}
         await db.execute(
             update(Product)
             .where(Product.id.in_(product_ids))
-            .values(attributes=func.cast(new_keys_json, JSONB).op("||")(func.coalesce(Product.attributes, func.cast("{}", JSONB))))
+            .values(attributes=func.cast(new_keys, JSONB).op("||")(func.coalesce(Product.attributes, func.cast({}, JSONB))))
         )
     await db.commit()
     logger.info(f"Preset {preset_uuid} aplicado via /admin a {len(unique_uuids)} producto(s), {scaffolded_count} clave(s) nueva(s).")
