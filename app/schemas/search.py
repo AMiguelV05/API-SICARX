@@ -6,10 +6,9 @@ from app.schemas.products import ProductBasic
 class SearchFilter(CamelModel):
     q: str = Field(min_length=1, description="Texto a buscar en sku o nombre del producto")
     limit: int = Field(default=60, ge=1, le=200, description="Cantidad de productos por página (1-200)")
-    # Mismo techo y misma razon que LocalCatalogFilter.offset (products.py) - sin el, un
-    # cliente puede forzar un escaneo arbitrariamente profundo sobre 124k+ productos por
-    # llamada via paginacion OFFSET.
-    offset: int = Field(default=0, ge=0, le=10000, description="Paginación (inicio, máximo 10000)")
+    # Mismo cambio y misma razon que LocalCatalogFilter.offset (products.py) - el techo de
+    # 10000 removido, bloqueaba el recorrido legitimo del catalogo completo.
+    offset: int = Field(default=0, ge=0, description="Paginación (inicio)")
     department_uuid: Optional[str] = None
     category_uuid: Optional[str] = None
     taxonomy_uuid: Optional[str] = Field(default=None, description="UUID de un nodo del arbol de categorias propio (PIM, GET /taxonomy) - distinto de category_uuid (clasificacion cruda de Sicar X). Incluye productos etiquetados en descendientes del nodo.")

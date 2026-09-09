@@ -37,11 +37,11 @@ class VariantGroupDetail(CamelModel):
 
 class LocalCatalogFilter(CamelModel):
     limit: int = Field(default=60, ge=1, le=200, description="Cantidad de productos por página (1-200)")
-    # Techo (no solo piso) sobre offset: sin el, un cliente puede forzar a Postgres a
-    # escanear/descartar arbitrariamente profundo dentro de las 124k+ filas de products en
-    # cada llamada (paginacion OFFSET clasica). 10000 alcanza para el browsing mas profundo
-    # que un comprador real hace (con limit=200, son 50 paginas) sin dejar el techo abierto.
-    offset: int = Field(default=0, ge=0, le=10000, description="Paginación (inicio, máximo 10000)")
+    # Techo de 10000 removido (2026-09-09): bloqueaba el recorrido legitimo del catalogo
+    # completo (124k+ productos, ej. generacion de sitemap) sin estar documentado en
+    # FRONTEND_INTEGRATION.md como limite real - el frontend ya asumia que solo offset >= 0
+    # aplicaba. `limit` (<=200) sigue acotando el costo de cada llamada individual.
+    offset: int = Field(default=0, ge=0, description="Paginación (inicio)")
     department_uuid: Optional[str] = None
     category_uuid: Optional[str] = None
     taxonomy_uuid: Optional[str] = Field(default=None, description="UUID de un nodo del arbol de categorias propio (PIM, GET /taxonomy) - distinto de category_uuid (clasificacion cruda de Sicar X). Incluye productos etiquetados en descendientes del nodo.")
