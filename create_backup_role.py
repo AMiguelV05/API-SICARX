@@ -55,8 +55,12 @@ async def main() -> None:
         await conn.execute(f'GRANT CONNECT ON DATABASE "{db_name}" TO backup_reader')
         await conn.execute("GRANT USAGE ON SCHEMA public TO backup_reader")
         await conn.execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO backup_reader")
+        await conn.execute("GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO backup_reader")
         await conn.execute(
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO backup_reader"
+        )
+        await conn.execute(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO backup_reader"
         )
     finally:
         await conn.close()
