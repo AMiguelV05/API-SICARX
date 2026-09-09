@@ -1,47 +1,84 @@
 name: Offsite database backup
 
-# Respaldo logico (pg_dump) fuera de Railway, corriendo cada 6 horas via
-# GitHub Actions - la capa de recuperacion ante desastres que sobrevive a un
-# compromiso de la cuenta de Railway (Postgres-O4xA), distinta de la
-# recuperacion punto-en-tiempo (PITR) nativa de Railway, que ya cubre bugs y
-# credenciales filtradas con RPO casi cero pero vive dentro del mismo
-# proyecto. Ver docs/superpowers/specs/2026-09-09-disaster-recovery-design.md.
+# Respaldo logico (pg_dump) fuera de Railway - la CAPA PRIMARIA de
+# recuperacion ante desastres (Railway's PITR nativo resulto requerir el plan
+# Pro, que no es una opcion aqui - ver CLAUDE.md, seccion "Disaster recovery
+# and backups"). Ver docs/superpowers/specs/2026-09-09-disaster-recovery-design.md.
+#
+# Dos niveles, para no pagar en almacenamiento R2 el respaldar 288 veces al
+# dia datos que son 100% reconstruibles desde Sicar X (el catalogo de
+# `products` - ver "Local catalog vs. live SICAR X data" en CLAUDE.md):
+#
+#   - `frequent`: cada 5 minutos, TODO excepto `products` - ordenes, clientes,
+#     pagos, reviews, cupones, admin, taxonomia/vehiculos PIM. Esto es lo que
+#     da RPO de minutos para los datos genuinamente irremplazables. Retencion
+#     corta (7 dias) en R2.
+#   - `daily`: una vez al dia (09:00 UTC, madrugada en horario de Mexico),
+#     base de datos COMPLETA incluyendo `products` - captura los campos
+#     admin-curados que Sicar X no tiene (brand/bulletPoints/technicalSpecs/
+#     contents/description). Retencion larga (35 dias) en R2.
+#
+# Restauracion: restaurar primero el ultimo dump `daily` (consistente por si
+# solo, incluye todo), despues aplicar encima el ultimo dump `frequent` con
+# `pg_restore --data-only --disable-triggers` para las tablas mas frescas.
+# Caso borde conocido y aceptado: un producto creado despues del ultimo dump
+# `daily` cuyas reviews/categorias/vehiculos ya se escribieron en el dump
+# `frequent` puede violar una FK al restaurar ese excedente encima - son
+# tablas de PIM/social, no dinero, asi que una reconciliacion manual puntual
+# es aceptable frente a la complejidad de resolverlo automaticamente.
 #
 # Usa el rol de solo lectura `backup_reader` (creado via create_backup_role.py),
-# nunca el DATABASE_URL real de la app - si uno de los dos secretos se filtra,
-# el otro sigue intacto.
+# nunca el DATABASE_URL real de la app. pg_dump corre en un contenedor
+# `postgres:18-alpine` (no via apt) porque Postgres-O4xA corre la version 18,
+# no la 16 que asume docker-compose.yml para desarrollo local - ver el
+# historial de este archivo para el porque.
+#
+# Cada job termina corriendo prune_r2_backups.py: el objetivo declarado de
+# este pipeline es NUNCA pagar por almacenamiento de respaldos (limite
+# gratuito de R2: 10 GB), no solo evitarlo la mayoria del tiempo, asi que
+# ademas de las reglas de expiracion por edad en R2 (7/35 dias) hay un
+# presupuesto de tamano (9 GB) enforced activamente - poda lo mas antiguo de
+# `frequent/` primero. IMPORTANTE: las reglas de "bucket lock" en R2 deben
+# ser mas cortas que la retencion normal (ver CLAUDE.md) o este script queda
+# tan bloqueado para borrar como lo estaria un atacante.
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
-  workflow_dispatch: {}
+    - cron: "*/5 * * * *"
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Que nivel correr manualmente"
+        required: false
+        default: frequent
+        type: choice
+        options:
+          - frequent
+          - daily
 
 jobs:
-  backup:
+  frequent:
+    if: github.event.schedule == '*/5 * * * *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tier == 'frequent')
     runs-on: ubuntu-latest
-
     steps:
-      - name: Install postgresql-client 18
-        run: |
-          set -euo pipefail
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-            https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client-18
-
-      - name: Dump database
+      - name: Dump database (excluding products)
         env:
           BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
         run: |
           set -euo pipefail
           TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          echo "DUMP_KEY=frequent/sicarx-${TIMESTAMP}.dump" >> "$GITHUB_ENV"
           echo "DUMP_FILE=sicarx-${TIMESTAMP}.dump" >> "$GITHUB_ENV"
-          /usr/lib/postgresql/18/bin/pg_dump --format=custom --no-owner --no-privileges \
-            --dbname="$BACKUP_DATABASE_URL" \
-            --file="sicarx-${TIMESTAMP}.dump"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e BACKUP_DATABASE_URL \
+            -v "$PWD":/backup \
+            postgres:18-alpine \
+            pg_dump --format=custom --no-owner --no-privileges \
+              --exclude-table=public.products \
+              --dbname="$BACKUP_DATABASE_URL" \
+              --file="/backup/sicarx-${TIMESTAMP}.dump"
 
       - name: Upload to R2
         env:
@@ -50,6 +87,58 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           set -euo pipefail
-          aws s3 cp "$DUMP_FILE" "s3://${{ secrets.R2_BUCKET_NAME }}/$DUMP_FILE" \
+          aws s3 cp "$DUMP_FILE" "s3://${{ secrets.R2_BUCKET_NAME }}/$DUMP_KEY" \
             --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           rm -f "$DUMP_FILE"
+
+      - name: Prune oldest backups if over the R2 free-tier budget
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          pip install --quiet boto3
+          python prune_r2_backups.py
+
+  daily:
+    if: github.event.schedule == '0 9 * * *' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tier == 'daily')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump database (full, including products)
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          echo "DUMP_KEY=daily/sicarx-${TIMESTAMP}.dump" >> "$GITHUB_ENV"
+          echo "DUMP_FILE=sicarx-${TIMESTAMP}.dump" >> "$GITHUB_ENV"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e BACKUP_DATABASE_URL \
+            -v "$PWD":/backup \
+            postgres:18-alpine \
+            pg_dump --format=custom --no-owner --no-privileges \
+              --dbname="$BACKUP_DATABASE_URL" \
+              --file="/backup/sicarx-${TIMESTAMP}.dump"
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          aws s3 cp "$DUMP_FILE" "s3://${{ secrets.R2_BUCKET_NAME }}/$DUMP_KEY" \
+            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          rm -f "$DUMP_FILE"
+
+      - name: Prune oldest backups if over the R2 free-tier budget
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+        run: |
+          pip install --quiet boto3
+          python prune_r2_backups.py
