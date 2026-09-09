@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
           echo "DUMP_FILE=sicarx-${TIMESTAMP}.dump" >> "$GITHUB_ENV"
-          pg_dump --format=custom --no-owner --no-privileges \
+          /usr/lib/postgresql/18/bin/pg_dump --format=custom --no-owner --no-privileges \
             --dbname="$BACKUP_DATABASE_URL" \
             --file="sicarx-${TIMESTAMP}.dump"
 
