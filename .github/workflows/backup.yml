@@ -1,0 +1,49 @@
+name: Offsite database backup
+
+# Respaldo logico (pg_dump) fuera de Railway, corriendo cada 6 horas via
+# GitHub Actions - la capa de recuperacion ante desastres que sobrevive a un
+# compromiso de la cuenta de Railway (Postgres-O4xA), distinta de la
+# recuperacion punto-en-tiempo (PITR) nativa de Railway, que ya cubre bugs y
+# credenciales filtradas con RPO casi cero pero vive dentro del mismo
+# proyecto. Ver docs/superpowers/specs/2026-09-09-disaster-recovery-design.md.
+#
+# Usa el rol de solo lectura `backup_reader` (creado via create_backup_role.py),
+# nunca el DATABASE_URL real de la app - si uno de los dos secretos se filtra,
+# el otro sigue intacto.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install postgresql-client 16
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+
+      - name: Dump database
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          echo "DUMP_FILE=sicarx-${TIMESTAMP}.dump" >> "$GITHUB_ENV"
+          pg_dump --format=custom --no-owner --no-privileges \
+            --dbname="$BACKUP_DATABASE_URL" \
+            --file="sicarx-${TIMESTAMP}.dump"
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          aws s3 cp "$DUMP_FILE" "s3://${{ secrets.R2_BUCKET_NAME }}/$DUMP_FILE" \
+            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          rm -f "$DUMP_FILE"
