@@ -1,6 +1,6 @@
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, and_, case
+from sqlalchemy import select, func, or_, and_, case, text
 from app.models.product import Product
 from app.models.taxonomy import product_categories
 from app.models.vehicle import product_vehicles
@@ -185,21 +185,48 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         total_items = await db.scalar(select(func.count()).select_from(stmt.subquery()))
 
     if total_items == 0:
-        unaccented_q = func.immutable_unaccent(q)
-        similarity_score = func.greatest(
-            func.similarity(unaccented_name, unaccented_q),
-            func.similarity(unaccented_sku, unaccented_q),
+        # Fallback tolerante a errores de tipeo. Ojo: similarity()/`%` (usado aqui antes) compara
+        # la CADENA COMPLETA de q contra la CADENA COMPLETA de name - para una palabra corta con
+        # typo contra un name largo ("Desarmador Plano Punta Cruz 1/4 x 6 Truper"), los trigramas
+        # del resto del nombre diluyen la similitud total muy por debajo del umbral, asi que casi
+        # nada pasaba (confirmado: "desalmador" solo devolvia 2 resultados). word_similarity()/
+        # `<%`/`%>` es la funcion de pg_trgm hecha para esto - busca la MEJOR subcadena continua
+        # dentro del texto largo que se parezca a la palabra corta, en vez de diluir contra todo
+        # el campo. Mismo indice GIN (immutable_unaccent(name)/sku, gin_trgm_ops) acelera `%>`
+        # ademas de `%`, asi que sigue sin requerir migracion. Se aplica por palabra (AND entre
+        # palabras, igual que el match estricto de arriba) para que una query de varias palabras
+        # con una sola mal escrita solo tenga que tolerar esa, no la frase completa.
+        # `pg_trgm.word_similarity_threshold` (default 0.6) se relaja a 0.4 solo para esta
+        # transaccion (SET LOCAL) - sigue siendo index-friendly (el GUC controla el umbral que
+        # usan `<%`/`%>` internamente) pero menos estricto que el default para tolerar mejor un
+        # typo de una letra en palabras cortas.
+        await db.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.4"))
+
+        word_binds = [func.immutable_unaccent(w) for w in words] or [func.immutable_unaccent(q)]
+
+        def word_fuzzy_match(word_bind):
+            return or_(
+                unaccented_name.op("%>")(word_bind),
+                unaccented_sku.op("%>")(word_bind),
+            )
+
+        fuzzy_score = func.greatest(
+            func.word_similarity(word_binds[0], unaccented_name),
+            func.word_similarity(word_binds[0], unaccented_sku),
         )
+        for word_bind in word_binds[1:]:
+            fuzzy_score = fuzzy_score + func.greatest(
+                func.word_similarity(word_bind, unaccented_name),
+                func.word_similarity(word_bind, unaccented_sku),
+            )
+
         fallback_stmt = select(Product).where(
             Product.is_deleted == False,
             Product.is_active == True,
-            or_(
-                unaccented_name.op("%")(unaccented_q),
-                unaccented_sku.op("%")(unaccented_q),
-            ),
+            and_(*[word_fuzzy_match(wb) for wb in word_binds]),
         )
         fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock)
-        fallback_stmt = apply_sort(fallback_stmt, similarity_score.desc())
+        fallback_stmt = apply_sort(fallback_stmt, fuzzy_score.desc())
 
         paged_fallback_stmt = fallback_stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)
         result = await db.execute(paged_fallback_stmt)
@@ -208,7 +235,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         total_items = rows[0].total_count if rows else 0
 
         if products:
-            logger.info(f"Busqueda '{q}' sin match exacto por palabras - usando fallback de similitud (typo-tolerant). Total encontrados: {total_items}")
+            logger.info(f"Busqueda '{q}' sin match exacto por palabras - usando fallback de word_similarity (typo-tolerant). Total encontrados: {total_items}")
 
     logger.info(f"Busqueda '{q}' exitosa. Total encontrados: {total_items}")
 
