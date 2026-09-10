@@ -200,7 +200,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         # transaccion (SET LOCAL) - sigue siendo index-friendly (el GUC controla el umbral que
         # usan `<%`/`%>` internamente) pero menos estricto que el default para tolerar mejor un
         # typo de una letra en palabras cortas.
-        await db.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.4"))
+        await db.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.6"))
 
         word_binds = [func.immutable_unaccent(w) for w in words] or [func.immutable_unaccent(q)]
 
