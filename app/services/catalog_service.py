@@ -12,7 +12,7 @@ def _escape_ilike(text: str) -> str:
     """Escapa %/_ (y la propia barra invertida) para que no se interpreten como comodines ILIKE."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock):
+async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand=None):
     """Filtros compartidos entre la busqueda principal (word-AND) y el fallback tolerante a
     errores de tipeo de mas abajo - misma logica que get_local_catalog, factorizada aqui para
     no duplicarla entre las dos consultas de search_products."""
@@ -35,6 +35,9 @@ async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, categor
 
     if in_stock:
         stmt = stmt.where(Product.available_stock > 0)
+
+    if brand:
+        stmt = stmt.where(func.lower(Product.brand) == brand.lower())
 
     return stmt
 
@@ -63,6 +66,9 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         stmt = stmt.where(Product.id.in_(
             select(product_vehicles.c.product_id).where(product_vehicles.c.vehicle_uuid == filters["vehicle_uuid"])
         ))
+
+    if filters.get("brand"):
+        stmt = stmt.where(func.lower(Product.brand) == filters["brand"].lower())
 
     if filters.get("in_stock"):
         stmt = stmt.where(Product.available_stock > 0)
@@ -115,7 +121,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance"):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None):
     """Busqueda por palabras: cada palabra de `q` debe aparecer (ILIKE, insensible a acentos via
     immutable_unaccent, migracion f1a3c7e9b2d4) en sku O name - sin exigir que la frase completa
     sea una sola subcadena contigua ni que las palabras esten en el mismo orden/campo. Esto es lo
@@ -152,7 +158,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         Product.is_active == True,
         and_(*[word_match(w) for w in escaped_words]),
     )
-    stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock)
+    stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand)
 
     def apply_sort(stmt, relevance_priority):
         if sort_by == "price_asc":
@@ -225,7 +231,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
             Product.is_active == True,
             and_(*[word_fuzzy_match(wb) for wb in word_binds]),
         )
-        fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock)
+        fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand)
         fallback_stmt = apply_sort(fallback_stmt, fuzzy_score.desc())
 
         paged_fallback_stmt = fallback_stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)
@@ -319,3 +325,24 @@ async def get_best_selling_products(db: AsyncSession, limit: int, department_uui
 
     result = await db.execute(stmt)
     return result.scalars().all()
+
+async def get_distinct_brands(db: AsyncSession) -> list[str]:
+    """Un representante por grupo case-insensitive (GROUP BY lower(brand), MIN(brand) como
+    valor mostrado - determinista) - evita que el picklist muestre duplicados por casing
+    inconsistente (brand nunca se normaliza en escritura, ver attribute_service.update_product_info/
+    bulk_import_service). Cualquiera de estos valores filtra el grupo completo via el filtro
+    `brand` de get_local_catalog/_apply_search_filters, que ya comparan por lower(brand)."""
+    representative = func.min(Product.brand)
+    stmt = (
+        select(representative)
+        .where(
+            Product.is_deleted == False,
+            Product.is_active == True,
+            Product.brand.isnot(None),
+            Product.brand != "",
+        )
+        .group_by(func.lower(Product.brand))
+        .order_by(representative)
+    )
+    result = await db.execute(stmt)
+    return [row[0] for row in result.all()]

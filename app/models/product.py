@@ -21,6 +21,12 @@ class Product(Base):
         # (GREATEST(stock - reserved, 0)) para que el planner la use en los filtros in_stock
         # de catalog_service.py (Product.available_stock > 0) - ver migracion 3a208e2812e1.
         Index("ix_products_available_stock", text("GREATEST(stock - reserved, 0)"), postgresql_where=text("is_deleted = false AND is_active = true")),
+        # Funcional sobre lower(brand) (no la columna cruda): filtro exacto case-insensitive
+        # de marca (POST /products, POST /search: lower(brand) = lower(:value)) - btree
+        # simple (no GIN/trigram, no es busqueda difusa). Declarado aqui, no solo en la
+        # migracion que lo creo, mismo motivo que los indices arriba - ver migracion nueva
+        # que agrega este indice (chain despues de f1a3c7e9b2d4).
+        Index("ix_products_brand_lower", text("lower(brand)"), postgresql_where=text("is_deleted = false AND is_active = true")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -47,7 +53,9 @@ class Product(Base):
 
     # PIM propio (no sincronizado desde Sicar X), igual que attributes/variant_group_uuid -
     # editables via PATCH /admin/products/{uuid}/info o la hoja "InfoProducto" de la
-    # importacion masiva. Solo detalle de producto (GET /products/{uuid}), no catalogo/busqueda.
+    # importacion masiva. brand: tambien filtrable/visible en catalogo y busqueda (ver
+    # ix_products_brand_lower arriba, ProductBasic.brand, GET /products/brands) - los otros
+    # tres siguen siendo solo detalle de producto (GET /products/{uuid}).
     brand = Column(String, nullable=True)  # "Marca"
     bullet_points = Column(Text, nullable=True)  # "Bullets / Puntos Clave" - texto libre, multilinea
     technical_specs = Column(Text, nullable=True)  # "Especificaciones técnicas" - texto libre, multilinea

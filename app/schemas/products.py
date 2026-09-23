@@ -46,6 +46,7 @@ class LocalCatalogFilter(CamelModel):
     category_uuid: Optional[str] = None
     taxonomy_uuid: Optional[str] = Field(default=None, description="UUID de un nodo del arbol de categorias propio (PIM, GET /taxonomy) - distinto de category_uuid (clasificacion cruda de Sicar X). Incluye productos etiquetados en descendientes del nodo.")
     vehicle_uuid: Optional[str] = Field(default=None, description="UUID de un fitment de vehiculo (GET /v1/vehicles) - filtra a productos compatibles con ese vehiculo.")
+    brand: Optional[str] = Field(default=None, description="Filtra por marca (Product.brand) - match exacto insensible a mayusculas (lower(brand) = lower(valor)). Ver GET /products/brands para el listado de valores validos.")
     tag: Optional[str] = None
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
     sort_by: Optional[Literal["price_asc", "price_desc", "name_asc", "relevance"]] = Field(
@@ -57,6 +58,7 @@ class ProductBasic(CamelModel):
     sku: str
     name: str
     description: Optional[str]
+    brand: Optional[str] = None
     image_url: Optional[str]
     price: float
     # Fuente real es Product.available_stock (stock - reserved), no Product.stock crudo -
@@ -90,6 +92,9 @@ class BestSellersResponse(CamelModel):
 class AvailableNowResponse(CamelModel):
     docs: List[ProductBasic]
 
+class ProductBrandsResponse(CamelModel):
+    docs: List[str]
+
 class ProductDetail(CamelModel):
     id: int
     sicar_uuid: str
@@ -116,7 +121,8 @@ class ProductDetail(CamelModel):
     attributes: List[AttributeValuePublic] = []
     variant_group: Optional[VariantGroupDetail] = None
     # PIM propio, igual que attributes/variant_group arriba - ver Product.brand/bullet_points/
-    # technical_specs/contents. Solo detalle de producto, deliberadamente ausente de ProductBasic.
+    # technical_specs/contents. brand tambien vive en ProductBasic (filtrable/visible en
+    # catalogo y busqueda); bullet_points/technical_specs/contents siguen siendo solo detalle.
     brand: Optional[str] = None
     bullet_points: Optional[str] = None
     technical_specs: Optional[str] = None

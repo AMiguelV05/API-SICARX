@@ -8,8 +8,8 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse
-from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse
+from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products, get_distinct_brands
 from app.services import attribute_service
 
 logger = logging.getLogger(__name__)
@@ -65,6 +65,19 @@ async def get_available_now(
         sort_by=sort_by,
     )
     return AvailableNowResponse(docs=docs)
+
+# Declarado antes de GET /{uuid} - mismo motivo que best-sellers/available-now arriba.
+@router.get("/brands", response_model=ProductBrandsResponse, summary="Marcas distintas de productos")
+async def get_brands(db: DbDep):
+    """
+    Lista de marcas distintas (Product.brand) entre productos activos/no eliminados, para que
+    el frontend construya un picklist en vez de free-typing valores inconsistentes (brand se
+    escribe como texto libre via PATCH /admin/products/{uuid}/info o la hoja "InfoProducto"
+    del bulk-import, sin normalizacion). Cualquier valor listado aqui sirve directamente como
+    `brand` en POST /products / POST /search, que matchean case-insensitive exacto.
+    """
+    docs = await get_distinct_brands(db)
+    return ProductBrandsResponse(docs=docs)
 
 @router.get("/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
 async def get_product_details(uuid: str, db: DbDep):

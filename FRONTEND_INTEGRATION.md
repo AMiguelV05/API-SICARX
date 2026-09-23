@@ -590,6 +590,7 @@ Content-Type: application/json
   "categoryUuid": null,
   "taxonomyUuid": null,
   "vehicleUuid": null,
+  "brand": null,
   "tag": null,
   "inStock": false,
   "sortBy": null
@@ -606,6 +607,7 @@ Respuesta `200`:
       "sku": "PR2057",
       "name": "PORTAROLLO",
       "description": null,
+      "brand": null,
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
@@ -627,6 +629,16 @@ defecto `false`). Pagina con `limit`/`offset`.
 filtra a productos compatibles con un vehículo específico — el `uuid` viene de resolver la
 cascada de `GET /v1/vehicles*` (ver esa sección más abajo). Ambos son opcionales y combinables
 entre sí y con el resto de los filtros.
+
+**`brand` (nuevo, 2026-09-22)** — filtra por marca (`Product.brand`), coincidencia exacta
+**insensible a mayúsculas/minúsculas** (`"truper"` y `"TRUPER"` devuelven el mismo resultado) —
+no es substring, así que `"true"` no matchea `"Truper"`. Como `brand` se captura como texto
+libre desde el panel admin, no asumas un valor exacto de memoria: pide primero
+`GET /v1/products/brands` (ver esa sección más abajo) y usa uno de los valores que devuelve
+como filtro, para no depender de que el frontend adivine el casing/ortografía exacta que
+cargó el admin. `brand` ahora también viene en cada producto de `docs` (antes solo estaba en
+`GET /v1/products/{uuid}`) — `null` si el producto todavía no tiene marca asignada, que es el
+caso de la mayoría del catálogo hoy.
 
 `price` siempre viene con 2 decimales exactos (es un `Numeric` en la base de datos, no un
 `float`) — no asumas más precisión que esa al mostrarlo o redondearlo del lado del frontend.
@@ -670,16 +682,18 @@ Content-Type: application/json
   "categoryUuid": null,
   "taxonomyUuid": null,
   "vehicleUuid": null,
+  "brand": null,
   "inStock": false,
   "sortBy": "relevance"
 }
 ```
 
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
-`name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid`/`taxonomyUuid`/`vehicleUuid`
-son opcionales y funcionan igual que en `/v1/products` (ver esa sección para el detalle de cada
-uno) — úsalos para combinar el cuadro de búsqueda con los filtros de departamento/categoría/
-vehículo ya existentes. `inStock: true` restringe el resultado a productos con
+`name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid`/`taxonomyUuid`/`vehicleUuid`/
+`brand` son opcionales y funcionan igual que en `/v1/products` (ver esa sección para el detalle de
+cada uno, incluida la nota sobre `brand` siendo match exacto insensible a mayúsculas, no
+substring) — úsalos para combinar el cuadro de búsqueda con los filtros de departamento/
+categoría/vehículo/marca ya existentes. `inStock: true` restringe el resultado a productos con
 `stock > 0` (por defecto `false`, no filtra por stock).
 
 **`sortBy` (nuevo campo, opcional, default `"relevance"`)** — mismos cuatro valores que
@@ -703,6 +717,7 @@ Respuesta `200` con la misma forma que `/v1/products`:
       "sku": "PR2057",
       "name": "PORTAROLLO",
       "description": null,
+      "brand": null,
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
@@ -825,15 +840,17 @@ usa `siblings[].name`/`sku` en su lugar.
 
 **`brand`/`bulletPoints`/`technicalSpecs`/`contents` (nuevo, 2026-08-22) — PIM propio, no
 viene de Sicar X.** Igual que `attributes`/`variantGroup` arriba: administrados desde el
-panel admin (ver `ADMIN_INTEGRATION.md`, sección "Información propia de producto"), solo
-en esta ruta de detalle — `POST /v1/products` y `POST /v1/search` no los traen (payload de
-listado sin cambios). Los cuatro son `string | null`, independientes entre sí (cualquier
-subconjunto puede venir lleno mientras el resto sigue `null`) y casi todo el catálogo
-empieza sin ninguno cargado — nunca un error, solo significa que esa sección no tiene nada
-que mostrar todavía. `bulletPoints`/`technicalSpecs` suelen venir con saltos de línea
-(`\n`) separando cada punto/especificación — respétalos al renderizar (p. ej. partiendo por
-`\n` para una lista, o `white-space: pre-line` en CSS) en vez de mostrar el string tal cual
-en una sola línea:
+panel admin (ver `ADMIN_INTEGRATION.md`, sección "Información propia de producto"). Los
+cuatro son `string | null`, independientes entre sí (cualquier subconjunto puede venir lleno
+mientras el resto sigue `null`) y casi todo el catálogo empieza sin ninguno cargado — nunca
+un error, solo significa que esa sección no tiene nada que mostrar todavía.
+**Actualización (2026-09-22): `brand` deja de ser exclusivo de esta ruta** — ahora también
+viene en `POST /v1/products`/`POST /v1/search` y es filtrable ahí (ver esas secciones arriba
+y `GET /v1/products/brands`); `bulletPoints`/`technicalSpecs`/`contents` siguen siendo solo
+de esta ruta de detalle, sin cambios. `bulletPoints`/`technicalSpecs` suelen venir con saltos
+de línea (`\n`) separando cada punto/especificación — respétalos al renderizar (p. ej.
+partiendo por `\n` para una lista, o `white-space: pre-line` en CSS) en vez de mostrar el
+string tal cual en una sola línea:
 
 ```json
 {
@@ -874,6 +891,7 @@ Respuesta `200`:
       "sku": "PR2057",
       "name": "PORTAROLLO",
       "description": null,
+      "brand": null,
       "imageUrl": null,
       "price": 8.62069,
       "stock": 2.0,
@@ -921,6 +939,7 @@ Respuesta `200` (mismo shape que `best-sellers`, mismo objeto `ProductBasic` por
       "sku": "PR2057",
       "name": "PORTAROLLO",
       "description": null,
+      "brand": null,
       "imageUrl": "https://.../portarollo.jpg",
       "price": 8.62069,
       "stock": 2.0,
@@ -936,6 +955,34 @@ disponible neto de reservas, igual que en cualquier otro listado cara al cliente
 `imageUrl` no nulo/vacío, así la sección nunca muestra una tarjeta sin foto. Puede venir
 `docs: []` si ningún producto combina con los filtros usados — en ese caso la UI debería
 ocultar la sección en vez de mostrarla vacía, mismo criterio que `best-sellers`.
+
+### `GET /v1/products/brands` — marcas distintas (nuevo, 2026-09-22, para armar un picklist)
+
+```http
+GET /v1/products/brands
+x-api-key: <api-key>
+```
+
+Respuesta `200`:
+```json
+{ "docs": ["Bosch", "Pretul", "Surtek", "Truper"] }
+```
+
+Lista plana (sin paginar — la cantidad de marcas distintas es chica, igual que
+`GET /v1/vehicles/makes`) de las marcas (`Product.brand`) que tiene al menos un producto
+activo/no eliminado, ordenadas alfabéticamente. Pensado para armar un selector/picklist de
+marca en vez de dejar que el usuario escriba libremente — `brand` se captura como texto
+libre desde el panel admin (`PATCH /admin/products/{uuid}/info` o la hoja "InfoProducto" del
+bulk-import, ver `ADMIN_INTEGRATION.md`), sin normalización, así que dos productos podrían en
+teoría tener `"Truper"` y `"TRUPER"` guardados — este endpoint ya deduplica esos casos
+insensible a mayúsculas y devuelve un solo valor representativo por marca, para que el
+picklist no muestre duplicados.
+
+Cualquier valor de `docs` sirve directo como `brand` en `POST /v1/products`/`POST /v1/search`
+(ver esas secciones arriba) — el filtro compara con el mismo criterio insensible a
+mayúsculas, así que no hace falta que coincida carácter por carácter con lo que devolvió este
+endpoint. Productos sin marca asignada (la mayoría del catálogo hoy) no aportan ninguna
+entrada aquí.
 
 ### `GET /v1/taxonomy` — árbol de categorías (para filtros)
 
@@ -2368,6 +2415,14 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
 
 ## Notas y advertencias
 
+- **Nuevo (2026-09-22): filtro `brand` y `GET /v1/products/brands`.** `POST /v1/products` y
+  `POST /v1/search` ganan un campo opcional `brand` (match exacto insensible a mayúsculas —
+  ver esas secciones arriba para el detalle), y cada producto en `docs` de ambos endpoints
+  (más `best-sellers`/`available-now`) ahora incluye `brand` (`null` si no tiene marca
+  asignada) — antes solo venía en `GET /v1/products/{uuid}`. Todo aditivo, ningún campo
+  existente cambia de nombre o de tipo. `GET /v1/products/brands` (nuevo) devuelve la lista
+  de marcas distintas para armar un picklist, en vez de dejar que el usuario escriba
+  libremente — ver esa sección arriba.
 - **Nuevo (2026-08-19): wishlist / lista de favoritos** — `/v1/wishlist/*`, ver sección
   dedicada arriba. Solo para cuentas de cliente (sin equivalente de invitado/anónimo, a
   diferencia del carrito), autenticada con `Authorization` (no `X-Client-Token`). No
