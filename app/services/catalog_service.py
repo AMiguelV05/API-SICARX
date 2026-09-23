@@ -326,12 +326,17 @@ async def get_best_selling_products(db: AsyncSession, limit: int, department_uui
     result = await db.execute(stmt)
     return result.scalars().all()
 
-async def get_distinct_brands(db: AsyncSession) -> list[str]:
+async def get_distinct_brands(db: AsyncSession, taxonomy_uuid: str = None) -> list[str]:
     """Un representante por grupo case-insensitive (GROUP BY lower(brand), MIN(brand) como
     valor mostrado - determinista) - evita que el picklist muestre duplicados por casing
     inconsistente (brand nunca se normaliza en escritura, ver attribute_service.update_product_info/
     bulk_import_service). Cualquiera de estos valores filtra el grupo completo via el filtro
-    `brand` de get_local_catalog/_apply_search_filters, que ya comparan por lower(brand)."""
+    `brand` de get_local_catalog/_apply_search_filters, que ya comparan por lower(brand).
+
+    `taxonomy_uuid` (opcional) acota las marcas a las de un nodo del arbol PIM (y sus
+    descendientes, igual que el filtro homonimo de get_local_catalog) - para que la franja de
+    marcas de la UI muestre solo las relevantes a la categoria seleccionada, en vez de siempre
+    el catalogo completo."""
     representative = func.min(Product.brand)
     stmt = (
         select(representative)
@@ -341,8 +346,15 @@ async def get_distinct_brands(db: AsyncSession) -> list[str]:
             Product.brand.isnot(None),
             Product.brand != "",
         )
-        .group_by(func.lower(Product.brand))
-        .order_by(representative)
     )
+
+    if taxonomy_uuid:
+        descendant_uuids = await get_descendant_uuids(db, taxonomy_uuid)
+        stmt = stmt.where(Product.id.in_(
+            select(product_categories.c.product_id).where(product_categories.c.category_uuid.in_(descendant_uuids))
+        ))
+
+    stmt = stmt.group_by(func.lower(Product.brand)).order_by(representative)
+
     result = await db.execute(stmt)
     return [row[0] for row in result.all()]

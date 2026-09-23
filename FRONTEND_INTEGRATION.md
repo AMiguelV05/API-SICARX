@@ -978,6 +978,21 @@ teoría tener `"Truper"` y `"TRUPER"` guardados — este endpoint ya deduplica e
 insensible a mayúsculas y devuelve un solo valor representativo por marca, para que el
 picklist no muestre duplicados.
 
+**`taxonomyUuid` (opcional, nuevo, 2026-09-22)** — acota la lista a las marcas presentes en
+un nodo del árbol propio de categorías (`GET /v1/taxonomy`, incluye descendientes, mismo
+criterio que `taxonomyUuid` en `POST /v1/products`):
+
+```http
+GET /v1/products/brands?taxonomyUuid=137bcaba-5aa2-4559-8545-2cab151d8369
+x-api-key: <api-key>
+```
+
+Pásalo cuando el shopper ya tiene una categoría seleccionada, para que la franja/filtro de
+marcas se actualice y muestre solo las que aplican ahí en vez de siempre el catálogo
+completo — el mismo `uuid` que ya usas como `taxonomyUuid` al llamar `POST /v1/products`.
+Omitirlo (o mandar `null`) sigue devolviendo todas las marcas del catálogo, sin cambios de
+comportamiento respecto a antes de este parámetro.
+
 Cualquier valor de `docs` sirve directo como `brand` en `POST /v1/products`/`POST /v1/search`
 (ver esas secciones arriba) — el filtro compara con el mismo criterio insensible a
 mayúsculas, así que no hace falta que coincida carácter por carácter con lo que devolvió este
@@ -2422,7 +2437,9 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
   asignada) — antes solo venía en `GET /v1/products/{uuid}`. Todo aditivo, ningún campo
   existente cambia de nombre o de tipo. `GET /v1/products/brands` (nuevo) devuelve la lista
   de marcas distintas para armar un picklist, en vez de dejar que el usuario escriba
-  libremente — ver esa sección arriba.
+  libremente — ver esa sección arriba. Acepta un `taxonomyUuid` opcional (mismo día) para
+  acotar las marcas a una categoría del árbol PIM, así la franja de marcas puede reaccionar
+  a la categoría seleccionada en vez de mostrar siempre el catálogo completo.
 - **Nuevo (2026-08-19): wishlist / lista de favoritos** — `/v1/wishlist/*`, ver sección
   dedicada arriba. Solo para cuentas de cliente (sin equivalente de invitado/anónimo, a
   diferencia del carrito), autenticada con `Authorization` (no `X-Client-Token`). No

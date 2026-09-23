@@ -68,15 +68,22 @@ async def get_available_now(
 
 # Declarado antes de GET /{uuid} - mismo motivo que best-sellers/available-now arriba.
 @router.get("/brands", response_model=ProductBrandsResponse, summary="Marcas distintas de productos")
-async def get_brands(db: DbDep):
+async def get_brands(
+    db: DbDep,
+    taxonomy_uuid: Optional[str] = Query(default=None, alias="taxonomyUuid", description="UUID de un nodo del arbol de categorias propio (GET /taxonomy) - si se manda, solo devuelve marcas de productos en ese nodo o sus descendientes."),
+):
     """
     Lista de marcas distintas (Product.brand) entre productos activos/no eliminados, para que
     el frontend construya un picklist en vez de free-typing valores inconsistentes (brand se
     escribe como texto libre via PATCH /admin/products/{uuid}/info o la hoja "InfoProducto"
     del bulk-import, sin normalizacion). Cualquier valor listado aqui sirve directamente como
     `brand` en POST /products / POST /search, que matchean case-insensitive exacto.
+
+    `taxonomyUuid` (opcional) acota el resultado a una categoria del arbol PIM (y sus
+    descendientes) - pasa el mismo uuid que ya se usa como `taxonomyUuid` en POST /products
+    para que la franja de marcas de la UI se actualice segun la categoria seleccionada.
     """
-    docs = await get_distinct_brands(db)
+    docs = await get_distinct_brands(db, taxonomy_uuid=taxonomy_uuid)
     return ProductBrandsResponse(docs=docs)
 
 @router.get("/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
