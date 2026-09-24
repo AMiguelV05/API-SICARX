@@ -30,9 +30,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
+    # public.immutable_unaccent calificado (no el nombre suelto): CREATE INDEX evalua la
+    # expresion con search_path restringido (pg_catalog, pg_temp) desde Postgres 17 -
+    # Postgres-O4xA es 18 - asi que sin el esquema explicito falla con "function
+    # immutable_unaccent(text) does not exist". Mismo motivo por el que immutable_unaccent
+    # ya llama a public.unaccent calificado (f1a3c7e9b2d4). replace() vive en pg_catalog.
     op.execute(
         "CREATE OR REPLACE FUNCTION search_normalize(text) RETURNS text AS $$ "
-        "SELECT replace(immutable_unaccent($1), '-', '') "
+        "SELECT pg_catalog.replace(public.immutable_unaccent($1), '-', '') "
         "$$ LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT"
     )
 
