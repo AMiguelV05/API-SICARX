@@ -12,7 +12,7 @@ def _escape_ilike(text: str) -> str:
     """Escapa %/_ (y la propia barra invertida) para que no se interpreten como comodines ILIKE."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand=None):
+async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand=None, has_brand=None):
     """Filtros compartidos entre la busqueda principal (word-AND) y el fallback tolerante a
     errores de tipeo de mas abajo - misma logica que get_local_catalog, factorizada aqui para
     no duplicarla entre las dos consultas de search_products."""
@@ -39,6 +39,18 @@ async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, categor
     if brand:
         stmt = stmt.where(func.lower(Product.brand) == brand.lower())
 
+    stmt = _apply_has_brand(stmt, has_brand)
+
+    return stmt
+
+def _apply_has_brand(stmt, has_brand):
+    """hasBrand: true = solo con marca, false = solo sin marca ("Sin marca"), None = sin
+    filtro. brand nunca se guarda como "" (brand_service.normalize_brand + migracion
+    a7c3e1f9d2b4), asi que IS NULL basta."""
+    if has_brand is True:
+        stmt = stmt.where(Product.brand.isnot(None))
+    elif has_brand is False:
+        stmt = stmt.where(Product.brand.is_(None))
     return stmt
 
 async def get_local_catalog(db: AsyncSession, filters: dict):
@@ -69,6 +81,8 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
 
     if filters.get("brand"):
         stmt = stmt.where(func.lower(Product.brand) == filters["brand"].lower())
+
+    stmt = _apply_has_brand(stmt, filters.get("has_brand"))
 
     if filters.get("in_stock"):
         stmt = stmt.where(Product.available_stock > 0)
@@ -121,7 +135,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None, has_brand: bool = None):
     """Busqueda por palabras: cada palabra de `q` debe aparecer (ILIKE, insensible a acentos via
     immutable_unaccent, migracion f1a3c7e9b2d4) en sku O name - sin exigir que la frase completa
     sea una sola subcadena contigua ni que las palabras esten en el mismo orden/campo. Esto es lo
@@ -158,7 +172,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         Product.is_active == True,
         and_(*[word_match(w) for w in escaped_words]),
     )
-    stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand)
+    stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand)
 
     def apply_sort(stmt, relevance_priority):
         if sort_by == "price_asc":
@@ -231,7 +245,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
             Product.is_active == True,
             and_(*[word_fuzzy_match(wb) for wb in word_binds]),
         )
-        fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand)
+        fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand)
         fallback_stmt = apply_sort(fallback_stmt, fuzzy_score.desc())
 
         paged_fallback_stmt = fallback_stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)

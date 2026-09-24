@@ -10,7 +10,9 @@ from app.schemas.attribute import (
     SetProductVariantGroupResponse,
 )
 from app.schemas.products import ProductInfoUpdateRequest, ProductInfoPublic
-from app.services import attribute_service
+from app.schemas.brand import BulkSetBrandRequest, BulkSetBrandResponse
+from app.core.security import CurrentAdminDep
+from app.services import attribute_service, brand_service, audit_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependencies=[Depends(get_current_admin)])
@@ -19,6 +21,23 @@ router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependen
 # propiedad de Sicar X, sincronizados por el worker - no editables aqui. Este router cubre
 # lo que este PIM administra localmente: atributos EAV, agrupacion de variantes, y (abajo)
 # descripcion/marca/bullets/especificaciones/contenido.
+
+
+# Declarado antes de las rutas /{product_uuid}/... por claridad - no chocan de todos modos
+# (esas llevan dos segmentos).
+@router.patch("/brand", response_model=BulkSetBrandResponse, summary="Asignar o quitar la marca de varios productos a la vez")
+async def admin_bulk_set_brand(db: DbDep, current: CurrentAdminDep, data: BulkSetBrandRequest = Body()):
+    """Asigna `brand` (recortada; null o "" la borra) a 1-500 productos. Exito parcial:
+    uuids que no resuelven a un producto no eliminado vuelven en `notFound` en vez de
+    rechazar toda la solicitud."""
+    updated, not_found = await brand_service.set_brand_for_products(db, data.product_uuids, data.brand)
+    brand = brand_service.normalize_brand(data.brand)
+    await audit_service.log_action(
+        db, current, "product.brand_bulk_set", "brand", brand or "(sin marca)",
+        {"brand": brand, "productUuids": data.product_uuids, "updated": updated, "notFound": not_found},
+    )
+    await db.commit()
+    return BulkSetBrandResponse(updated=updated, not_found=not_found)
 
 
 @router.get("/{product_uuid}/attributes", response_model=ProductAttributesResponse, summary="Ver los atributos guardados de un producto")

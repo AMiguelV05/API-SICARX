@@ -24,6 +24,7 @@ async def search(db: DbDep, filter_data: SearchFilter = Body()):
             taxonomy_uuid=filter_data.taxonomy_uuid,
             vehicle_uuid=filter_data.vehicle_uuid,
             brand=filter_data.brand,
+            has_brand=filter_data.has_brand,
             in_stock=filter_data.in_stock,
             sort_by=filter_data.sort_by,
         )

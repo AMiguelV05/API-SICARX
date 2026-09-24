@@ -47,6 +47,7 @@ class LocalCatalogFilter(CamelModel):
     taxonomy_uuid: Optional[str] = Field(default=None, description="UUID de un nodo del arbol de categorias propio (PIM, GET /taxonomy) - distinto de category_uuid (clasificacion cruda de Sicar X). Incluye productos etiquetados en descendientes del nodo.")
     vehicle_uuid: Optional[str] = Field(default=None, description="UUID de un fitment de vehiculo (GET /v1/vehicles) - filtra a productos compatibles con ese vehiculo.")
     brand: Optional[str] = Field(default=None, description="Filtra por marca (Product.brand) - match exacto insensible a mayusculas (lower(brand) = lower(valor)). Ver GET /products/brands para el listado de valores validos.")
+    has_brand: Optional[bool] = Field(default=None, description="true = solo productos con marca, false = solo productos sin marca (filtro \"Sin marca\"). Omitido = sin filtro. Se combina (AND) con los demas filtros.")
     tag: Optional[str] = None
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
     sort_by: Optional[Literal["price_asc", "price_desc", "name_asc", "relevance"]] = Field(

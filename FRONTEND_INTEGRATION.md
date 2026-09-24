@@ -591,6 +591,7 @@ Content-Type: application/json
   "taxonomyUuid": null,
   "vehicleUuid": null,
   "brand": null,
+  "hasBrand": null,
   "tag": null,
   "inStock": false,
   "sortBy": null
@@ -640,6 +641,11 @@ cargó el admin. `brand` ahora también viene en cada producto de `docs` (antes 
 `GET /v1/products/{uuid}`) — `null` si el producto todavía no tiene marca asignada, que es el
 caso de la mayoría del catálogo hoy.
 
+**`hasBrand` (nuevo, 2026-09-23)** — `boolean`, opcional. `false` devuelve **solo** productos sin
+marca (`brand: null`) — es el filtro "Sin marca"; `true` solo productos con alguna marca;
+omitido o `null` no filtra. Se combina (AND) con el resto de los filtros, incluido `brand` (así
+que `brand: "Truper"` + `hasBrand: false` devuelve siempre una lista vacía).
+
 `price` siempre viene con 2 decimales exactos (es un `Numeric` en la base de datos, no un
 `float`) — no asumas más precisión que esa al mostrarlo o redondearlo del lado del frontend.
 
@@ -683,6 +689,7 @@ Content-Type: application/json
   "taxonomyUuid": null,
   "vehicleUuid": null,
   "brand": null,
+  "hasBrand": null,
   "inStock": false,
   "sortBy": "relevance"
 }
@@ -690,7 +697,7 @@ Content-Type: application/json
 
 Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
 `name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid`/`taxonomyUuid`/`vehicleUuid`/
-`brand` son opcionales y funcionan igual que en `/v1/products` (ver esa sección para el detalle de
+`brand`/`hasBrand` son opcionales y funcionan igual que en `/v1/products` (ver esa sección para el detalle de
 cada uno, incluida la nota sobre `brand` siendo match exacto insensible a mayúsculas, no
 substring) — úsalos para combinar el cuadro de búsqueda con los filtros de departamento/
 categoría/vehículo/marca ya existentes. `inStock: true` restringe el resultado a productos con

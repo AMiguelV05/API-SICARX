@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.routes import products, orders, taxonomy, search, vehicles, auth, addresses, client_orders, cart, payments, reviews, wishlist, admin, admin_categories, admin_vehicles, admin_bulk_import, admin_attributes, admin_attribute_presets, admin_variant_groups, admin_products, admin_dashboard, admin_reviews, admin_coupons, admin_auth, admin_admins, admin_audit
+from app.api.routes import products, orders, taxonomy, search, vehicles, auth, addresses, client_orders, cart, payments, reviews, wishlist, admin, admin_categories, admin_vehicles, admin_bulk_import, admin_attributes, admin_attribute_presets, admin_variant_groups, admin_products, admin_dashboard, admin_reviews, admin_coupons, admin_auth, admin_admins, admin_audit, admin_brands
 
 # Agrupa toda la API bajo /v1. Cada sub-router ya declara su propio tags=/dependencies=
 # en su archivo -- no se repiten aqui para evitar que las listas de tags se dupliquen
@@ -35,5 +35,6 @@ v1_router.include_router(admin_attributes.router)
 v1_router.include_router(admin_attribute_presets.router)
 v1_router.include_router(admin_variant_groups.router)
 v1_router.include_router(admin_products.router)
+v1_router.include_router(admin_brands.router)
 v1_router.include_router(admin_dashboard.router)
 v1_router.include_router(admin_reviews.router)

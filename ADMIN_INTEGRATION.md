@@ -2227,6 +2227,68 @@ Respuesta `200` — los cinco campos ya con el estado final (no solo lo que ven�
 }
 ```
 
+### Marcas (nuevo, 2026-09-23)
+
+`brand` (ver la sección anterior) es texto libre, así que se acumulan duplicados por casing
+(`"Surtek"`, `"SURTEK"`). Estas rutas administran las marcas **como grupo**. Todas comparan
+**sin distinguir mayúsculas/minúsculas** (`lower(brand)`, igual que el filtro `brand` de
+`POST /v1/products`), trabajan sobre productos no eliminados (activos o no) y **recortan** los
+valores que se mandan. `""` se trata como `null`. Esa misma normalización se aplica ahora
+también a `PATCH /v1/admin/products/{productUuid}/info`, y una migración de datos
+(`a7c3e1f9d2b4`) recortó una sola vez las marcas que ya estaban guardadas. Cualquier admin
+autenticado puede usarlas (no hace falta `super_admin`). Las tres rutas que escriben quedan
+en el audit log (`brand.rename`, `brand.delete`, `product.brand_bulk_set`).
+
+Para filtrar el catálogo a "Sin marca" usa `hasBrand: false` en `POST /v1/products` /
+`POST /v1/search` (ver `FRONTEND_INTEGRATION.md`).
+
+#### `GET /v1/admin/brands` — listar marcas
+
+```json
+{
+  "docs": [
+    { "name": "SURTEK", "productCount": 42, "variants": ["SURTEK", "Surtek"] },
+    { "name": "Truper", "productCount": 310, "variants": ["Truper"] }
+  ],
+  "unbrandedCount": 118903
+}
+```
+
+Una entrada por marca, ordenadas por `name` sin distinguir mayúsculas. `name` es una de las
+grafías del grupo (siempre la misma, `MIN(brand)`). `variants` son todas las grafías crudas
+agrupadas bajo `name`: **si hay más de una, es un duplicado a fusionar** con `rename`.
+`unbrandedCount` es el número de productos sin marca.
+
+#### `PATCH /v1/admin/products/brand` — asignar la marca de varios productos
+
+```json
+{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "..."], "brand": "Surtek" }
+```
+
+`productUuids`: de 1 a 500 (`422` fuera de ese rango). `brand: null` o `""` **quita** la marca.
+Éxito parcial: los uuids que no corresponden a un producto no eliminado no hacen fallar la
+solicitud, vuelven en `notFound`. Respuesta `200`:
+```json
+{ "updated": 2, "notFound": ["uuid-que-no-existe"] }
+```
+
+#### `POST /v1/admin/brands/rename` — renombrar o fusionar
+
+```json
+{ "from": "SURTEK", "to": "Surtek" }
+```
+
+Todo producto cuya marca coincida con `from` (sin distinguir mayúsculas) pasa a `to`. Si `to` ya
+existe como marca, las dos quedan fusionadas. También sirve para corregir solo el casing, como en
+el ejemplo. Respuesta `200` `{ "updated": 42 }`. `404` si ningún producto tiene la marca `from`;
+`422` si `from` o `to` vienen vacíos (para quitar una marca usa el `DELETE` de abajo).
+
+#### `DELETE /v1/admin/brands?name=X` — quitar una marca de todos sus productos
+
+Pone `brand` en `null` en todo producto con esa marca (sin distinguir mayúsculas). Respuesta
+`200` `{ "updated": 17 }`. Es idempotente: si ningún producto tiene esa marca responde
+`{ "updated": 0 }`, **no** `404`. `422` si falta `name` o viene vacío.
+
 ### Importación masiva por Excel
 
 #### `GET /v1/admin/bulk-import/template` — descargar una plantilla de ejemplo

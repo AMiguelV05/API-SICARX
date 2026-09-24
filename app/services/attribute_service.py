@@ -8,6 +8,7 @@ from sqlalchemy import select, func, delete, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.attribute import Attribute, AttributePreset, attribute_preset_items, VariantGroup
+from app.services.brand_service import normalize_brand
 from app.models.product import Product
 
 logger = logging.getLogger(__name__)
@@ -776,6 +777,10 @@ async def update_product_info(db: AsyncSession, product_uuid: str, data: dict) -
     product = await db.scalar(select(Product).where(Product.sicar_uuid == product_uuid, Product.is_deleted == False))
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+
+    if "brand" in data:
+        # Misma normalizacion que /admin/brands (trim, "" -> null) - ver brand_service.
+        data = {**data, "brand": normalize_brand(data["brand"])}
 
     for field in ("description", "brand", "bullet_points", "technical_specs", "contents"):
         if field in data:
