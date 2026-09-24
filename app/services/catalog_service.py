@@ -142,30 +142,40 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
     que arregla la busqueda "demasiado estricta": antes, "tuerca acero" no matcheaba "Tuerca de
     Acero Inoxidable 3/8" porque las palabras no eran adyacentes; ahora cada palabra se valida por
     separado (AND entre palabras, OR entre sku/name por palabra) via los mismos indices GIN
-    trigram+unaccent (ix_products_sku_trgm_unaccent/ix_products_name_trgm_unaccent) que ya existian
-    - no se necesito migracion nueva. Ranking: frase completa como subcadena (comportamiento previo)
+    trigram (ix_products_sku_trgm_search/ix_products_name_trgm_search). Ranking: frase completa como subcadena (comportamiento previo)
     > name empieza con la primera palabra > el resto de los matches por palabra, luego popularidad.
 
     Si el match por palabras no encuentra nada (offset 0), se reintenta con un fallback tolerante a
     errores de tipeo via similarity() de pg_trgm (operador `%`, mismo indice) - cubre el caso de una
     sola palabra mal escrita (p. ej. "desarmalador" en vez de "desarmador") que el AND estricto de
-    arriba nunca hubiera encontrado."""
-    escaped_q = _escape_ilike(q)
-    words = [w for w in q.split() if w]
-    escaped_words = [_escape_ilike(w) for w in words] or [escaped_q]
+    arriba nunca hubiera encontrado.
 
-    unaccented_sku = func.immutable_unaccent(Product.sku)
-    unaccented_name = func.immutable_unaccent(Product.name)
+    Guiones: tanto sku/name (search_normalize(), migracion b8d2f5a1c7e3) como q se comparan sin
+    "-", asi que "wd40" encuentra "WD-40" (guion como nulo); "wd 40" ya lo encontraba por el AND
+    entre palabras (guion como espacio). La frase sin espacios ("wd40") tambien cuenta como match
+    de frase completa para el ranking, para que "wd 40" ponga WD-40 hasta arriba."""
+    norm_q = " ".join(q.replace("-", "").split())
+    if not norm_q:
+        # q era solo guiones/espacios - sin nada que buscar tras normalizar.
+        return {"total": 0, "docs": []}
+    escaped_q = _escape_ilike(norm_q)
+    words = norm_q.split()
+    escaped_words = [_escape_ilike(w) for w in words]
+
+    unaccented_sku = func.search_normalize(Product.sku)
+    unaccented_name = func.search_normalize(Product.name)
 
     def word_match(escaped_word):
         pattern = f"%{escaped_word}%"
         return or_(
-            unaccented_sku.ilike(func.immutable_unaccent(pattern), escape="\\"),
-            unaccented_name.ilike(func.immutable_unaccent(pattern), escape="\\"),
+            unaccented_sku.ilike(func.search_normalize(pattern), escape="\\"),
+            unaccented_name.ilike(func.search_normalize(pattern), escape="\\"),
         )
 
     full_phrase_match = word_match(escaped_q)
-    starts_with_first_word = unaccented_name.ilike(func.immutable_unaccent(f"{escaped_words[0]}%"), escape="\\")
+    if len(words) > 1:
+        full_phrase_match = or_(full_phrase_match, word_match(_escape_ilike("".join(words))))
+    starts_with_first_word = unaccented_name.ilike(func.search_normalize(f"{escaped_words[0]}%"), escape="\\")
 
     stmt = select(Product).where(
         Product.is_deleted == False,
@@ -212,7 +222,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         # nada pasaba (confirmado: "desalmador" solo devolvia 2 resultados). word_similarity()/
         # `<%`/`%>` es la funcion de pg_trgm hecha para esto - busca la MEJOR subcadena continua
         # dentro del texto largo que se parezca a la palabra corta, en vez de diluir contra todo
-        # el campo. Mismo indice GIN (immutable_unaccent(name)/sku, gin_trgm_ops) acelera `%>`
+        # el campo. Mismo indice GIN (search_normalize(name)/sku, gin_trgm_ops) acelera `%>`
         # ademas de `%`, asi que sigue sin requerir migracion. Se aplica por palabra (AND entre
         # palabras, igual que el match estricto de arriba) para que una query de varias palabras
         # con una sola mal escrita solo tenga que tolerar esa, no la frase completa.
@@ -222,7 +232,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         # typo de una letra en palabras cortas.
         await db.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.5"))
 
-        word_binds = [func.immutable_unaccent(w) for w in words] or [func.immutable_unaccent(q)]
+        word_binds = [func.search_normalize(w) for w in words]
 
         def word_fuzzy_match(word_bind):
             return or_(
