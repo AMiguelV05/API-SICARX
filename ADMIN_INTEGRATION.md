@@ -2247,7 +2247,7 @@ Para filtrar el catálogo a "Sin marca" usa `hasBrand: false` en `POST /v1/produ
 ```json
 {
   "docs": [
-    { "name": "SURTEK", "productCount": 42, "variants": ["SURTEK", "Surtek"] },
+    { "name": "Surtek", "productCount": 42, "variants": ["SURTEK", "Surtek"] },
     { "name": "Truper", "productCount": 310, "variants": ["Truper"] }
   ],
   "unbrandedCount": 118903
@@ -2255,7 +2255,8 @@ Para filtrar el catálogo a "Sin marca" usa `hasBrand: false` en `POST /v1/produ
 ```
 
 Una entrada por marca, ordenadas por `name` sin distinguir mayúsculas. `name` es una de las
-grafías del grupo (siempre la misma, `MIN(brand)`). `variants` son todas las grafías crudas
+grafías del grupo (siempre la misma, `MIN(brand)` según la collation de Postgres; no
+asumas cuál de ellas). `variants` son todas las grafías crudas
 agrupadas bajo `name`: **si hay más de una, es un duplicado a fusionar** con `rename`.
 `unbrandedCount` es el número de productos sin marca.
 

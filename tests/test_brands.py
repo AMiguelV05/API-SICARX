@@ -37,7 +37,10 @@ async def test_list_brands_groups_case_variants(db):
     group = next(d for d in docs if d["name"].lower() == brand.lower())
     assert group["product_count"] == 4
     assert group["variants"] == sorted([brand, brand.upper()])
-    assert group["name"] == min(brand, brand.upper())
+    # name = MIN(brand) segun la collation de Postgres (en_US: minusculas antes que
+    # mayusculas), no el orden por codepoint de Python - solo se garantiza que sea una de
+    # las variantes del grupo.
+    assert group["name"] in group["variants"]
 
 
 async def test_list_brands_unbranded_count(db):
