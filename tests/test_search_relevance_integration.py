@@ -190,3 +190,31 @@ async def test_product_type_beats_word_elsewhere_in_name(indexed):
     mencionan "hexagonal" lejos de "llave"."""
     assert (await _search("matillo"))[0] == indexed["martillo"].sicar_uuid
     assert (await _search("llave allen"))[0] == indexed["hexagonal"].sicar_uuid
+
+
+async def test_synonym_created_through_admin_service_changes_results_without_reindex(indexed):
+    """Crear un sinonimo (mismo camino que POST /admin/search/synonyms: guardar, commit,
+    push_to_search) cambia la busqueda de inmediato; borrarlo y reconciliar lo quita."""
+    from types import SimpleNamespace
+
+    from app.services import synonym_service
+
+    # Sin el sinonimo, "mecha" no coincide con nada del catalogo de prueba.
+    assert await _search("mecha") == []
+
+    admin = SimpleNamespace(id=None)  # la FK updated_by_admin_id admite NULL
+    async with database.AsyncSessionLocal() as session:
+        row = await synonym_service.create_synonym_entry(session, admin, None, ["Mecha", "Broca"])
+        await session.commit()
+    assert await synonym_service.push_to_search(row) is True
+
+    try:
+        found = await _search("mecha")
+        assert indexed["broca_14"].sicar_uuid in found and indexed["broca_114"].sicar_uuid in found
+    finally:
+        async with database.AsyncSessionLocal() as session:
+            await synonym_service.delete_synonym_entry(session, row.uuid)
+            await session.commit()
+        await search_index_worker.reconcile_synonyms()
+
+    assert await _search("mecha") == []
