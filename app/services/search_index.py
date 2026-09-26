@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 ALIAS = "products"
 # Subirlo cuando cambie build_schema o to_document: el worker detecta al arrancar que el
 # alias apunta a una version vieja y reconstruye el indice completo.
-SCHEMA_VERSION = 1
+# v2: name_first (desempate por "tipo de producto") reemplaza a in_stock_rank.
+SCHEMA_VERSION = 2
 
 STOPWORDS_ID = "es"
 STOPWORDS = ["de", "del", "la", "el", "los", "las", "para", "con", "y", "en"]
@@ -33,6 +34,7 @@ _MIXED_FRACTION_RE = re.compile(r"(?<![\w/])(\d+)[\s-]+(\d+/\d+)")
 _WORD_RE = re.compile(r"[a-z]+")
 _HYPHEN_JOIN_RE = re.compile(r"\b([a-z]+\d*|\d+[a-z]+)-(\w+)\b")
 _SKU_STRIP_RE = re.compile(r"[-\s/._]")
+_WORD_OR_TOKEN_RE = re.compile(r"[a-z0-9_/]+")
 # Consonantes tras las que un plural en -es pierde "es" completo (motores -> motor).
 _ES_PLURAL_CONSONANTS = set("rlndzj")
 
@@ -88,8 +90,17 @@ def compact_sku(sku: str | None) -> str:
 
 
 def name_head(normalized_name: str) -> str:
-    """Primeras 3 palabras del nombre ya normalizado: la senal de "tipo de producto"."""
+    """Primeras 3 palabras del nombre ya normalizado - peso alto en la busqueda de texto."""
     return " ".join(normalized_name.split()[:3])
+
+
+def name_first(normalized_name: str) -> str:
+    """Primera palabra del nombre ya normalizado: el "tipo de producto" ("martillo" en
+    "Martillo 16 oz"; "engrapadora" en "Engrapadora tipo martillo"). search_service la usa
+    para desempatar: a igual coincidencia de texto, primero los productos cuyo nombre EMPIEZA
+    con una palabra de la consulta."""
+    words = _WORD_OR_TOKEN_RE.findall(normalized_name)
+    return words[0] if words else ""
 
 
 def build_schema(collection_name: str) -> dict[str, Any]:
@@ -105,6 +116,9 @@ def build_schema(collection_name: str) -> dict[str, Any]:
             {"name": "name", "type": "string"},
             {"name": "name_head", "type": "string"},
             {"name": "name_compact", "type": "string[]"},
+            # Tipo de producto: campo de texto (peso bajo en query_by, para tolerar typos) y
+            # filtro exacto del desempate _eval de search_service._relevance_sort.
+            {"name": "name_first", "type": "string"},
             # Un solo token (sin separar por -, espacio, /...): "broca 1/4" ya no matchea SKUs
             # como UBSD1-1/4 por su parte "1/4".
             {"name": "sku_compact", "type": "string", "symbols_to_index": ["-", "/", "_", "."]},
@@ -120,7 +134,6 @@ def build_schema(collection_name: str) -> dict[str, Any]:
             {"name": "category_uuids", "type": "string[]"},
             {"name": "vehicle_uuids", "type": "string[]"},
             {"name": "in_stock", "type": "bool"},
-            {"name": "in_stock_rank", "type": "int32"},
             {"name": "price", "type": "float"},
             {"name": "name_sort", "type": "string", "sort": True},
             {"name": "sales_count", "type": "int64"},
@@ -141,6 +154,7 @@ def to_document(row: Mapping[str, Any]) -> dict[str, Any]:
         "name": normalized,
         "name_head": name_head(normalized),
         "name_compact": compact_tokens(name),
+        "name_first": name_first(normalized),
         "sku_compact": compact_sku(row["sku"]),
         "sku_lower": (row["sku"] or "").strip().lower(),
         "additional_skus": [compact_sku(s) for s in (row["additional_skus"] or []) if isinstance(s, str) and s.strip()],
@@ -153,7 +167,6 @@ def to_document(row: Mapping[str, Any]) -> dict[str, Any]:
         "category_uuids": sorted(row["category_uuids"] or []),
         "vehicle_uuids": sorted(row["vehicle_uuids"] or []),
         "in_stock": in_stock,
-        "in_stock_rank": 1 if in_stock else 0,
         "price": float(row["price"] or 0),
         "name_sort": strip_accents(name).lower(),
         "sales_count": int(row["sales_count"] or 0),

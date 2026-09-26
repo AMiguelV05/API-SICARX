@@ -8,6 +8,7 @@ from app.services.search_index import (
     build_schema,
     compact_sku,
     compact_tokens,
+    name_first,
     name_head,
     normalize_search_text,
     singular,
@@ -83,6 +84,17 @@ def test_compact_sku():
     assert compact_sku(None) == ""
 
 
+@pytest.mark.parametrize("name, expected", [
+    ("Martillo 16 oz uña curva", "martillo"),
+    ("Engrapadora tipo martillo, uso rudo", "engrapadora"),
+    ('"9V" Pila alcalina', "9v"),
+    ("1/2 Dado largo", "1/2"),
+    ("", ""),
+])
+def test_name_first(name, expected):
+    assert name_first(normalize_search_text(name)) == expected
+
+
 def test_name_head():
     assert name_head("dado largo impacto de 9/16'") == "dado largo impacto"
     assert name_head("martillo") == "martillo"
@@ -116,7 +128,8 @@ def test_to_document_basic_fields():
     assert doc["brand"] == "Urrea" and doc["brand_lower"] == "urrea" and doc["has_brand"] is True
     assert doc["price"] == pytest.approx(123.45)
     assert doc["sales_count"] == 7
-    assert doc["in_stock"] is True and doc["in_stock_rank"] == 1
+    assert doc["in_stock"] is True
+    assert doc["name_first"] == "llave"
     assert doc["category_uuids"] == [] and doc["vehicle_uuids"] == []
     assert doc["description"] is None
     assert doc["name_sort"] == "llave espanola 1000 v"
@@ -129,7 +142,7 @@ def test_to_document_no_brand_sold_out_and_links():
         description="Juego de llaves",
     ))
     assert doc["has_brand"] is False and doc["brand_lower"] is None
-    assert doc["in_stock"] is False and doc["in_stock_rank"] == 0
+    assert doc["in_stock"] is False
     assert doc["category_uuids"] == ["c1", "c2"]
     assert doc["vehicle_uuids"] == ["v1"]
     assert doc["additional_skus"] == ["ab12"]

@@ -23,3 +23,22 @@ class SearchFilter(CamelModel):
 class SearchResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
+
+
+class ProductSuggestion(CamelModel):
+    """Version reducida de ProductBasic para el desplegable de autocompletado."""
+    sicar_uuid: str
+    sku: str
+    name: str
+    image_url: Optional[str] = None
+    price: float
+
+
+class BrandSuggestion(CamelModel):
+    name: str = Field(description="Marca tal como se muestra; usala como filtro `brand` de POST /search o POST /products.")
+    count: int = Field(description="Productos activos con esa marca.")
+
+
+class SuggestResponse(CamelModel):
+    products: List[ProductSuggestion]
+    brands: List[BrandSuggestion] = Field(description="Marcas que empiezan con lo escrito. Vacio si el motor de busqueda no esta disponible.")
