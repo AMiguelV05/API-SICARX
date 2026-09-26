@@ -27,6 +27,10 @@ class Product(Base):
         # migracion que lo creo, mismo motivo que los indices arriba - ver migracion nueva
         # que agrega este indice (chain despues de f1a3c7e9b2d4).
         Index("ix_products_brand_lower", text("lower(brand)"), postgresql_where=text("is_deleted = false AND is_active = true")),
+        # Parcial: el worker de indexado de Typesense solo consulta las filas pendientes
+        # (search_dirty_at IS NOT NULL), normalmente un punado entre ~124k - ver migracion
+        # c4e8a2f6b1d9.
+        Index("ix_products_search_dirty", "search_dirty_at", postgresql_where=text("search_dirty_at IS NOT NULL")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -112,6 +116,14 @@ class Product(Base):
     last_sync_id = Column(String, index=True, nullable=True) # Columna para detectar productos a eliminar
     details_updated_at = Column(DateTime(timezone=True), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # "Pendiente de reindexar en Typesense". Nunca la escribe el codigo de la app: la ponen en
+    # now() triggers de Postgres (products_mark_search_dirty, y los de product_categories/
+    # product_vehicles) cuando cambia una columna relevante para la busqueda, y la limpia el
+    # worker de indexado despues de empujar el producto - ver migracion c4e8a2f6b1d9 y
+    # CLAUDE.md, "Busqueda con Typesense". El upsert de sync_task.py no la incluye, igual que
+    # sales_count/reserved.
+    search_dirty_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class SyncStatus(Base):

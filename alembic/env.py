@@ -25,6 +25,7 @@ from app.models.audit_log import AdminAuditLog
 from app.models.refund import Refund
 from app.models.chargeback import Chargeback
 from app.models.wishlist import WishlistCollection, WishlistItem
+from app.models.search_synonym import SearchSynonym
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

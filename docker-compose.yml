@@ -11,6 +11,10 @@
 #
 # `migrate` corre `alembic upgrade head` una sola vez y termina; `api` y `worker` esperan a
 # que termine con éxito antes de arrancar, evitando que ambos corran migraciones a la vez.
+#
+# `typesense` es el motor de busqueda (ver CLAUDE.md, "Busqueda con Typesense"). Su indice se
+# reconstruye completo desde Postgres (el worker lo hace al arrancar si falta), asi que su
+# volumen es desechable. La llave sale de TYPESENSE_API_KEY en tu .env (default "dev-key").
 
 services:
   db:
@@ -30,6 +34,21 @@ services:
       timeout: 5s
       retries: 5
 
+  typesense:
+    image: typesense/typesense:28.0
+    restart: unless-stopped
+    command: ["--data-dir", "/data", "--api-key", "${TYPESENSE_API_KEY:-dev-key}"]
+    volumes:
+      - typesense_data:/data
+    ports:
+      - "8108:8108"
+    healthcheck:
+      # La imagen no trae curl ni wget - se consulta /health con el /dev/tcp de bash.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8108 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\":true' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   migrate:
     build: .
     env_file:
@@ -48,6 +67,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://sicarx:sicarx@db:5432/sicarx
+      TYPESENSE_URL: http://typesense:8108
+      TYPESENSE_API_KEY: ${TYPESENSE_API_KEY:-dev-key}
     ports:
       - "8000:8000"
     volumes:
@@ -57,6 +78,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      typesense:
+        condition: service_healthy
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
@@ -72,6 +95,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://sicarx:sicarx@db:5432/sicarx
+      TYPESENSE_URL: http://typesense:8108
+      TYPESENSE_API_KEY: ${TYPESENSE_API_KEY:-dev-key}
     volumes:
       - ./sync.log:/app/sync.log
     depends_on:
@@ -79,7 +104,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      typesense:
+        condition: service_healthy
     command: ["python", "-m", "app.worker.sync_task"]
 
 volumes:
   db_data:
+  typesense_data:

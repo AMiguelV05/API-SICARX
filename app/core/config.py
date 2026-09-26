@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     # comportandose exactamente como antes (solo loggean), sin fallar al importar.
     SENTRY_DSN: Optional[str] = None
 
+    # Motor de busqueda Typesense (ver CLAUDE.md, "Busqueda con Typesense"). Opcionales, mismo
+    # trato que SENTRY_DSN: si falta cualquiera de los dos, POST /search y /search/suggest
+    # usan la busqueda de Postgres de siempre y el worker de indexado no hace nada - asi un
+    # entorno local/de pruebas sin Typesense arranca limpio. En Railway van en AMBOS servicios
+    # (api consulta, worker indexa).
+    TYPESENSE_URL: Optional[str] = None  # p. ej. http://typesense.railway.internal:8108
+    TYPESENSE_API_KEY: Optional[str] = None
+
     # Firma los JWT de sesion de AdminUser (login admin, ver security.py::get_current_admin).
     # Dominio de firma separado de CLIENT_JWT_SECRET a proposito - distinto radio de
     # impacto si alguno de los dos se filtra. Reemplaza al antiguo ADMIN_API_KEY
