@@ -2290,6 +2290,87 @@ Pone `brand` en `null` en todo producto con esa marca (sin distinguir mayúscula
 `200` `{ "updated": 17 }`. Es idempotente: si ningún producto tiene esa marca responde
 `{ "updated": 0 }`, **no** `404`. `422` si falta `name` o viene vacío.
 
+### Sinónimos del buscador (nuevo, 2026-09-26)
+
+El buscador de la tienda (`POST /v1/search`, `GET /v1/search/suggest`) usa un motor de búsqueda
+(Typesense) que ya tolera errores de tipeo, plurales, acentos y unidades escritas juntas o
+separadas (`10mm` / `10 mm`). Lo que **no** puede adivinar es que dos palabras distintas
+significan lo mismo, por ejemplo que un cliente escriba "entrada 1/2" cuando el catálogo dice
+"cuadro 1/2". Para eso son estos sinónimos, que se aplican a las búsquedas **de inmediato**,
+sin reindexar nada.
+
+Hay dos tipos:
+- **Multi-dirección** (sin `root`): cada palabra encuentra a las demás. Ej.: `allen` ↔
+  `hexagonal`. Buscar "llave allen" encuentra las "Llave hexagonal…", y al revés.
+- **Una dirección** (con `root`): buscar `root` también encuentra las palabras de `synonyms`,
+  pero **no al revés**. Úsalo cuando la dirección contraria metería ruido. Ej.: `root:
+  "inalambrico"` → `["bateria", "20v"]`. Así, "taladro inalámbrico" encuentra los taladros de
+  20 V, pero buscar "20v" no devuelve todo lo que diga "inalámbrico".
+
+Las palabras se **normalizan** igual que las búsquedas: minúsculas, sin acentos, en singular y
+con número y unidad juntos. `"Baterías"` se guarda como `bateria`, `"20 V"` como `20v`. La
+respuesta siempre devuelve la forma guardada, para que el dashboard muestre lo que de verdad
+quedó. Se permiten frases de varias palabras (`"llave allen"`).
+
+Crear y editar lo puede hacer cualquier admin; **borrar solo `super_admin`** (mismo reparto que
+cupones). Las tres escrituras quedan en el audit log (`search_synonym.create`,
+`search_synonym.update` con antes/después, `search_synonym.delete`).
+
+Ya existen 4 entradas iniciales: `cuadro`/`entrada`/`mando`, `allen`/`hexagonal`,
+`inalambrico` → `bateria`/`20v`/`12v` (una dirección) y `desarmador`/`destornillador`.
+
+**`syncedToSearch`** (en las respuestas de `POST`/`PATCH`): `true` si el cambio ya está activo
+en el buscador. `false` si el motor no respondió en ese momento: **el cambio sí quedó
+guardado** y se aplica solo en unos minutos (máximo 5). El dashboard debería mostrar algo como
+"Guardado; se aplicará al buscador en unos minutos", no un error.
+
+Objeto de respuesta (`SearchSynonymPublic`):
+```json
+{
+  "uuid": "6a301937-2f0e-4c3a-9d1b-0f5a6c1e2b77",
+  "root": "inalambrico",
+  "synonyms": ["bateria", "20v", "12v"],
+  "kind": "ONE_WAY",
+  "createdAt": "2026-09-26T21:40:11.203Z",
+  "updatedAt": "2026-09-26T21:40:11.203Z"
+}
+```
+`kind` es `MULTI_WAY` si `root` es `null`, `ONE_WAY` si no.
+
+#### `GET /v1/admin/search/synonyms` — listar
+
+Query params opcionales: `q` (coincidencia parcial contra la raíz o cualquier palabra, sin
+distinguir acentos ni mayúsculas), `limit` (1-200, default 60) y `offset`. Los más recientes
+primero. Respuesta `200`: `{ "total": 5, "docs": [SearchSynonymPublic, ...] }`.
+
+#### `POST /v1/admin/search/synonyms` — crear
+
+```json
+{ "synonyms": ["Mecha", "Broca"] }
+```
+```json
+{ "root": "Inalámbrico", "synonyms": ["Baterías", "20 V"] }
+```
+Respuesta `201`: `SearchSynonymPublic` + `syncedToSearch`.
+- **`422`**:
+  - un multi-dirección con menos de 2 palabras distintas **después** de normalizar (`["martillo", "Martillos"]` son la misma palabra);
+  - una raíz que se repite en su propia lista;
+  - una lista vacía;
+  - más de 20 palabras;
+  - una palabra de más de 50 caracteres.
+- **`409`** si ya existe una entrada idéntica (misma raíz y mismo conjunto de palabras, sin importar el orden).
+
+#### `PATCH /v1/admin/search/synonyms/{uuid}` — editar
+
+Parcial: solo los campos que mandes. `{"root": null}` **explícito** convierte una entrada de una
+dirección en multi-dirección. Las mismas reglas de `422`/`409` que al crear; `404` si no
+existe. Respuesta `200`: `SearchSynonymPublic` + `syncedToSearch`.
+
+#### `DELETE /v1/admin/search/synonyms/{uuid}` — borrar (solo `super_admin`)
+
+Respuesta `204`. `403` para un admin `staff`; `404` si no existe. Deja de aplicarse en el
+buscador de inmediato si el motor responde; si no, en la siguiente reconciliación (≤ 5 minutos).
+
 ### Importación masiva por Excel
 
 #### `GET /v1/admin/bulk-import/template` — descargar una plantilla de ejemplo

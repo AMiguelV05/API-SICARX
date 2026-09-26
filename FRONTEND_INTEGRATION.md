@@ -695,21 +695,41 @@ Content-Type: application/json
 }
 ```
 
-Coincidencia por substring (contiene), sin distinguir mayúsculas/minúsculas, contra `sku` **o**
-`name` en un solo campo de búsqueda. `departmentUuid`/`categoryUuid`/`taxonomyUuid`/`vehicleUuid`/
+**Cómo busca (actualizado 2026-09-26):** el texto se compara contra nombre, SKU y marca con un
+motor de búsqueda dedicado, que:
+- tolera errores de tipeo (`matillo` → martillos);
+- ignora mayúsculas y acentos;
+- no distingue plural de singular (`martillos` = `martillo`);
+- trata igual una unidad junta o separada (`10mm` = `10 mm`, `20V` = `20 V`) y una fracción con guion o con espacio (`1-1/2` = `1 1/2`);
+- no depende del orden de las palabras;
+- aplica los sinónimos que el equipo administra (p. ej. `allen` ↔ `hexagonal`).
+
+Solo encuentra palabras completas o su inicio, **no** texto dentro de otra palabra: `pvc` ya no
+devuelve productos CPVC. Un **SKU exacto** siempre sale primero. Precio y `stock` siempre vienen
+de la base de datos, igual que antes. Si el motor no está disponible, este endpoint responde igual
+(mismo formato) con la búsqueda anterior de la base de datos, que es menos tolerante, así que no
+hace falta manejar ningún error nuevo. `departmentUuid`/`categoryUuid`/`taxonomyUuid`/`vehicleUuid`/
 `brand`/`hasBrand` son opcionales y funcionan igual que en `/v1/products` (ver esa sección para el detalle de
 cada uno, incluida la nota sobre `brand` siendo match exacto insensible a mayúsculas, no
 substring) — úsalos para combinar el cuadro de búsqueda con los filtros de departamento/
 categoría/vehículo/marca ya existentes. `inStock: true` restringe el resultado a productos con
-`stock > 0` (por defecto `false`, no filtra por stock).
+stock **disponible** > 0, es decir, el `stock` que ves en la respuesta, ya descontando lo reservado
+por pedidos en curso (por defecto `false`, no filtra por stock).
 
 **`sortBy` (nuevo campo, opcional, default `"relevance"`)** — mismos cuatro valores que
 `/v1/products` (`"relevance"`, `"price_asc"`, `"price_desc"`, `"name_asc"`), `422` si se manda
 otro valor. Puedes omitirlo por completo y obtienes el comportamiento default de siempre. Con
-`"relevance"` (el default): los resultados donde `sku` o `name` **empiezan con** el texto
-buscado aparecen primero; dentro de ese mismo grupo (empieza-con vs. contiene-en-medio),
-ordenan por `salesCount` descendente (más vendido primero) y por último por nombre — ya
-paginado en ese orden, no es necesario ordenar nada del lado del frontend. Si tu UI ya tenía un
+`"relevance"` (el default), el orden es:
+1. qué tan bien coincide el texto;
+2. a igualdad, primero los productos cuyo nombre **empieza** con una palabra buscada (el tipo de producto: "Martillo…" antes que "Engrapadora tipo martillo");
+3. después, los que están en existencia;
+4. por último, los más vendidos.
+
+Ya viene paginado en ese orden; no hay que ordenar nada del lado del frontend. **Importante:**
+para que el cuadro de búsqueda se beneficie de este orden, manda `sortBy: "relevance"` (u
+omítelo). Si la página de resultados manda por defecto otro orden (por ejemplo "Más vendidos"
+o "Nombre A-Z"), ese orden reemplaza al de relevancia. Hoy el selector de la tienda no tiene
+una opción "Relevancia"; recomendamos agregarla y usarla como default en resultados de búsqueda. Si tu UI ya tenía un
 selector "Ordenar por" en resultados de búsqueda, ahora puedes mandar `price_asc`/`price_desc`/
 `name_asc` igual que en `/v1/products` en vez de solo confiar en el orden default.
 
@@ -738,6 +758,44 @@ Respuesta `200` con la misma forma que `/v1/products`:
 
 `q` no puede ir vacío (`422` si lo está o si falta). Mismos límites de paginación que
 `/v1/products`: `limit` entre 1 y 200 (por defecto 60), `offset` ≥ 0 (`422` fuera de rango).
+
+### `GET /v1/search/suggest` — sugerencias mientras se escribe (nuevo, 2026-09-26)
+
+```http
+GET /v1/search/suggest?q=tru&limit=6
+x-api-key: <api-key>
+```
+
+Pensado para un desplegable de autocompletado bajo el cuadro de búsqueda. Llámalo con
+**debounce (~200 ms)** mientras el usuario escribe, no en cada tecla. `q` es obligatorio
+(1-100 caracteres, `422` si falta o está vacío); `limit` es opcional, de 1 a 10, default 6.
+
+Respuesta `200`:
+```json
+{
+  "products": [
+    {
+      "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
+      "sku": "16704",
+      "name": "Martillo tubular pulido 20 oz, TRUPER",
+      "imageUrl": "https://...",
+      "price": 289.0
+    }
+  ],
+  "brands": [
+    { "name": "Truper", "count": 6305 },
+    { "name": "Truper Expert", "count": 897 }
+  ]
+}
+```
+
+- `products`: los mismos resultados que daría `POST /v1/search` con esa `q`, pero reducidos a lo
+  que necesita el desplegable. Al elegir uno, navega a su detalle (`GET /v1/products/{uuid}`).
+- `brands`: hasta 4 marcas que **empiezan** con lo escrito, con cuántos productos tienen. Al
+  elegir una, abre los resultados filtrados por esa marca (`brand` en `POST /v1/products` o
+  `POST /v1/search`).
+- Si el motor de búsqueda no está disponible, responde igual con `products` de la base de datos
+  y `brands: []`. No es un error; simplemente no muestres la sección de marcas.
 
 ### `GET /v1/products/{uuid}` — detalle de producto
 
@@ -2437,6 +2495,13 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
 
 ## Notas y advertencias
 
+- **Nuevo (2026-09-26): nuevo motor de búsqueda y `GET /v1/search/suggest`.** `POST /v1/search`
+  mantiene exactamente el mismo request y response, pero encuentra mucho mejor: typos,
+  plurales, `10mm`/`10 mm`, fracciones, sinónimos, SKU exacto primero y sin coincidencias dentro
+  de otra palabra (ver esa sección). No requiere cambios, salvo revisar qué `sortBy` manda por
+  defecto la página de resultados: el orden de relevancia solo aplica con `"relevance"` u omitido,
+  y hoy el selector de la tienda no ofrece esa opción. `GET /v1/search/suggest` (nuevo) sirve
+  para el autocompletado (productos + marcas). Todo aditivo.
 - **Nuevo (2026-09-22): filtro `brand` y `GET /v1/products/brands`.** `POST /v1/products` y
   `POST /v1/search` ganan un campo opcional `brand` (match exacto insensible a mayúsculas —
   ver esas secciones arriba para el detalle), y cada producto en `docs` de ambos endpoints
