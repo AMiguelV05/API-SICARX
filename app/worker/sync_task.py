@@ -23,6 +23,12 @@ from app.core.retry import request_with_backoff
 from app.core.error_tracking import capture_exception, init_error_tracking
 from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
 from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
+from app.worker.search_index_worker import (
+    ensure_index_on_startup,
+    scheduled_drain_job,
+    scheduled_rebuild_job,
+    scheduled_synonyms_job,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 handler = RotatingFileHandler(
@@ -345,6 +351,20 @@ async def main():
     # Cancela ordenes TO_PAY abandonadas (sin ningun intento de pago) y libera su reserva de
     # stock - 5 min es de sobra de granularidad contra un timeout de 30 min por defecto.
     scheduler.add_job(scheduled_abandoned_order_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
+
+    # Indice de busqueda en Typesense (no-op sin TYPESENSE_URL/TYPESENSE_API_KEY) - ver
+    # search_index_worker.py. El arranque reconstruye si falta el indice; un Typesense caido
+    # no debe impedir que arranquen el sync de catalogo ni el outbox, de ahi el try.
+    try:
+        await ensure_index_on_startup()
+    except Exception as e:
+        logger.error(f"No se pudo preparar el indice de busqueda al arrancar: {e!r}")
+        capture_exception(e, job="search_index_startup")
+    scheduler.add_job(scheduled_drain_job, 'interval', seconds=30, max_instances=1, coalesce=True)
+    scheduler.add_job(scheduled_synonyms_job, 'interval', minutes=5, max_instances=1, coalesce=True)
+    # 10:00 UTC = ~04:00 hora de Mexico, fuera de horario. La reconstruccion completa tarda
+    # segundos (~84k productos en ~4s en la Fase 0).
+    scheduler.add_job(scheduled_rebuild_job, 'cron', hour=10, minute=0, max_instances=1, coalesce=True)
     scheduler.start()
 
     while True:

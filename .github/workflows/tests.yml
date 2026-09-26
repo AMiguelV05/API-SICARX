@@ -24,6 +24,22 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # Pruebas de integracion del indice de busqueda (tests/test_search_index_integration.py).
+      # Los service containers no aceptan argumentos de comando, asi que Typesense se configura
+      # por variables de entorno; la imagen no trae curl, asi que el health check solo verifica
+      # que el puerto acepte conexiones (via /dev/tcp de bash).
+      typesense:
+        image: typesense/typesense:28.0
+        env:
+          TYPESENSE_DATA_DIR: /tmp
+          TYPESENSE_API_KEY: ci-typesense-key
+        ports:
+          - 8108:8108
+        options: >-
+          --health-cmd "bash -c '</dev/tcp/127.0.0.1/8108'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
       # Variables minimas requeridas por app.core.config.Settings al importar - valores
@@ -56,6 +72,8 @@ jobs:
       ENVIA_ORIGIN_CITY: Test
       ENVIA_ORIGIN_STATE: NL
       ENVIA_ORIGIN_ZIP_CODE: "00000"
+      TYPESENSE_URL: http://localhost:8108
+      TYPESENSE_API_KEY: ci-typesense-key
 
     steps:
       - uses: actions/checkout@v4
