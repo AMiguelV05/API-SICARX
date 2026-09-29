@@ -2,9 +2,9 @@ import httpx
 import asyncio
 import json
 import logging
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from logging.handlers import RotatingFileHandler
-from sqlalchemy import update, select, and_, not_
+from sqlalchemy import select, and_, not_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
@@ -102,6 +102,71 @@ async def _fetch_hidden_map(client: httpx.AsyncClient, uuids: list) -> dict:
         logger.warning(f"Error de red consultando el estado 'hidden' en bloque: {e}")
         return {}
 
+PRICE_QUANTUM = Decimal("0.01")
+STOCK_QUANTUM = Decimal("0.001")
+
+# Campos de Sicar X que deciden si una fila cambio. last_sync_id no entra: cambia en cada
+# pasada por definicion.
+_COMPARED_FIELDS = (
+    "sku", "name", "image_url", "department_uuid", "category_uuid", "is_bulk",
+    "is_active", "price", "stock", "is_deleted", "deleted_at",
+)
+
+
+async def _changed_product_values(db: AsyncSession, product_values: list[dict]) -> list[dict]:
+    """Filtra la pagina a los productos nuevos o con algun campo distinto al guardado.
+
+    Reescribir las ~87k filas cada 5 minutos, cambiaran o no, generaba ~400 MB de WAL por
+    pasada (last_sync_id esta indexado, asi que ninguna era HOT y cada una reescribia todos
+    los indices, incluidos los GIN de trigramas). Se compara en Python y no con un WHERE en
+    el ON CONFLICT porque Postgres bloquea la fila en conflicto antes de evaluar ese WHERE,
+    y ese bloqueo tambien escribe WAL."""
+    columns = [getattr(Product, f) for f in _COMPARED_FIELDS]
+    result = await db.execute(
+        select(Product.sicar_uuid, *columns)
+        .where(Product.sicar_uuid.in_([v["sicar_uuid"] for v in product_values]))
+    )
+    stored = {row.sicar_uuid: row for row in result.all()}
+
+    changed = []
+    for values in product_values:
+        row = stored.get(values["sicar_uuid"])
+        if row is None or any(getattr(row, f) != values[f] for f in _COMPARED_FIELDS):
+            changed.append(values)
+    return changed
+
+
+async def _upsert_products(db: AsyncSession, product_values: list[dict]) -> None:
+    stmt = insert(Product)
+
+    # Whitelist de campos que vienen de Sicar X y que se pueden actualizar en un conflicto.
+    sicar_fields = product_values[0].keys() - {"sicar_uuid"}
+    update_dict = {field: getattr(stmt.excluded, field) for field in sicar_fields}
+    stmt = stmt.on_conflict_do_update(
+        index_elements=['sicar_uuid'],
+        set_=update_dict
+    )
+    await db.execute(stmt, product_values)
+
+
+async def _mark_missing_as_deleted(db: AsyncSession, seen_uuids: set[str]) -> int:
+    """Marca eliminados los productos que Sicar X ya no devolvio en esta pasada. Antes se
+    detectaban por last_sync_id, lo que obligaba a reescribir cada fila en cada pasada.
+
+    Anti-join contra unnest() y no `NOT IN (...)`: son ~87k uuids, por encima del limite de
+    parametros de asyncpg. last_sync_id IS NOT NULL deja fuera productos que nunca vinieron
+    del sync; is_deleted = false evita re-tocar los ya borrados."""
+    result = await db.execute(
+        text(
+            "UPDATE products p SET is_deleted = true, deleted_at = :now "
+            "WHERE p.is_deleted = false AND p.last_sync_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM unnest(CAST(:seen AS text[])) AS s(uuid) WHERE s.uuid = p.sicar_uuid)"
+        ),
+        {"now": datetime.now(timezone.utc), "seen": list(seen_uuids)},
+    )
+    return result.rowcount
+
+
 async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
     items_per_page = 300
     total_procesados = 0
@@ -113,10 +178,12 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
         pool=5.0
     )
     logger.debug("Iniciando sincronizacion paginada con Sicar X")
-    price_key = f"N{PRICE_LIST_ID.split("-")[-1]}"
+    price_key = f"N{PRICE_LIST_ID.split('-')[-1]}"
 
     current_sync_id = str(uuid4())
     sync_completed_successfully = False
+    seen_uuids: set[str] = set()
+    total_cambiados = 0
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         while has_more_products:
@@ -195,6 +262,8 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     )
 
                 # Decimal(str(...)): evita error de representacion binaria de float en la columna Numeric.
+                # quantize: redondea igual que Numeric(10,2)/(12,3) al guardar, para que la
+                # comparacion de _changed_product_values no vea un cambio que no existe.
                 product_values.append({
                     "sicar_uuid": p.get("uuid"),
                     "sku": p.get("sku", ""),
@@ -204,53 +273,37 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "category_uuid": p.get("categoryUuid"),
                     "is_bulk": p.get("bulk", False),
                     "is_active": not hidden_map.get(p.get("uuid"), False),
-                    "price": Decimal(str(prices_obj.get(price_key, 0.0))),
-                    "stock": Decimal(str(p.get("stock", 0.0))),
+                    "price": Decimal(str(prices_obj.get(price_key, 0.0))).quantize(PRICE_QUANTUM, rounding=ROUND_HALF_UP),
+                    "stock": Decimal(str(p.get("stock", 0.0))).quantize(STOCK_QUANTUM, rounding=ROUND_HALF_UP),
                     "is_deleted": False,
                     "deleted_at": None,
                     "last_sync_id": current_sync_id
                 })
+            seen_uuids.update(v["sicar_uuid"] for v in product_values if v["sicar_uuid"])
             if product_values:
-                stmt = insert(Product)
-
-                # Whitelist de campos que vienen de Sicar X y que se pueden actualizar en un conflicto.
-                sicar_fields = product_values[0].keys() - {"sicar_uuid"}
-                update_dict = {field: getattr(stmt.excluded, field) for field in sicar_fields}
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=['sicar_uuid'],
-                    set_=update_dict
-                )
-                
-                await db.execute(stmt, product_values)
-                await db.commit()
+                changed = await _changed_product_values(db, product_values)
+                if changed:
+                    await _upsert_products(db, changed)
+                    await db.commit()
+                total_cambiados += len(changed)
 
             total_procesados += len(items)
             logger.debug(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
             
             offset += len(items)
-        logger.info(f"Sincronizacion finalizada")
-        
+        logger.info(f"Sincronizacion finalizada. {total_cambiados} de {total_procesados} productos cambiaron.")
+
     deactivated_count = 0
-    if sync_completed_successfully:
+    if sync_completed_successfully and not seen_uuids:
+        # Un 204 desde la primera pagina marcaria todo el catalogo como eliminado.
+        logger.warning("Sicar X no devolvio ningun producto; se omite la limpieza de eliminados.")
+    elif sync_completed_successfully:
         logger.info("Iniciando limpieza de productos eliminados")
         try:
-            # is_deleted == False evita re-tocar registros ya borrados previamente.
-            stmt = (
-                update(Product)
-                .where(Product.last_sync_id != current_sync_id)
-                .where(Product.last_sync_id.is_not(None))
-                .where(Product.is_deleted == False)
-                .values(
-                    is_deleted=True,
-                    deleted_at=datetime.now(timezone.utc)
-                )
-            )
-
-            result = await db.execute(stmt)
+            deactivated_count = await _mark_missing_as_deleted(db, seen_uuids)
             await db.commit()
-            deactivated_count = result.rowcount
 
-            logger.info(f"Limpieza completada. {result.rowcount} productos fueron desactivados.")
+            logger.info(f"Limpieza completada. {deactivated_count} productos fueron desactivados.")
 
         except Exception as e:
             await db.rollback()
@@ -362,9 +415,10 @@ async def main():
         capture_exception(e, job="search_index_startup")
     scheduler.add_job(scheduled_drain_job, 'interval', seconds=30, max_instances=1, coalesce=True)
     scheduler.add_job(scheduled_synonyms_job, 'interval', minutes=5, max_instances=1, coalesce=True)
-    # 10:00 UTC = ~04:00 hora de Mexico, fuera de horario. La reconstruccion completa tarda
-    # segundos (~84k productos en ~4s en la Fase 0).
-    scheduler.add_job(scheduled_rebuild_job, 'cron', hour=10, minute=0, max_instances=1, coalesce=True)
+    # Domingo 10:00 UTC = ~04:00 hora de Mexico, fuera de horario. La reconstruccion completa
+    # tarda segundos (~84k productos en ~4s en la Fase 0). Semanal, no nocturna: ver
+    # search_index_worker.py.
+    scheduler.add_job(scheduled_rebuild_job, 'cron', day_of_week='sun', hour=10, minute=0, max_instances=1, coalesce=True)
     scheduler.start()
 
     while True:

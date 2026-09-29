@@ -3,8 +3,10 @@
 
 - drain_dirty (cada 30s): empuja los productos marcados por los triggers de Postgres
   (products.search_dirty_at) y limpia la marca solo si no cambio mientras tanto.
-- full_rebuild (nocturno, y al arrancar si hace falta): coleccion nueva completa -> cambio
-  atomico del alias -> borrado de la vieja. Repara cualquier deriva.
+- full_rebuild (semanal, y al arrancar si hace falta): coleccion nueva completa -> cambio
+  atomico del alias -> borrado de la vieja. Repara cualquier deriva. Semanal y no nocturna:
+  cada reconstruccion sube de forma permanente la memoria del contenedor de Typesense
+  (medido en Railway: ~0.7 -> ~1.1 GB en 3 noches), y el drain ya lo mantiene al dia.
 - reconcile_synonyms (cada 5 min): repara un push de sinonimos fallido desde la API.
 
 Todo es no-op si TYPESENSE_URL/TYPESENSE_API_KEY no estan configurados."""
@@ -36,7 +38,7 @@ async def drain_dirty() -> int:
     async with _index_lock:
         alias = search_index.ALIAS
         if await typesense_client.get_alias(alias) is None:
-            # Sin indice todavia: la reconstruccion de arranque/nocturna lo crea completo.
+            # Sin indice todavia: la reconstruccion de arranque/semanal lo crea completo.
             return 0
 
         total_cleared = 0
@@ -181,9 +183,9 @@ async def scheduled_drain_job() -> None:
 
 async def scheduled_rebuild_job() -> None:
     try:
-        await full_rebuild("nocturna")
+        await full_rebuild("semanal")
     except Exception as e:
-        logger.error(f"Fallo la reconstruccion nocturna del indice de busqueda: {e!r}")
+        logger.error(f"Fallo la reconstruccion semanal del indice de busqueda: {e!r}")
         capture_exception(e, job="search_index_rebuild")
 
 
