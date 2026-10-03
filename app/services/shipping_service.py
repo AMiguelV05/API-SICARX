@@ -19,7 +19,8 @@ RATE_URL = f"{ENVIA_BASE_URL}/ship/rate/"
 GENERATE_URL = f"{ENVIA_BASE_URL}/ship/generate/"
 CANCEL_URL = f"{ENVIA_BASE_URL}/ship/cancel/"
 # Queries API - catalogo de referencia de envia.com, dominio distinto al de envios, tambien separado por ambiente.
-QUERIES_BASE_URL = "https://queries-test.envia.com" if settings.ENVIA_ENVIRONMENT == "sandbox" else "https://queries.envia.com"
+# Sandbox es `queries.test.envia.com` (con punto): `queries-test.envia.com` dejo de existir (404 HTML "No such app" de Heroku, 2026-10-02).
+QUERIES_BASE_URL = "https://queries.test.envia.com" if settings.ENVIA_ENVIRONMENT == "sandbox" else "https://queries.envia.com"
 SHIPPING_TIMEOUT = httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0)
 # ~24 carriers reales en el catalogo de Mexico - secuencial seria muy lento para una llamada sincrona del dashboard admin.
 MAX_CONCURRENT_RATE_REQUESTS = 8
