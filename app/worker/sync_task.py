@@ -26,7 +26,6 @@ from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
 from app.worker.search_index_worker import (
     ensure_index_on_startup,
     scheduled_drain_job,
-    scheduled_rebuild_job,
     scheduled_synonyms_job,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -415,10 +414,7 @@ async def main():
         capture_exception(e, job="search_index_startup")
     scheduler.add_job(scheduled_drain_job, 'interval', seconds=30, max_instances=1, coalesce=True)
     scheduler.add_job(scheduled_synonyms_job, 'interval', minutes=5, max_instances=1, coalesce=True)
-    # Domingo 10:00 UTC = ~04:00 hora de Mexico, fuera de horario. La reconstruccion completa
-    # tarda segundos (~84k productos en ~4s en la Fase 0). Semanal, no nocturna: ver
-    # search_index_worker.py.
-    scheduler.add_job(scheduled_rebuild_job, 'cron', day_of_week='sun', hour=10, minute=0, max_instances=1, coalesce=True)
+    # Sin reconstruccion programada: ver full_rebuild en search_index_worker.py.
     scheduler.start()
 
     while True:
