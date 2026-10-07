@@ -6,10 +6,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from app.core.config import settings
-from app.core.rate_limit import limiter
+from app.core.rate_limit import FrontendAwareSlowAPIMiddleware, limiter
 from app.core.error_tracking import capture_exception, init_error_tracking
 from app.api.v1_router import v1_router
 
@@ -57,7 +56,7 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
-app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(FrontendAwareSlowAPIMiddleware)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

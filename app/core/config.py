@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # Webhook saliente hacia el frontend (correo de confirmacion de pedido via Resend en el frontend)
     FRONTEND_WEBHOOK_SECRET: str
 
+    # Secreto servidor-a-servidor con el que el frontend se identifica (header X-Frontend-Auth) para
+    # que el rate limit se cuente por visitante (X-Client-IP) y no por la IP de salida del propio
+    # frontend - ver core/rate_limit.py. Opcional: sin el, el rate limit se comporta como antes.
+    FRONTEND_PROXY_SECRET: Optional[str] = None
+
     GOOGLE_CLIENT_ID: str
 
     # Webhook saliente hacia el dashboard admin (order-cancelled/sicar-sync-failed). Optional,
