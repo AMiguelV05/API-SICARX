@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Index, UniqueConstraint, func, text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Index, Numeric, UniqueConstraint, func, text
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
@@ -47,6 +47,12 @@ class WishlistItem(Base):
     # los productos nunca se hard-deletean (solo is_deleted=True), no hace falta cascada.
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Aviso de baja de precio (wishlist_price_drop_worker.py): precio de referencia contra el
+    # que se mide una baja >= 5 %. Se fija al guardar, sube cuando el precio sube y se iguala
+    # al precio avisado tras cada aviso. Null solo en filas que el worker todavia no vio.
+    baseline_price = Column(Numeric(10, 2), nullable=True)
+    # Ultimo precio avisado - no se avisa dos veces el mismo producto al mismo precio.
+    last_notified_price = Column(Numeric(10, 2), nullable=True)
 
     collection = relationship("WishlistCollection", back_populates="items")
     product = relationship("Product")

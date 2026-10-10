@@ -1,5 +1,6 @@
+from datetime import datetime, timezone
 from decimal import Decimal
-from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, text, func
+from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, and_, or_, text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from app.core.database import Base
@@ -31,6 +32,10 @@ class Product(Base):
         # (search_dirty_at IS NOT NULL), normalmente un punado entre ~124k - ver migracion
         # c4e8a2f6b1d9.
         Index("ix_products_search_dirty", "search_dirty_at", postgresql_where=text("search_dirty_at IS NOT NULL")),
+        # Parcial: los productos con precio anterior capturado son un punado entre ~124k -
+        # respalda el filtro onSale de POST /products y del fallback Postgres de /search
+        # (ver Product.is_on_sale). Migracion d5f1a9c3e7b2.
+        Index("ix_products_on_sale", "sale_ends_at", postgresql_where=text("compare_at_price IS NOT NULL AND is_deleted = false AND is_active = true")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -66,6 +71,39 @@ class Product(Base):
     contents = Column(Text, nullable=True)  # "Contenido (incluye/accesorios)"
 
     price = Column(Numeric(10, 2), nullable=False)
+
+    # Precio de oferta (PIM propio, capturado en el admin - nunca sincronizado desde Sicar X,
+    # el upsert de sync_task.py no las incluye, igual que brand). compare_at_price es el
+    # precio ANTERIOR (con IVA, igual que price); el precio con descuento sigue siendo price,
+    # que viene de Sicar X y es lo unico que se cobra. Usar siempre is_on_sale /
+    # effective_compare_at_price para leerlas, nunca las columnas crudas: la oferta deja de
+    # estar vigente sola al pasar sale_ends_at, o si Sicar X sube price hasta igualar o
+    # superar compare_at_price. Ver "Precio de oferta" en CLAUDE.md.
+    compare_at_price = Column(Numeric(10, 2), nullable=True)
+    sale_ends_at = Column(DateTime(timezone=True), nullable=True)
+
+    @hybrid_property
+    def is_on_sale(self) -> bool:
+        if self.compare_at_price is None or self.price is None or self.compare_at_price <= self.price:
+            return False
+        return self.sale_ends_at is None or self.sale_ends_at > datetime.now(timezone.utc)
+
+    @is_on_sale.expression
+    def is_on_sale(cls):
+        return and_(
+            cls.compare_at_price.is_not(None),
+            cls.compare_at_price > cls.price,
+            or_(cls.sale_ends_at.is_(None), cls.sale_ends_at > func.now()),
+        )
+
+    @property
+    def effective_compare_at_price(self):
+        """compare_at_price solo si la oferta esta vigente, si no None - lo que ve el cliente."""
+        return self.compare_at_price if self.is_on_sale else None
+
+    @property
+    def effective_sale_ends_at(self):
+        return self.sale_ends_at if self.is_on_sale else None
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
     # Verdad de Sicar X: solo lo escribe el upsert de sync_task.py y los dos "espejos"
     # locales en sicar_sync_worker.py (exito de ACCEPT/CANCEL). Checkout/cancelacion ya NO

@@ -1,8 +1,9 @@
 from typing import Any, List, Literal, Optional
 from datetime import datetime
-from pydantic import Field
+from pydantic import Field, field_validator
 from app.schemas.base import CamelModel
 from app.schemas.client import ClientAddressPublic
+from app.schemas.orders import enrich_order_items
 from app.schemas.shipping import ShippingLabelInfo
 
 class AdminHealthResponse(CamelModel):
@@ -67,6 +68,11 @@ class AdminOrderPublic(CamelModel):
     # Marcador historico: poblado desde el primer contracargo detectado sobre esta orden,
     # nunca se limpia despues - ver GET .../chargebacks para el detalle/resultado.
     disputed_at: Optional[datetime] = None
+
+    @field_validator("items", mode="after")
+    @classmethod
+    def add_ga4_fields(cls, v: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return enrich_order_items(v)
 
 class AdminOrderListResponse(CamelModel):
     total: int

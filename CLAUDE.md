@@ -118,7 +118,7 @@ Full design/rationale: `docs/superpowers/specs/2026-09-09-disaster-recovery-desi
 Two separate processes share the same Postgres database and `Product` model:
 
 1. **FastAPI app** (`app/main.py`) — serves the HTTP API consumed by the e-commerce frontend.
-2. **Background worker** (`app/worker/sync_task.py`) — a standalone script with its own logging setup and its own `AsyncIOScheduler` that polls SICAR X every 5 minutes and upserts the full catalog into `products`. Must be run as a second process alongside uvicorn. The same scheduler also runs a second job every 1 minute (`app/worker/sicar_sync_worker.py`) that drains `sicar_sync_outbox` — see "Local-first order cancellation" below — and the Typesense index jobs (`app/worker/search_index_worker.py`: every 30 s, every 5 min, plus a startup check) — see "Búsqueda con Typesense" below.
+2. **Background worker** (`app/worker/sync_task.py`) — a standalone script with its own logging setup and its own `AsyncIOScheduler` that polls SICAR X every 5 minutes and upserts the full catalog into `products`. Must be run as a second process alongside uvicorn. The same scheduler also runs a second job every 1 minute (`app/worker/sicar_sync_worker.py`) that drains `sicar_sync_outbox` — see "Local-first order cancellation" below — and the Typesense index jobs (`app/worker/search_index_worker.py`: every 30 s, every 5 min, plus a startup check) — see "Búsqueda con Typesense" below. It also runs the notification jobs (`webhook_outbox_worker` every 1 min, `stock_alert_worker` every 5 min, `wishlist_price_drop_worker` hourly, `abandoned_cart_worker` every 30 min) — see "Ofertas, relacionados, avisos y correos de marketing" below.
 
 ### SICAR X auth: a single admin/B2B token, no per-shopper token anymore
 
@@ -292,6 +292,62 @@ Full design, live-site findings (F1-F10) and the Phase 0/3 measurements: `docs/s
 - `te pvc` ("te" as a spelling of "tee") → fix with a one-way admin synonym after launch.
 - `talador` ranks "Hacha taladora" first (prefix beats a transposition typo); minor.
 - The storefront offers no "Relevancia" sort option: confirm with the frontend which `sortBy` it sends by default, since anything but `relevance` bypasses the ranking above.
+
+### Ofertas, relacionados, avisos y correos de marketing (2026-10-10)
+
+These came from the frontend's `CAMBIOS_NECESARIOS.md`. The contract is documented in `FRONTEND_INTEGRATION.md` ("Funciones nuevas (2026-10-10)") and `ADMIN_INTEGRATION.md` ("Precio de oferta"). Migrations: `d5f1a9c3e7b2`, `e7b3c5d9f1a4`, `f2c8e4a6b0d3`.
+
+**`price` includes IVA.** It's stored as-is from SICAR's price list. The `8.62069` examples in the docs were stale; 99.99 % of real prices end in `.x0`.
+
+**Precio de oferta**
+- **Columns.** `Product.compare_at_price` and `sale_ends_at` hold the *previous* price, entered by hand in the admin. They're PIM-owned and not in the sync whitelist. The charged price is still `price`, from SICAR.
+- **Reading.** Always read them through `Product.is_on_sale` (hybrid) or the `effective_compare_at_price`/`effective_sale_ends_at` properties, never the raw columns. A sale stops showing on its own when `sale_ends_at` passes, or when SICAR raises `price` to ≥ the previous price.
+- **Exposure.** `ProductBasic` reads them via `validation_alias`. `ProductDetail`, `ProductSuggestion` and `CartItemPublic` set them by hand.
+- **`onSale` filter.**
+  - Postgres: `Product.is_on_sale`, backed by the partial index `ix_products_on_sale`.
+  - Typesense: the `sale_until` int64 field (`0` = no valid sale, `SALE_NO_END` = no end date), filtered as `sale_until:>now`.
+- **Reindexing.** `SCHEMA_VERSION` is 3, so the worker rebuilds Typesense on its next start (~15 s). The search-dirty trigger now also watches the two columns.
+- **Admin routes.** `PUT/DELETE /admin/products/{uuid}/sale`, plus bulk `PUT/DELETE /admin/products/sale` by uuids or by `categoryUuid`. Bulk accepts `compareAtPercent`. All are audited.
+
+**Productos relacionados** (`GET /products/{uuid}/related`, `related_service.py`)
+- **Levels, in order:**
+  1. bought together in PAID orders from the last 180 days (`jsonb_array_elements(items::jsonb)`);
+  2. same taxonomy node, then its parent;
+  3. same brand;
+  4. same vehicles.
+- **Rules.** No repeats; the product itself and its variant group are excluded; in-stock first within each level.
+- **Cache.** The uuid list is cached in-process for 1 h (LRU, 5k entries); products are hydrated from Postgres on every request. This is correct only while there's a single `api` instance.
+
+**GA4 order lines.** `OrderPublic`/`AdminOrderPublic` add `productUuid`/`unitPrice`/`lineTotal` to each `items[]` line at serialization (`schemas/orders.enrich_order_items`), derived from the stored `uuid`/`priceTax`/`amountTax`. Both amounts are pre-coupon. The stored JSON isn't touched, so old orders get the fields too.
+
+**Notificaciones salientes con outbox (`webhook_outbox`)**
+- **What uses it.** The three new worker-born webhooks: `product-back-in-stock`, `wishlist-price-drop`, `cart-abandoned`.
+- **Enqueue.** `webhook_outbox_service.enqueue_webhook` only does `db.add`, in the same transaction that marks the source notified. A crash can't lose or duplicate the email.
+- **Delivery.** `webhook_outbox_worker.py` runs every 1 min with the same claim/lease pattern as `sicar_sync_worker`. It re-signs on each attempt and adds `X-Webhook-Id` (stable across retries) and `X-Webhook-Event`.
+- **Retries.** Any non-2xx or network error retries after 1 min, 10 min and 1 h, then the row is `FAILED` + `capture_message`.
+- **Older webhooks** (`order-confirmed`, …) still go direct, without the outbox.
+
+**Avisos de reabastecimiento** (`stock_alerts`, `stock_alert_service.py`, `stock_alert_worker.py`)
+- **Subscribing.** Only possible while `available_stock = 0` (409 otherwise).
+- **Idempotency.** One active alert per product+email, enforced by a partial unique index.
+- **Rate limits.** 10/min per IP; 20 per email per day.
+- **Detection needs no sync hook and no trigger.** Every 5 min the worker treats "active alert + product now available" as back-in-stock. That covers every stock writer: the sync, the outbox `CANCEL`, and reservation releases.
+- **On detection.** It enqueues the webhook and sets `notified_at` (once).
+- **Accepted gaps.** Availability shorter than one tick is missed. Alerts expire after 90 days.
+
+**Correos de marketing**
+- **Consent.** `ClientAccount.marketing_emails` is `false` for everyone, including existing accounts. Users opt in at `register`/`google` (account creation only) or via `PATCH /auth/me`. `marketing_emails_updated_at` records the consent time.
+- **Unsubscribe tokens.** `create_unsubscribe_token(scope, sub)` is a no-`exp` JWT on `CLIENT_JWT_SECRET` with `purpose: "unsubscribe"`, so it's rejected as a session. Scopes:
+  - `marketing`: `sub` = client uuid;
+  - `stock-alert`: `sub` = alert uuid.
+- **Unsubscribe route.** `POST /notifications/unsubscribe` takes no session and is idempotent.
+- **`wishlist_price_drop_worker.py` (hourly).** Compares each saved product against `WishlistItem.baseline_price`, which is set on add, follows price rises, and resets after each notice. No sync hook.
+  - Rules: drop ≥ 5 %, price differs from `last_notified_price`, at most one webhook per client per 24 h (`last_price_drop_email_at`), grouped and deduped across lists.
+- **`abandoned_cart_worker.py` (every 30 min).** Covers account carts only, with ≥ 1 item.
+  - Qualifies when: untouched for 2 h, and no order from the account since the last touch.
+  - Frequency: at most once per 7 days, and only if the cart changed after the previous email.
+  - **Gotcha:** `Cart.updated_at` has `onupdate`. `abandoned_notified_at` is written with a core `UPDATE` that sets `updated_at=Cart.updated_at`, so marking doesn't look like a cart change.
+- **`order-payment-pending`** was deliberately not built (the user's decision): the unpaid reservation only lasts 30 min.
 
 ### Reserva local de stock (`Product.reserved`, `available_stock`) (2026-08-07)
 
@@ -724,6 +780,10 @@ All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted
 | `POST /products` (catalog listing) | none (just `x-api-key`) | Postgres only, paginated, filterable by `department_uuid`/`category_uuid`/`in_stock`, sortable via `sort_by`. |
 | `POST /search` | none (just `x-api-key`) | Typesense (see "Búsqueda con Typesense"): typo/plural/accent/unit-tolerant, admin-managed synonyms, exact SKU pinned first; price/stock hydrated from Postgres. Falls back to the Postgres search (substring match via `pg_trgm`) when Typesense is unavailable. Same filters as the catalog listing, plus `in_stock`; paginated; unchanged contract. |
 | `GET /search/suggest` | none (just `x-api-key`) | Autocomplete: up to `limit` (1-10, default 6) products plus up to 4 matching brands with counts, in one call. `brands` is empty on the Postgres fallback. |
+| `GET /products/{uuid}/related` | none (just `x-api-key`) | "También te puede servir": bought together → taxonomy → brand → vehicles. `limit` 1-24. |
+| `POST /products/{uuid}/stock-alerts` | client account (`X-Client-Token`, optional) | "Avísame cuando llegue" for an out-of-stock product. `201`/`200` idempotent, `409` if in stock. |
+| `GET /auth/me/stock-alerts`, `DELETE /auth/me/stock-alerts/{productUuid}` | client account (required `Authorization` header) | List / cancel own stock alerts. |
+| `POST /notifications/unsubscribe` | none (just `x-api-key`) — the token itself proves identity | Unsubscribe link from marketing / stock-alert emails. |
 | `GET /products/{uuid}` | admin/B2B (internal, only if stale) | Serves from Postgres; lazily refreshes detail fields from SICAR GraphQL if `details_updated_at` is null/>24h old. |
 | `GET /taxonomy` | admin/B2B (internal, only if stale) | Departments + nested categories from Postgres; same 24h lazy-refresh pattern. |
 | `GET /vehicles/makes`/`/models`/`/years`/`/engines` | none (just `x-api-key`) | Cascading distinct-value facets for a vehicle picker (type → make → model → year → engine), each narrowed by whatever was already selected. No pagination — small, bounded value lists. |
@@ -818,6 +878,7 @@ Built for operational visibility (queue depth/failures were previously invisible
 | `POST /admin/vehicles/assign-by-model` | Asignación masiva **aditiva** (a diferencia de `PUT .../{uuid}/products`, que reemplaza): agrega `productUuids` a todos los fitments de `make`/`model` (y `vehicleType`/`engine` si se mandan) cuyo rango de años toque alguno de `years` — pensado para "este producto le queda a este modelo en varios años" sin elegir cada `uuid` de vehículo uno por uno. `vehicle_service.assign_products_to_model_years`, `INSERT ... ON CONFLICT DO NOTHING` sobre la PK compuesta de `product_vehicles` (idempotente ante reintentos — pares ya existentes no se duplican ni cuentan como error). `404` si algún `productUuid` no resuelve, o si ningún fitment coincide con la combinación dada. |
 | `GET /admin/bulk-import/template` | Descarga un `.xlsx` de ejemplo listo para llenar (`bulk_import_service.build_template_workbook`) — mismas hojas/columnas que el endpoint de abajo espera (comparten las mismas constantes, no pueden desalinearse), encabezados en negritas, comentarios de celda en las columnas menos obvias, filas de ejemplo con datos ficticios (no datos reales). Devuelve los bytes del `.xlsx` directamente (`Response`), no JSON. |
 | `POST /admin/bulk-import/products` | Importación masiva **aditiva** de `product_categories`/`product_vehicles` desde un `.xlsx` (`app/services/bulk_import_service.py`, hojas opcionales `Categorias`/`Vehiculos`, ver ADMIN_INTEGRATION.md para el shape completo). Productos resueltos por `sku` (+ `additional_skus` como fallback), no `sicarUuid`; `make`/`model`/`engine`/`sku` sin distinguir mayúsculas, `categorySlug` sí. Éxito parcial (filas inválidas se omiten y se reportan en `errors`, no bloquean el resto) en vez de todo-o-nada — solo problemas a nivel de archivo completo (`400`/`422`) rechazan la solicitud entera. Mismo `INSERT ... ON CONFLICT DO NOTHING` que `assign-by-model` (subir el mismo archivo dos veces es un no-op seguro). Batch-resuelve en un número constante de consultas (no una por fila). |
+| `PUT`/`DELETE /admin/products/{uuid}/sale`, `PUT`/`DELETE /admin/products/sale` | Previous price ("precio tachado") for one product or in bulk (uuids or `categoryUuid`, fixed price or `compareAtPercent`). Audited. See "Ofertas, relacionados, avisos y correos de marketing". |
 | `GET /admin/brands` | Una entrada por marca (grupo `lower(brand)` sobre productos no eliminados): `name` (`MIN(brand)`), `productCount`, `variants` (todas las grafías crudas; más de una = duplicado a fusionar) + `unbrandedCount`. `brand_service.list_brands`. |
 | `PATCH /admin/products/brand` | Asigna/quita (`null`/`""`) la marca de 1-500 productos (`productUuids`) en un solo `UPDATE`. Éxito parcial: uuids que no resuelven vuelven en `notFound`. Auditado (`product.brand_bulk_set`). |
 | `POST /admin/brands/rename` | `{from, to}`: todo producto con `lower(brand) = lower(from)` pasa a `to` (fusiona si `to` ya existe; también corrige solo casing). `404` si nada coincide, `422` si alguno viene vacío. Auditado (`brand.rename`). |

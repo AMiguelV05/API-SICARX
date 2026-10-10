@@ -21,7 +21,12 @@ ALIAS = "products"
 # Subirlo cuando cambie build_schema o to_document: el worker detecta al arrancar que el
 # alias apunta a una version vieja y reconstruye el indice completo.
 # v2: name_first (desempate por "tipo de producto") reemplaza a in_stock_rank.
-SCHEMA_VERSION = 2
+# v3: sale_until (filtro onSale).
+SCHEMA_VERSION = 3
+
+# sale_until para una oferta sin fecha de fin: "vigente para siempre". 2^53 cabe en int64 y
+# en un float de JS sin perder precision.
+SALE_NO_END = 2**53
 
 STOPWORDS_ID = "es"
 STOPWORDS = ["de", "del", "la", "el", "los", "las", "para", "con", "y", "en"]
@@ -137,6 +142,8 @@ def build_schema(collection_name: str) -> dict[str, Any]:
             {"name": "price", "type": "float"},
             {"name": "name_sort", "type": "string", "sort": True},
             {"name": "sales_count", "type": "int64"},
+            # Filtro onSale (search_service.build_filter_by): sale_until > ahora.
+            {"name": "sale_until", "type": "int64"},
         ],
     }
 
@@ -170,7 +177,20 @@ def to_document(row: Mapping[str, Any]) -> dict[str, Any]:
         "price": float(row["price"] or 0),
         "name_sort": strip_accents(name).lower(),
         "sales_count": int(row["sales_count"] or 0),
+        "sale_until": sale_until(row.get("compare_at_price"), row["price"], row.get("sale_ends_at")),
     }
+
+
+def sale_until(compare_at_price, price, sale_ends_at) -> int:
+    """Hasta cuando (epoch, segundos) es vigente la oferta, para filtrar con sale_until > ahora.
+    0 si no hay oferta valida (sin precio anterior, o price ya lo iguala/supera - misma regla
+    que Product.is_on_sale; la parte de la fecha se resuelve al filtrar). Si price cambia, el
+    trigger products_mark_search_dirty reindexa el producto, asi que esto no se queda viejo."""
+    if compare_at_price is None or price is None or compare_at_price <= price:
+        return 0
+    if sale_ends_at is None:
+        return SALE_NO_END
+    return int(sale_ends_at.timestamp())
 
 
 # Una sola consulta por lote (sin N+1): los ids de categorias/vehiculos se agregan con
@@ -178,6 +198,7 @@ def to_document(row: Mapping[str, Any]) -> dict[str, Any]:
 _DOC_SELECT = """
     SELECT p.id, p.sicar_uuid, p.sku, p.additional_skus, p.name, p.brand, p.description,
            p.department_uuid, p.category_uuid, p.price, p.stock, p.reserved, p.sales_count,
+           p.compare_at_price, p.sale_ends_at,
            (SELECT array_agg(pc.category_uuid) FROM product_categories pc WHERE pc.product_id = p.id) AS category_uuids,
            (SELECT array_agg(pv.vehicle_uuid) FROM product_vehicles pv WHERE pv.product_id = p.id) AS vehicle_uuids
     FROM products p

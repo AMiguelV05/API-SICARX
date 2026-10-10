@@ -97,3 +97,59 @@ def make_product(**overrides) -> Product:
     )
     defaults.update(overrides)
     return Product(**defaults)
+
+
+@pytest_asyncio.fixture
+async def api(db):
+    """Cliente HTTP (ASGI) contra la app real, con la sesion transaccional `db` inyectada y
+    el x-api-key ya puesto. Mismo patron que el `client` local de test_admin_search_synonyms."""
+    import httpx
+
+    from app.core.config import settings
+    from app.core.database import get_db
+    from app.core.rate_limit import limiter
+    from app.main import app
+
+    async def override_get_db():
+        yield db
+
+    # Limites en memoria por proceso: sin esto, muchos tests HTTP seguidos chocan con ellos.
+    limiter.reset()
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+            headers={"x-api-key": settings.X_API_KEY},
+        ) as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+def make_client_account(**overrides):
+    import uuid as uuid_lib
+
+    from app.models.client import ClientAccount
+
+    defaults = dict(
+        uuid=str(uuid_lib.uuid4()),
+        name="Cliente de prueba",
+        email=f"cliente-{uuid_lib.uuid4().hex[:8]}@example.com",
+        hashed_password="x",
+        is_active=True,
+    )
+    defaults.update(overrides)
+    return ClientAccount(**defaults)
+
+
+async def admin_headers(db, role: str = "super_admin") -> dict:
+    import uuid as uuid_lib
+
+    from app.core.security import create_admin_token
+    from app.schemas.admin_auth import AdminUserCreate
+    from app.services import admin_auth_service
+
+    admin = await admin_auth_service.create_admin_user(
+        db, AdminUserCreate(email=f"{role}-{uuid_lib.uuid4().hex[:6]}@example.com", name=f"Admin {role}", password="correcta123", role=role)
+    )
+    return {"Authorization": f"Bearer {create_admin_token(admin.uuid)}"}

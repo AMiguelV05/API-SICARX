@@ -23,6 +23,10 @@ from app.core.retry import request_with_backoff
 from app.core.error_tracking import capture_exception, init_error_tracking
 from app.worker.sicar_sync_worker import scheduled_sicar_sync_job
 from app.worker.abandoned_order_worker import scheduled_abandoned_order_job
+from app.worker.webhook_outbox_worker import scheduled_webhook_outbox_job
+from app.worker.stock_alert_worker import scheduled_stock_alert_job
+from app.worker.wishlist_price_drop_worker import scheduled_price_drop_job
+from app.worker.abandoned_cart_worker import scheduled_abandoned_cart_job
 from app.worker.search_index_worker import (
     ensure_index_on_startup,
     scheduled_drain_job,
@@ -453,6 +457,14 @@ async def main():
     # Cancela ordenes TO_PAY abandonadas (sin ningun intento de pago) y libera su reserva de
     # stock - 5 min es de sobra de granularidad contra un timeout de 30 min por defecto.
     scheduler.add_job(scheduled_abandoned_order_job, 'interval', minutes=5, max_instances=1, coalesce=True, next_run_time=datetime.now())
+    # Notificaciones al frontend (correos): avisos de reabastecimiento cada 5 min, y el outbox
+    # que los envia con reintentos cada minuto - ver webhook_outbox_worker.py.
+    scheduler.add_job(scheduled_stock_alert_job, 'interval', minutes=5, max_instances=1, coalesce=True)
+    scheduler.add_job(scheduled_webhook_outbox_job, 'interval', minutes=1, max_instances=1, coalesce=True)
+    # Correos de marketing (solo cuentas con marketing_emails = true): baja de precio en
+    # favoritos cada hora (tope de uno por cliente al dia) y carritos abandonados cada 30 min.
+    scheduler.add_job(scheduled_price_drop_job, 'interval', hours=1, max_instances=1, coalesce=True)
+    scheduler.add_job(scheduled_abandoned_cart_job, 'interval', minutes=30, max_instances=1, coalesce=True)
 
     # Indice de busqueda en Typesense (no-op sin TYPESENSE_URL/TYPESENSE_API_KEY) - ver
     # search_index_worker.py. El arranque reconstruye si falta el indice; un Typesense caido

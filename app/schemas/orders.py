@@ -14,6 +14,27 @@ def validate_coupon_code_format(v: Optional[str]) -> Optional[str]:
         raise ValueError("Código de cupón inválido.")
     return v
 
+def enrich_order_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Agrega a cada renglon guardado de Order.items los campos numericos que pide GA4
+    (`productUuid`, `unitPrice`, `lineTotal`), derivados de las claves que build_order_payload
+    ya guarda (`uuid`, `priceTax`, `amountTax`, como strings). Se calcula al serializar, asi que
+    aplica igual a ordenes viejas. Copia cada dict - nunca muta el JSON del ORM.
+    Ambos montos son ANTES del cupon: el descuento vive solo a nivel orden (discountAmount)."""
+    enriched = []
+    for item in items or []:
+        line = dict(item)
+        line.setdefault("productUuid", item.get("uuid"))
+        line.setdefault("unitPrice", _to_float(item.get("priceTax")))
+        line.setdefault("lineTotal", _to_float(item.get("amountTax")))
+        enriched.append(line)
+    return enriched
+
+def _to_float(v: Any) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
 class ProductItem(CamelModel):
     uuid: str = Field(description="UUID del producto en Sicar")
     quantity: float = Field(gt=0, description="Cantidad a comprar o cancelar")
@@ -173,6 +194,11 @@ class OrderPublic(CamelModel):
     shipping_label: Optional[ShippingLabelInfo] = Field(default=None, description="Guía de envío real (envia.com) si un admin ya la generó - incluye trackUrl para que el cliente siga su paquete. Null hasta entonces; solo aplica a pedidos DELIVERYMAN.")
     terms_accepted_at: Optional[datetime] = Field(default=None, description="Momento en que se aceptaron los Términos y Condiciones al hacer checkout como invitado. Null si no se mandó o si la orden es de una cuenta (ver ClientPublic.termsAcceptedAt en ese caso).")
     terms_accepted_version: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada al hacer checkout como invitado.")
+
+    @field_validator("items", mode="after")
+    @classmethod
+    def add_ga4_fields(cls, v: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return enrich_order_items(v)
 
 class OrderListResponse(CamelModel):
     total: int

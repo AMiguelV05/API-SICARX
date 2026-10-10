@@ -98,6 +98,32 @@ def decode_email_verification_token(token: str) -> str:
 
     return payload.get("sub")
 
+UNSUBSCRIBE_SCOPES = ("marketing", "stock-alert")
+
+def create_unsubscribe_token(scope: str, sub: str) -> str:
+    """Token del enlace "darse de baja" de los correos (POST /notifications/unsubscribe).
+    `sub` es el uuid de la cuenta (scope "marketing") o de la suscripcion StockAlert (scope
+    "stock-alert"). Sin `exp` a proposito: un enlace en un correo viejo debe seguir sirviendo
+    para darse de baja, y lo unico que permite es apagar notificaciones. Mismo razonamiento
+    que el token de verificacion para reusar CLIENT_JWT_SECRET; el claim `purpose` hace que
+    _resolve_client_from_token lo rechace como sesion."""
+    if scope not in UNSUBSCRIBE_SCOPES:
+        raise ValueError(f"scope de baja desconocido: {scope}")
+    payload = {"sub": sub, "purpose": "unsubscribe", "scope": scope}
+    return jwt.encode(payload, settings.CLIENT_JWT_SECRET, algorithm=CLIENT_JWT_ALGORITHM)
+
+def decode_unsubscribe_token(token: str) -> tuple[str, str]:
+    """Inverso de create_unsubscribe_token -> (scope, sub). 400 si no es valido."""
+    invalid = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enlace de baja inválido.")
+    try:
+        payload = jwt.decode(token, settings.CLIENT_JWT_SECRET, algorithms=[CLIENT_JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise invalid
+    scope, sub = payload.get("scope"), payload.get("sub")
+    if payload.get("purpose") != "unsubscribe" or scope not in UNSUBSCRIBE_SCOPES or not sub:
+        raise invalid
+    return scope, sub
+
 PASSWORD_RESET_TOKEN_EXPIRE_MINUTES = 30  # corto a proposito, mas sensible que verificar correo
 
 def generate_password_reset_token() -> str:

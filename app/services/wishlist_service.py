@@ -129,7 +129,8 @@ async def add_item(db: AsyncSession, client: ClientAccount, collection_uuid: str
     collection = await get_owned_collection(db, client, collection_uuid)
     product = await _get_wishlistable_product(db, product_uuid)
 
-    stmt = insert(WishlistItem).values(collection_id=collection.id, product_id=product.id)
+    # baseline_price: referencia del aviso de baja de precio (wishlist_price_drop_worker.py).
+    stmt = insert(WishlistItem).values(collection_id=collection.id, product_id=product.id, baseline_price=product.price)
     stmt = stmt.on_conflict_do_nothing(constraint="ux_wishlist_items_collection_product")
     await db.execute(stmt)
     await db.commit()

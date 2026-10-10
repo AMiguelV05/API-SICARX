@@ -8,9 +8,9 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse
+from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse, RelatedProductsResponse
 from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products, get_distinct_brands
-from app.services import attribute_service
+from app.services import attribute_service, related_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/products", tags=["Products Catalog and Details"], dependencies=[Depends(validate_api_key)])
@@ -65,6 +65,19 @@ async def get_available_now(
         sort_by=sort_by,
     )
     return AvailableNowResponse(docs=docs)
+
+@router.get("/{uuid}/related", response_model=RelatedProductsResponse, summary="Productos relacionados (Tambien te puede servir)")
+async def get_related(uuid: str, db: DbDep, limit: int = Query(default=8, ge=1, le=24, description="Cantidad de productos (1-24)")):
+    """Comprados juntos en pedidos pagados de los ultimos 180 dias, luego mismo nodo de
+    taxonomia (o su padre), misma marca y mismos vehiculos - sin repetir, sin el propio
+    producto ni su grupo de variantes, primero los que tienen existencia. `404` con el mismo
+    criterio que GET /products/{uuid}. Ver related_service."""
+    product = await db.scalar(
+        select(Product).where(Product.sicar_uuid == uuid, Product.is_deleted == False, Product.is_active == True)  # noqa: E712
+    )
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado")
+    return RelatedProductsResponse(docs=await related_service.get_related_products(db, product, limit))
 
 # Declarado antes de GET /{uuid} - mismo motivo que best-sellers/available-now arriba.
 @router.get("/brands", response_model=ProductBrandsResponse, summary="Marcas distintas de productos")
@@ -152,6 +165,8 @@ async def get_product_details(uuid: str, db: DbDep):
         department_uuid=product.department_uuid,
         category_uuid=product.category_uuid,
         price=product.price,
+        compare_at_price=product.effective_compare_at_price,
+        sale_ends_at=product.effective_sale_ends_at,
         stock=product.available_stock,
         is_bulk=product.is_bulk,
         is_active=product.is_active,

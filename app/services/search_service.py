@@ -7,6 +7,7 @@ confiar en una copia del precio/stock" que el checkout. Si Typesense no esta con
 esta caido (cortacircuitos abierto) o falla, se usa catalog_service.search_products tal
 cual - la busqueda nunca se cae por Typesense."""
 import logging
+import time
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -50,7 +51,8 @@ def _quote(value: str) -> str:
 def build_filter_by(*, department_uuid: Optional[str] = None, category_uuid: Optional[str] = None,
                     category_uuids: Optional[list[str]] = None, vehicle_uuid: Optional[str] = None,
                     brand: Optional[str] = None, has_brand: Optional[bool] = None,
-                    in_stock: Optional[bool] = False) -> str:
+                    in_stock: Optional[bool] = False, on_sale: Optional[bool] = None,
+                    now_epoch: Optional[int] = None) -> str:
     """Mismos filtros y misma semantica que catalog_service._apply_search_filters.
     `category_uuids` ya viene expandido con descendientes (taxonomyUuid)."""
     clauses = []
@@ -70,6 +72,11 @@ def build_filter_by(*, department_uuid: Optional[str] = None, category_uuid: Opt
         clauses.append("has_brand:=false")
     if in_stock:
         clauses.append("in_stock:=true")
+    if on_sale:
+        # sale_until (search_index.to_document): 0 sin oferta valida, epoch del fin de la
+        # oferta, o SALE_NO_END si no tiene fin - "vigente ahora" = sale_until > ahora.
+        now = now_epoch if now_epoch is not None else int(time.time())
+        clauses.append(f"sale_until:>{now}")
     return " && ".join(clauses)
 
 
@@ -142,7 +149,7 @@ async def _postgres_search(db: AsyncSession, f: SearchFilter) -> dict[str, Any]:
         db, f.q, f.limit, f.offset,
         department_uuid=f.department_uuid, category_uuid=f.category_uuid,
         taxonomy_uuid=f.taxonomy_uuid, vehicle_uuid=f.vehicle_uuid,
-        brand=f.brand, has_brand=f.has_brand, in_stock=f.in_stock, sort_by=f.sort_by,
+        brand=f.brand, has_brand=f.has_brand, in_stock=f.in_stock, on_sale=f.on_sale, sort_by=f.sort_by,
     )
 
 
@@ -166,7 +173,7 @@ async def search(db: AsyncSession, f: SearchFilter) -> dict[str, Any]:
     filter_by = build_filter_by(
         department_uuid=f.department_uuid, category_uuid=f.category_uuid,
         category_uuids=category_uuids, vehicle_uuid=f.vehicle_uuid,
-        brand=f.brand, has_brand=f.has_brand, in_stock=f.in_stock,
+        brand=f.brand, has_brand=f.has_brand, in_stock=f.in_stock, on_sale=f.on_sale,
     )
     normalized_q = search_index.normalize_search_text(f.q).strip()
     if not normalized_q:

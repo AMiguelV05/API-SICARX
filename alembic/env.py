@@ -26,6 +26,8 @@ from app.models.refund import Refund
 from app.models.chargeback import Chargeback
 from app.models.wishlist import WishlistCollection, WishlistItem
 from app.models.search_synonym import SearchSynonym
+from app.models.webhook_outbox import WebhookOutbox
+from app.models.stock_alert import StockAlert
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

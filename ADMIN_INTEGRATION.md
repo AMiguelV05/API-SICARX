@@ -2290,6 +2290,62 @@ Pone `brand` en `null` en todo producto con esa marca (sin distinguir mayúscula
 `200` `{ "updated": 17 }`. Es idempotente: si ningún producto tiene esa marca responde
 `{ "updated": 0 }`, **no** `404`. `422` si falta `name` o viene vacío.
 
+### Precio de oferta (nuevo, 2026-10-10)
+
+El precio con descuento sigue siendo el `price` que viene de Sicar X, y es lo único que se cobra. Aquí solo se captura el **precio anterior** (`compareAtPrice`, con IVA), que la tienda muestra tachado con su porcentaje. El flujo normal es:
+1. Bajar el precio en Sicar X.
+2. Capturar aquí el precio anterior, o usar `compareAtPercent`.
+
+La oferta se apaga sola al pasar `saleEndsAt`, o si Sicar X vuelve a subir `price` hasta igualar `compareAtPrice`. Mientras no está vigente, la tienda recibe `compareAtPrice: null`.
+
+Reglas comunes a estas rutas:
+- Cualquier admin autenticado puede usarlas.
+- Todas quedan en el audit log: `product.sale_set`, `product.sale_clear`, `product.sale_bulk_set` y `product.sale_bulk_clear`.
+- `saleEndsAt` es opcional (sin fecha de fin) y debe ser futura (`422`). Si no trae zona horaria, se interpreta como UTC.
+
+#### `PUT /v1/admin/products/{productUuid}/sale`: capturar la oferta de un producto
+
+```json
+{ "compareAtPrice": 150.0, "saleEndsAt": "2026-10-31T23:59:59-06:00" }
+```
+
+- `422` si `compareAtPrice` no es mayor que el `price` actual, o si `saleEndsAt` ya pasó.
+- `404` si el producto no existe.
+
+Respuesta `200`:
+
+```json
+{ "productUuid": "...", "price": 120.0, "compareAtPrice": 150.0, "saleEndsAt": "2026-11-01T05:59:59Z", "isOnSale": true }
+```
+
+#### `DELETE /v1/admin/products/{productUuid}/sale`: quitar la oferta
+
+Responde `204` y es idempotente.
+
+#### `PUT /v1/admin/products/sale`: oferta masiva
+
+```json
+{ "productUuids": ["...", "..."], "compareAtPercent": 20, "saleEndsAt": null }
+```
+
+Reglas del body:
+- **Objetivo:** manda exactamente uno de `productUuids` (de 1 a 500) o `categoryUuid` (un nodo de `GET /v1/taxonomy`, incluye sus descendientes).
+- **Precio:** manda exactamente uno de `compareAtPrice` (el mismo para todos) o `compareAtPercent` (entre 0 y 100, sin incluirlos).
+- `compareAtPercent` calcula el precio por producto como `price / (1 - pct/100)`: con `price` 80 y 20 %, el resultado es 100.
+- Si mandas ambos, o ninguno, la respuesta es `422`.
+
+Respuesta `200`, con éxito parcial:
+
+```json
+{ "updated": 12, "notFound": ["uuid-que-no-existe"], "skipped": ["uuid-con-precio-mayor-o-igual"] }
+```
+
+`skipped` lista los productos cuyo precio anterior no quedaba mayor que su `price`, o que tienen `price` en 0.
+
+#### `DELETE /v1/admin/products/sale`: quitar la oferta de varios
+
+Recibe un body con `productUuids` o `categoryUuid`, igual que el `PUT` masivo. Responde `{ "updated": n, "notFound": [...] }`.
+
 ### Sinónimos del buscador (nuevo, 2026-09-26)
 
 El buscador de la tienda (`POST /v1/search`, `GET /v1/search/suggest`) usa un motor de búsqueda

@@ -594,6 +594,7 @@ Content-Type: application/json
   "hasBrand": null,
   "tag": null,
   "inStock": false,
+  "onSale": null,
   "sortBy": null
 }
 ```
@@ -610,7 +611,9 @@ Respuesta `200`:
       "description": null,
       "brand": null,
       "imageUrl": null,
-      "price": 8.62069,
+      "price": 10.0,
+      "compareAtPrice": null,
+      "saleEndsAt": null,
       "stock": 2.0,
       "salesCount": 0.0,
       "averageRating": null,
@@ -746,7 +749,9 @@ Respuesta `200` con la misma forma que `/v1/products`:
       "description": null,
       "brand": null,
       "imageUrl": null,
-      "price": 8.62069,
+      "price": 10.0,
+      "compareAtPrice": null,
+      "saleEndsAt": null,
       "stock": 2.0,
       "salesCount": 0.0,
       "averageRating": null,
@@ -825,7 +830,9 @@ Respuesta `200` incluye todos los campos de `POST /v1/products` (`sicarUuid`, `s
   "unitShortName": "PZA",
   "departmentUuid": "4aa3e82c-3ea2-4018-b8a7-12e727247cfa",
   "categoryUuid": "137bcaba-5aa2-4559-8545-2cab151d8369",
-  "price": 8.62069,
+  "price": 10.0,
+  "compareAtPrice": null,
+  "saleEndsAt": null,
   "stock": 2.0,
   "isBulk": false,
   "isActive": true,
@@ -958,7 +965,9 @@ Respuesta `200`:
       "description": null,
       "brand": null,
       "imageUrl": null,
-      "price": 8.62069,
+      "price": 10.0,
+      "compareAtPrice": null,
+      "saleEndsAt": null,
       "stock": 2.0,
       "salesCount": 14.0
     }
@@ -1006,7 +1015,9 @@ Respuesta `200` (mismo shape que `best-sellers`, mismo objeto `ProductBasic` por
       "description": null,
       "brand": null,
       "imageUrl": "https://.../portarollo.jpg",
-      "price": 8.62069,
+      "price": 10.0,
+      "compareAtPrice": null,
+      "saleEndsAt": null,
       "stock": 2.0,
       "salesCount": 14.0
     }
@@ -2358,6 +2369,178 @@ X-Client-Token: <token de /v1/auth/login o /v1/auth/register>
 Respuesta `204` (sin body) en éxito.
 
 ---
+
+## Funciones nuevas (2026-10-10): ofertas, relacionados, avisos y correos de marketing
+
+Respuesta a `CAMBIOS_NECESARIOS.md`. Todo va detrás de `x-api-key`, con JSON en camelCase y errores `{"detail": "..."}`.
+
+### `price` incluye IVA
+
+`price` es el **precio final al público con IVA incluido** en catálogo, búsqueda, ficha, carrito y renglones de pedido. Se guarda tal cual de la lista de precios de Sicar X, que ya trae el IVA: el 99.99 % de los precios del catálogo terminan en `.x0`. El `8.62069` que aparecía en los ejemplos de este documento era un ejemplo viejo; la API siempre redondea a 2 decimales.
+
+### Precio de oferta (`compareAtPrice`, `saleEndsAt`)
+
+Todo producto que devuelve la API trae dos campos nuevos:
+- `compareAtPrice: number | null` es el precio **anterior**, con IVA, para mostrarlo tachado. Cuando no es `null`, siempre es mayor que `price`.
+- `saleEndsAt: string | null` es el fin de la oferta en ISO-8601. Es `null` si la oferta no tiene fecha de fin.
+
+Los dos campos vienen en:
+- `POST /v1/products` (`docs[]`) y `POST /v1/search`;
+- `GET /v1/search/suggest` (`products[]`);
+- `GET /v1/products/{uuid}`, `best-sellers`, `available-now` y `GET /v1/products/{uuid}/related`;
+- los renglones de `GET /v1/cart` y los productos de favoritos.
+
+Los dos son `null` cuando no hay oferta **vigente**. La API apaga la oferta sola al pasar `saleEndsAt`, o si el precio de Sicar X sube hasta igualar el precio anterior. El porcentaje se calcula como `round((1 - price / compareAtPrice) * 100)`.
+
+**El cobro no cambia:** el pedido siempre usa `price`. El precio anterior se captura en el panel admin (ver `ADMIN_INTEGRATION.md`). La etiqueta `oferta` en `tags` ya no es necesaria.
+
+**Filtro `onSale: true`** en `POST /v1/products` y `POST /v1/search`: regresa solo productos con oferta vigente. Si se omite o es `false`, no filtra.
+
+### `GET /v1/products/{uuid}/related?limit=8`: "También te puede servir"
+
+`limit` va de 1 a 24 (por defecto 8). Responde `{ "docs": [...] }` con la misma forma que los `docs` de `POST /v1/products`.
+
+Los productos salen en este orden, sin repetir:
+1. Comprados juntos en pedidos pagados de los últimos 180 días.
+2. Mismo nodo de taxonomía, o su padre si el nodo tiene pocos.
+3. Misma marca.
+4. Mismos vehículos.
+
+Reglas:
+- Se excluyen el propio producto y su grupo de variantes.
+- Dentro de cada nivel van primero los que tienen existencia.
+- La lista se cachea 1 h en el servidor, pero el precio y la existencia siempre son los actuales.
+- `404` si el uuid no existe, con el mismo criterio que la ficha.
+- Puede venir con menos de `limit` productos, o vacía, si el producto no tiene relación con nada.
+
+### Renglones de pedido para GA4
+
+Cada renglón de `items[]` trae tres campos nuevos:
+- `productUuid`: el `sicarUuid` del producto (el mismo valor que el `uuid` del renglón);
+- `unitPrice: number`: el precio unitario con IVA que se cobró;
+- `lineTotal: number`: `unitPrice × quantity`.
+
+Vienen en:
+- `GET /v1/auth/me/orders` y `GET /v1/auth/me/orders/{uuid}`;
+- `GET /v1/orders/guest/{id}`;
+- los webhooks `order-confirmed`, `order-cancelled` y `order-status-changed`.
+
+Ambos montos son **antes del cupón**. El descuento solo existe a nivel pedido (`discountAmount`, `couponCode`), así que en GA4 va como `coupon`/`discount` del evento, no por renglón.
+
+Además:
+- `quantity` sigue siendo string; no cambió.
+- El endpoint de invitado devuelve el mismo esquema que el de cuenta, con `total`, `subtotal`, `discountAmount` y `couponCode`.
+- Los campos nuevos también aparecen en pedidos viejos.
+
+### Avisos de reabastecimiento ("Avísame cuando llegue")
+
+```http
+POST /v1/products/{uuid}/stock-alerts
+x-api-key: <api-key>
+X-Client-Token: <opcional>
+Content-Type: application/json
+
+{ "email": "cliente@example.com" }
+```
+
+- Con `X-Client-Token` se usa el correo de la cuenta y se ignora el del body. Sin token, `email` es obligatorio (`400` si falta).
+- Respuestas:
+  - `201`: suscripción nueva;
+  - `200`: ya estaba suscrito (idempotente, devuelve la misma suscripción);
+  - `409`: el producto **sí** tiene existencia;
+  - `404`: el producto no existe;
+  - `422`: correo inválido;
+  - `429`: límite de frecuencia (10 por minuto por IP y 20 suscripciones al día por correo).
+- El cuerpo de la respuesta es `{ uuid, productUuid, email, createdAt, expiresAt }`. La suscripción caduca a los 90 días.
+
+`GET /v1/auth/me/stock-alerts` (con `Authorization`) lista las suscripciones activas de la cuenta. Cada una trae `product` con la forma de `docs`, o `null` si el producto ya no está disponible.
+
+`DELETE /v1/auth/me/stock-alerts/{productUuid}` cancela una suscripción. Es idempotente y responde `204`.
+
+La existencia se revisa cada 5 minutos. Cuando vuelve a haber, llega **una sola vez** el webhook `product-back-in-stock` (abajo) y la suscripción queda marcada como usada. Si la existencia vuelve a 0 antes de esa revisión, no se manda nada.
+
+### Correos de marketing: `marketingEmails`
+
+- `GET /v1/auth/me` y las respuestas de login y registro traen `client.marketingEmails: boolean`.
+- `PATCH /v1/auth/me` acepta `{ "marketingEmails": true | false }`.
+- `POST /v1/auth/register` y `POST /v1/auth/google` aceptan `marketingEmails` (por defecto `false`). En Google solo cuenta si ese login **crea** la cuenta.
+- **El valor por defecto es `false` para todas las cuentas**, incluidas las que ya existían. Solo reciben correos de baja de precio y de carrito abandonado quienes lo aceptan.
+
+### `POST /v1/notifications/unsubscribe`: baja desde el enlace del correo
+
+```json
+{ "token": "<unsubscribeToken del webhook>" }
+```
+
+No requiere sesión. Responde `{ "scope": "marketing" | "stock-alert", "email": "c***@example.com" }`.
+- `marketing` apaga `marketingEmails`.
+- `stock-alert` cancela esa suscripción.
+
+Es idempotente y responde `400` si el token no es válido. El token no caduca y no sirve como sesión.
+
+### Webhooks nuevos (con reintentos)
+
+Usan el mismo esquema de firma que `order-confirmed`: `X-Webhook-Timestamp`, `X-Webhook-Signature` y `FRONTEND_WEBHOOK_SECRET`. Además traen dos encabezados:
+- `X-Webhook-Id`: es el mismo en cada reintento; guárdalo y descarta los duplicados.
+- `X-Webhook-Event`: el nombre del evento.
+
+**Estos sí se reintentan.** Cualquier respuesta que no sea `2xx`, o un error de red, se reintenta a 1 minuto, 10 minutos y 1 hora; después se da por perdido. Responde `2xx` en cuanto valides la firma y manda el correo después. Los webhooks anteriores (`order-confirmed`, etc.) no cambian.
+
+**`POST {tu dominio}/api/webhooks/product-back-in-stock`**
+
+```json
+{
+  "email": "cliente@example.com",
+  "clientName": "Juan",
+  "product": { "sicarUuid": "...", "sku": "...", "name": "...", "imageUrl": "...", "price": 130.0, "stock": 4.0 },
+  "unsubscribeToken": "..."
+}
+```
+
+`clientName` es `null` para invitados. El `unsubscribeToken` tiene scope `stock-alert`.
+
+**`POST {tu dominio}/api/webhooks/wishlist-price-drop`** (marketing)
+
+```json
+{
+  "clientUuid": "...",
+  "clientEmail": "...",
+  "clientName": "...",
+  "items": [
+    { "product": { "sicarUuid": "...", "sku": "...", "name": "...", "imageUrl": "..." }, "oldPrice": 150.0, "newPrice": 120.0 }
+  ],
+  "unsubscribeToken": "..."
+}
+```
+
+Se dispara cuando un producto de favoritos o de una lista con nombre baja de precio 5 % o más.
+- La revisión es cada hora, con un máximo de un webhook por cliente al día que agrupa todos sus productos.
+- No se avisa dos veces del mismo producto al mismo precio.
+- Solo aplica a cuentas con `marketingEmails: true`.
+
+**`POST {tu dominio}/api/webhooks/cart-abandoned`** (marketing)
+
+```json
+{
+  "clientUuid": "...",
+  "clientEmail": "...",
+  "clientName": "...",
+  "items": [ { "sicarUuid": "...", "name": "...", "imageUrl": "...", "price": 130.0, "quantity": 1.0, "available": true } ],
+  "subtotal": 130.0,
+  "unsubscribeToken": "..."
+}
+```
+
+Un carrito califica si cumple todo esto (la revisión es cada 30 minutos):
+- es de una cuenta con `marketingEmails: true`;
+- tiene productos;
+- nadie lo ha tocado en 2 horas;
+- la cuenta no ha hecho pedidos desde entonces.
+
+Se manda como máximo un correo por carrito cada 7 días, y solo si el carrito cambió desde el correo anterior. Un renglón con `available: false` viene sin precio; si ningún renglón está disponible, no se manda nada. `price` y `subtotal` incluyen IVA.
+
+El recordatorio de pedido apartado sin pagar (`order-payment-pending`) **no** se implementó, porque la reserva de un pedido sin pago dura solo 30 minutos.
+
 
 ## Ejemplo mínimo (fetch, Next.js)
 

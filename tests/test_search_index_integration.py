@@ -176,3 +176,36 @@ async def test_reconcile_removes_synonym_deleted_from_table(ts_env):
     async with database.AsyncSessionLocal() as session:
         table_ids = set((await session.execute(text("SELECT uuid FROM search_synonyms"))).scalars())
     assert ids == table_ids
+
+
+async def test_on_sale_filter_and_trigger_reindex(ts_env):
+    """sale_until (filtro onSale): capturar una oferta marca el producto sucio (trigger) y el
+    drain la empuja; una oferta vencida no pasa el filtro."""
+    from datetime import datetime, timedelta, timezone
+    from app.services.search_service import build_filter_by
+
+    now = datetime.now(timezone.utc)
+    on_sale, expired, plain = await _commit_products(
+        ts_env,
+        make_product(name="Esmeriladora oferta", price=Decimal("80.00"), compare_at_price=Decimal("100.00")),
+        make_product(name="Esmeriladora vencida", price=Decimal("80.00"), compare_at_price=Decimal("100.00"),
+                     sale_ends_at=now - timedelta(days=1)),
+        make_product(name="Esmeriladora normal", price=Decimal("80.00")),
+    )
+    await search_index_worker.full_rebuild("prueba")
+
+    async def found() -> set[str]:
+        result = await typesense_client._request("GET", f"/collections/{search_index.ALIAS}/documents/search", params={
+            "q": "esmeriladora", "query_by": "name", "filter_by": build_filter_by(on_sale=True), "per_page": 10,
+        })
+        return {hit["document"]["id"] for hit in result.json()["hits"]}
+
+    assert await found() == {on_sale.sicar_uuid}
+
+    async with database.AsyncSessionLocal() as session:
+        await session.execute(update(Product).where(Product.sicar_uuid == plain.sicar_uuid)
+                              .values(compare_at_price=Decimal("90.00"), sale_ends_at=now + timedelta(days=1)))
+        await session.commit()
+    assert await _dirty(plain.sicar_uuid)
+    await search_index_worker.drain_dirty()
+    assert await found() == {on_sale.sicar_uuid, plain.sicar_uuid}

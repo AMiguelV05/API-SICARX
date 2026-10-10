@@ -46,6 +46,9 @@ class CartItemPublic(CamelModel):
     name: Optional[str] = None
     imageUrl: Optional[str] = None
     price: Optional[float] = None
+    # Oferta vigente (Product.is_on_sale) - solo informativo, la linea se cobra a `price`.
+    compareAtPrice: Optional[float] = None
+    saleEndsAt: Optional[datetime] = None
     stock: Optional[float] = None
     quantity: float
     lineTotal: Optional[float] = None

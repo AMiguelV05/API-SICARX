@@ -50,6 +50,7 @@ class LocalCatalogFilter(CamelModel):
     has_brand: Optional[bool] = Field(default=None, description="true = solo productos con marca, false = solo productos sin marca (filtro \"Sin marca\"). Omitido = sin filtro. Se combina (AND) con los demas filtros.")
     tag: Optional[str] = None
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
+    on_sale: Optional[bool] = Field(default=None, description="Si es true, solo productos con oferta vigente (compareAtPrice no nulo). Omitido/false = sin filtro.")
     sort_by: Optional[Literal["price_asc", "price_desc", "name_asc", "relevance"]] = Field(
         default=None, description="Orden de los resultados: price_asc, price_desc, name_asc o relevance (mas vendidos primero)"
     )
@@ -69,6 +70,16 @@ class ProductBasic(CamelModel):
     stock: float = Field(
         validation_alias="available_stock", serialization_alias="stock",
         description="Cantidad disponible para venta ahora mismo (stock real menos reservas de ordenes locales todavia no aceptadas) - no el stock fisico crudo.",
+    )
+    # Oferta vigente (ver Product.is_on_sale): null si no hay oferta, ya vencio, o price
+    # (de Sicar X) ya subio hasta igualarla. Solo informativo - el cobro siempre usa price.
+    compare_at_price: Optional[float] = Field(
+        default=None, validation_alias="effective_compare_at_price", serialization_alias="compareAtPrice",
+        description="Precio anterior (con IVA) para mostrarlo tachado. Null si no hay oferta vigente. Siempre mayor que price.",
+    )
+    sale_ends_at: Optional[datetime] = Field(
+        default=None, validation_alias="effective_sale_ends_at", serialization_alias="saleEndsAt",
+        description="Fin de la oferta (ISO-8601). Null si la oferta no tiene fecha de fin o si no hay oferta vigente.",
     )
     sales_count: float
     # Cacheados en Product, mantenidos por review_service - ver ReviewListResponse. None/0 si el producto no tiene reseñas todavia.
@@ -93,6 +104,9 @@ class BestSellersResponse(CamelModel):
 class AvailableNowResponse(CamelModel):
     docs: List[ProductBasic]
 
+class RelatedProductsResponse(CamelModel):
+    docs: List[ProductBasic]
+
 class ProductBrandsResponse(CamelModel):
     docs: List[str]
 
@@ -111,6 +125,8 @@ class ProductDetail(CamelModel):
     department_uuid: Optional[str]
     category_uuid: Optional[str]
     price: float
+    compare_at_price: Optional[float] = Field(default=None, description="Precio anterior (con IVA) si hay oferta vigente; null si no. Ver ProductBasic.compareAtPrice.")
+    sale_ends_at: Optional[datetime] = Field(default=None, description="Fin de la oferta vigente, si tiene.")
     stock: float
     is_bulk: bool
     is_active: bool

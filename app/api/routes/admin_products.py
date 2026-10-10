@@ -11,8 +11,9 @@ from app.schemas.attribute import (
 )
 from app.schemas.products import ProductInfoUpdateRequest, ProductInfoPublic
 from app.schemas.brand import BulkSetBrandRequest, BulkSetBrandResponse
+from app.schemas.sale import BulkSaleClearRequest, BulkSaleResponse, BulkSaleSetRequest, ProductSalePublic, ProductSaleSetRequest
 from app.core.security import CurrentAdminDep
-from app.services import attribute_service, brand_service, audit_service
+from app.services import attribute_service, brand_service, audit_service, sale_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependencies=[Depends(get_current_admin)])
@@ -38,6 +39,74 @@ async def admin_bulk_set_brand(db: DbDep, current: CurrentAdminDep, data: BulkSe
     )
     await db.commit()
     return BulkSetBrandResponse(updated=updated, not_found=not_found)
+
+
+# Precio de oferta - ver sale_service y "Precio de oferta" en CLAUDE.md. Las rutas masivas
+# (/sale, un segmento) no chocan con las de un producto (/{product_uuid}/sale, dos).
+@router.put("/sale", response_model=BulkSaleResponse, summary="Capturar el precio anterior (oferta) de varios productos")
+async def admin_bulk_set_sale(db: DbDep, current: CurrentAdminDep, data: BulkSaleSetRequest = Body()):
+    """Objetivo: `productUuids` (1-500) o `categoryUuid` (con descendientes). Precio: un
+    `compareAtPrice` fijo, o `compareAtPercent` para calcularlo por producto a partir de su
+    price actual. Exito parcial: ver `notFound`/`skipped`."""
+    updated, not_found, skipped = await sale_service.bulk_set_sale(
+        db, product_uuids=data.product_uuids, category_uuid=data.category_uuid,
+        compare_at_price=data.compare_at_price, compare_at_percent=data.compare_at_percent,
+        sale_ends_at=data.sale_ends_at,
+    )
+    await audit_service.log_action(
+        db, current, "product.sale_bulk_set", "product", data.category_uuid or f"{len(data.product_uuids)} productos",
+        {
+            "productUuids": data.product_uuids, "categoryUuid": data.category_uuid,
+            "compareAtPrice": data.compare_at_price, "compareAtPercent": data.compare_at_percent,
+            "saleEndsAt": data.sale_ends_at.isoformat() if data.sale_ends_at else None,
+            "updated": updated, "notFound": not_found, "skipped": skipped,
+        },
+    )
+    await db.commit()
+    return BulkSaleResponse(updated=updated, not_found=not_found, skipped=skipped)
+
+
+@router.delete("/sale", response_model=BulkSaleResponse, summary="Quitar la oferta de varios productos")
+async def admin_bulk_clear_sale(db: DbDep, current: CurrentAdminDep, data: BulkSaleClearRequest = Body()):
+    updated, not_found = await sale_service.bulk_clear_sale(db, product_uuids=data.product_uuids, category_uuid=data.category_uuid)
+    await audit_service.log_action(
+        db, current, "product.sale_bulk_clear", "product", data.category_uuid or f"{len(data.product_uuids)} productos",
+        {"productUuids": data.product_uuids, "categoryUuid": data.category_uuid, "updated": updated, "notFound": not_found},
+    )
+    await db.commit()
+    return BulkSaleResponse(updated=updated, not_found=not_found)
+
+
+def _sale_public(product) -> ProductSalePublic:
+    return ProductSalePublic(
+        product_uuid=product.sicar_uuid,
+        price=float(product.price),
+        compare_at_price=float(product.compare_at_price) if product.compare_at_price is not None else None,
+        sale_ends_at=product.sale_ends_at,
+        is_on_sale=product.is_on_sale,
+    )
+
+
+@router.put("/{product_uuid}/sale", response_model=ProductSalePublic, summary="Capturar el precio anterior (oferta) de un producto")
+async def admin_set_product_sale(product_uuid: str, db: DbDep, current: CurrentAdminDep, data: ProductSaleSetRequest = Body()):
+    """`compareAtPrice` es el precio ANTERIOR con IVA (lo que se muestra tachado); el precio
+    con descuento sigue siendo el `price` de Sicar X. `422` si no es mayor que el price
+    actual o si `saleEndsAt` ya paso; `404` si el producto no existe."""
+    product = await sale_service.set_sale(db, product_uuid, data.compare_at_price, data.sale_ends_at)
+    await audit_service.log_action(
+        db, current, "product.sale_set", "product", product_uuid,
+        {"compareAtPrice": data.compare_at_price, "saleEndsAt": data.sale_ends_at.isoformat() if data.sale_ends_at else None},
+    )
+    await db.commit()
+    return _sale_public(product)
+
+
+@router.delete("/{product_uuid}/sale", status_code=status.HTTP_204_NO_CONTENT, summary="Quitar la oferta de un producto")
+async def admin_clear_product_sale(product_uuid: str, db: DbDep, current: CurrentAdminDep):
+    """Idempotente: quitarla de un producto sin oferta tambien es `204`."""
+    await sale_service.clear_sale(db, product_uuid)
+    await audit_service.log_action(db, current, "product.sale_clear", "product", product_uuid)
+    await db.commit()
 
 
 @router.get("/{product_uuid}/attributes", response_model=ProductAttributesResponse, summary="Ver los atributos guardados de un producto")

@@ -34,6 +34,16 @@ class ClientAccount(Base):
     # texto libre que decide el frontend (fecha/version del texto legal); el backend no lo valida.
     terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     terms_accepted_version = Column(String, nullable=True)
+    # Consentimiento para correos de marketing (baja de precio en favoritos, carrito
+    # abandonado). false por defecto para TODAS las cuentas, incluidas las anteriores a este
+    # campo: solo se activa si la persona lo acepta al registrarse o en "Mi cuenta", y se
+    # apaga con el enlace de baja (POST /notifications/unsubscribe). marketing_emails_updated_at
+    # es la evidencia de cuando cambio por ultima vez. Ver "Correos de marketing" en CLAUDE.md.
+    marketing_emails = Column(Boolean, nullable=False, default=False, server_default=text("false"))
+    marketing_emails_updated_at = Column(DateTime(timezone=True), nullable=True)
+    # Ultimo webhook wishlist-price-drop encolado para esta cuenta - tope de uno por dia
+    # (wishlist_price_drop_worker.py).
+    last_price_drop_email_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
 

@@ -37,6 +37,8 @@ async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccou
         # terms_accepted ya viene garantizado True por ClientRegister.validate_terms_accepted.
         terms_accepted_at=datetime.now(timezone.utc),
         terms_accepted_version=data.terms_version,
+        marketing_emails=data.marketing_emails,
+        marketing_emails_updated_at=datetime.now(timezone.utc),
     )
     db.add(client)
     try:
@@ -89,6 +91,10 @@ async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpd
     if data.phone is not None:
         client.phone = data.phone
 
+    if data.marketing_emails is not None and data.marketing_emails != client.marketing_emails:
+        client.marketing_emails = data.marketing_emails
+        client.marketing_emails_updated_at = datetime.now(timezone.utc)
+
     await db.commit()
     await db.refresh(client)
     await client.awaitable_attrs.addresses  # necesario para serializar ClientPublic.addresses
@@ -112,7 +118,7 @@ async def accept_terms(db: AsyncSession, client: ClientAccount, terms_version: s
     logger.info(f"Términos y Condiciones aceptados (versión {terms_version}): {client.email}")
     return client
 
-async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity) -> ClientAccount:
+async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity, marketing_emails: bool = False) -> ClientAccount:
     """Resuelve la cuenta local para un identity de Google verificado. No se auto-vincula por email a una cuenta existente (el registro local no prueba propiedad del correo) - responde 409 y pide iniciar sesion con contraseña."""
     client = await db.scalar(select(ClientAccount).where(ClientAccount.google_sub == identity["sub"]))
     if client:
@@ -135,6 +141,8 @@ async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity
         google_sub=identity["sub"],
         is_verified=identity["email_verified"],
         email_verified_at=datetime.now(timezone.utc) if identity["email_verified"] else None,
+        marketing_emails=marketing_emails,
+        marketing_emails_updated_at=datetime.now(timezone.utc),
     )
     db.add(client)
     await db.flush()

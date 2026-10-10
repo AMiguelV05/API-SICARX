@@ -19,3 +19,7 @@ class Cart(Base):
     coupon_code = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
+    # Ultimo webhook cart-abandoned encolado (abandoned_cart_worker.py). OJO: escribirla con
+    # un UPDATE core que fije updated_at a su propio valor - via ORM, onupdate moveria
+    # updated_at y el carrito pareceria "cambiado despues del correo".
+    abandoned_notified_at = Column(DateTime(timezone=True), nullable=True)

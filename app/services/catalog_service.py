@@ -12,7 +12,7 @@ def _escape_ilike(text: str) -> str:
     """Escapa %/_ (y la propia barra invertida) para que no se interpreten como comodines ILIKE."""
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
-async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand=None, has_brand=None):
+async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand=None, has_brand=None, on_sale=None):
     """Filtros compartidos entre la busqueda principal (word-AND) y el fallback tolerante a
     errores de tipeo de mas abajo - misma logica que get_local_catalog, factorizada aqui para
     no duplicarla entre las dos consultas de search_products."""
@@ -40,6 +40,9 @@ async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, categor
         stmt = stmt.where(func.lower(Product.brand) == brand.lower())
 
     stmt = _apply_has_brand(stmt, has_brand)
+
+    if on_sale:
+        stmt = stmt.where(Product.is_on_sale)
 
     return stmt
 
@@ -90,6 +93,9 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     if filters.get("tag"):
         stmt = stmt.where(Product.tags.contains([filters["tag"]]))
 
+    if filters.get("on_sale"):
+        stmt = stmt.where(Product.is_on_sale)
+
     sort_by = filters.get("sort_by")
     if sort_by == "price_asc":
         stmt = stmt.order_by(Product.price.asc())
@@ -135,7 +141,7 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
         "docs": products
     }
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None, has_brand: bool = None):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None, has_brand: bool = None, on_sale: bool = None):
     """Busqueda por palabras: cada palabra de `q` debe aparecer (ILIKE, insensible a acentos via
     immutable_unaccent, migracion f1a3c7e9b2d4) en sku O name - sin exigir que la frase completa
     sea una sola subcadena contigua ni que las palabras esten en el mismo orden/campo. Esto es lo
@@ -182,7 +188,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         Product.is_active == True,
         and_(*[word_match(w) for w in escaped_words]),
     )
-    stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand)
+    stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand, on_sale)
 
     def apply_sort(stmt, relevance_priority):
         if sort_by == "price_asc":
@@ -255,7 +261,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
             Product.is_active == True,
             and_(*[word_fuzzy_match(wb) for wb in word_binds]),
         )
-        fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand)
+        fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand, on_sale)
         fallback_stmt = apply_sort(fallback_stmt, fuzzy_score.desc())
 
         paged_fallback_stmt = fallback_stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)

@@ -77,7 +77,7 @@ async def google_login(request: Request, response: Response, db: DbDep, data: Go
     contraseña en ese caso. Cuentas creadas así ya quedan verificadas.
     """
     identity = await verify_google_id_token(data.id_token)
-    client = await get_or_create_google_client(db, identity)
+    client = await get_or_create_google_client(db, identity, data.marketing_emails)
     return await _build_auth_response(db, client, data.cart_token, response)
 
 @router.post("/auth/verify-email", response_model=ClientPublic, summary="Confirmar verificación de correo")
