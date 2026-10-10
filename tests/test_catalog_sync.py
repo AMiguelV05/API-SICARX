@@ -5,10 +5,20 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
+import pytest
 from sqlalchemy import select, text
 
 from app.models.product import Product
 from tests.conftest import make_product
+
+
+@pytest.fixture(autouse=True)
+def _reset_hidden_refresh(monkeypatch):
+    """_last_full_hidden_refresh es global del modulo y cada pasada exitosa lo actualiza: sin
+    reiniciarlo, el modo (revision completa o solo nuevos) de un test dependeria del anterior."""
+    from app.worker import sync_task
+
+    monkeypatch.setattr(sync_task, "_last_full_hidden_refresh", None)
 
 
 def _sicar_values(product: Product, **overrides) -> dict:
@@ -103,17 +113,23 @@ async def test_missing_products_are_marked_deleted(db):
     assert (await _reload(db, already_deleted)).deleted_at == datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _mock_sicar(monkeypatch, pages: list[list[dict]]) -> None:
+def _mock_sicar(monkeypatch, pages: list[list[dict]], hidden: set[str] = frozenset(), hidden_status: int = 200) -> list[str]:
     """Sustituye la API de Sicar X: /product/list devuelve `pages` en orden y luego 204;
-    la consulta GraphQL de `hidden` responde que nada esta oculto."""
+    la consulta GraphQL de `hidden` responde con `hidden_status` y marca ocultos los uuids de
+    `hidden`. Devuelve la lista (que se va llenando) de cuerpos enviados a GraphQL."""
     from app.worker import sync_task
 
     remaining = list(pages)
+    graphql_bodies: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/product/list"):
             return httpx.Response(200, json=remaining.pop(0)) if remaining else httpx.Response(204)
-        return httpx.Response(200, json={"data": {"products": []}})
+        body = request.content.decode()
+        graphql_bodies.append(body)
+        if hidden_status != 200:
+            return httpx.Response(hidden_status)
+        return httpx.Response(200, json={"data": {"products": [{"uuid": u, "hidden": True} for u in hidden if u in body]}})
 
     real_client = httpx.AsyncClient
 
@@ -122,6 +138,7 @@ def _mock_sicar(monkeypatch, pages: list[list[dict]]) -> None:
 
     monkeypatch.setattr(sync_task.httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
     monkeypatch.setattr(sync_task.sicar_auth, "get_token", fake_token)
+    return graphql_bodies
 
 
 def _sicar_item(product: Product, **overrides) -> dict:
@@ -158,6 +175,59 @@ async def test_full_pass_only_touches_changes(db, monkeypatch):
     assert await _ctid(db, same) == same_ctid
     assert (await _reload(db, restocked)).stock == Decimal("25")
     assert (await _reload(db, gone)).is_deleted is True
+
+
+async def test_regular_pass_checks_hidden_only_for_new_products(db, monkeypatch):
+    """Fuera de la revision completa horaria solo se consulta `hidden` de productos nuevos
+    (egress) y los ya guardados conservan su is_active."""
+    from app.worker.sync_task import sync_sicar_catalog
+
+    hidden_stored = await _add(db, is_active=False)
+    visible_stored = await _add(db)
+    new = make_product(is_bulk=False)
+
+    bodies = _mock_sicar(
+        monkeypatch,
+        [[_sicar_item(hidden_stored), _sicar_item(visible_stored), _sicar_item(new)]],
+        hidden={new.sicar_uuid, visible_stored.sicar_uuid},
+    )
+    await sync_sicar_catalog(db, refresh_hidden=False)
+
+    assert len(bodies) == 1
+    assert new.sicar_uuid in bodies[0]
+    assert hidden_stored.sicar_uuid not in bodies[0] and visible_stored.sicar_uuid not in bodies[0]
+    assert (await _reload(db, hidden_stored)).is_active is False
+    assert (await _reload(db, visible_stored)).is_active is True
+    assert await db.scalar(select(Product.is_active).where(Product.sicar_uuid == new.sicar_uuid)) is False
+
+
+async def test_full_refresh_updates_hidden_status(db, monkeypatch):
+    from app.worker import sync_task
+
+    now_hidden = await _add(db)
+    now_visible = await _add(db, is_active=False)
+
+    _mock_sicar(monkeypatch, [[_sicar_item(now_hidden), _sicar_item(now_visible)]], hidden={now_hidden.sicar_uuid})
+    await sync_task.sync_sicar_catalog(db)
+
+    assert (await _reload(db, now_hidden)).is_active is False
+    assert (await _reload(db, now_visible)).is_active is True
+    # Una revision completa exitosa reinicia el intervalo: la siguiente pasada ya no la repite.
+    assert sync_task._full_hidden_refresh_due(datetime.now(timezone.utc)) is False
+
+
+async def test_failed_hidden_check_keeps_stored_status(db, monkeypatch):
+    """Si la consulta de `hidden` falla no se re-publican productos ocultos, y la revision
+    completa queda pendiente para la siguiente pasada."""
+    from app.worker import sync_task
+
+    hidden_stored = await _add(db, is_active=False)
+
+    _mock_sicar(monkeypatch, [[_sicar_item(hidden_stored)]], hidden_status=500)
+    await sync_task.sync_sicar_catalog(db)
+
+    assert (await _reload(db, hidden_stored)).is_active is False
+    assert sync_task._full_hidden_refresh_due(datetime.now(timezone.utc)) is True
 
 
 async def test_empty_catalog_does_not_delete_everything(db, monkeypatch):

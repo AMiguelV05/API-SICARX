@@ -14,7 +14,7 @@ from app.services import admin_notification_service
 # Necesario para que SQLAlchemy resuelva el ForeignKey de Product.variant_group_uuid -
 # sin este import falla con "could not find table 'variant_groups'".
 from app.models.attribute import VariantGroup  # noqa: F401
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from app.core.config import settings
 from app.services.sicar_auth import sicar_auth
 from app.core.sicar_headers import bearer_json_headers, graphql_bearer_headers
@@ -63,8 +63,24 @@ GRAPHQL_URL = "https://api.sicarx.com/graph/v1/"
 PRICE_LIST_ID = settings.SICAR_PRICE_LIST_ID
 MAX_RETRIES = 4
 
+# Cada consulta de `hidden` manda los 300 uuids de la pagina en el cuerpo (~11.7 KB). Hacerlo
+# para todo el catalogo en cada pasada de 5 min eran ~1 GB/dia de egress en Railway (que cobra
+# lo que sale, no lo que entra). Por eso la revision completa corre a lo mucho una vez por
+# hora; en las demas pasadas solo se consulta a los productos nuevos y el resto conserva el
+# is_active guardado. Ocultar (o volver a mostrar) un producto en Sicar X tarda asi hasta una
+# hora en reflejarse en la tienda.
+HIDDEN_REFRESH_INTERVAL = timedelta(hours=1)
+_last_full_hidden_refresh: datetime | None = None
 
-async def _fetch_hidden_map(client: httpx.AsyncClient, uuids: list) -> dict:
+
+def _full_hidden_refresh_due(now: datetime) -> bool:
+    return _last_full_hidden_refresh is None or now - _last_full_hidden_refresh >= HIDDEN_REFRESH_INTERVAL
+
+
+async def _fetch_hidden_map(client: httpx.AsyncClient, uuids: list) -> dict | None:
+    """{uuid: hidden} para `uuids`, o None si la consulta fallo - el llamador conserva entonces
+    el is_active guardado en vez de asumir que todo es visible (lo que re-publicaba productos
+    ocultos cada vez que Sicar X fallaba)."""
     safe_uuids = [u for u in uuids if is_safe_sicar_id(u)]
     if not safe_uuids:
         return {}
@@ -87,19 +103,19 @@ async def _fetch_hidden_map(client: httpx.AsyncClient, uuids: list) -> dict:
         response = await request_with_backoff(call_with_auth, max_attempts=2, context="Sicar X hidden status en bloque")
 
         if response.status_code != 200:
-            logger.warning(f"No se pudo obtener el estado 'hidden' en bloque (status {response.status_code}). Se asumira visible para este bloque.")
-            return {}
+            logger.warning(f"No se pudo obtener el estado 'hidden' en bloque (status {response.status_code}). Se conserva el estado guardado para este bloque.")
+            return None
 
         data = response.json()
         if "errors" in data:
             logger.warning(f"Errores GraphQL consultando 'hidden' en bloque: {data['errors']}")
-            return {}
+            return None
 
         products = data.get("data", {}).get("products") or []
         return {p["uuid"]: bool(p.get("hidden", False)) for p in products if p.get("uuid")}
     except httpx.RequestError as e:
         logger.warning(f"Error de red consultando el estado 'hidden' en bloque: {e}")
-        return {}
+        return None
 
 PRICE_QUANTUM = Decimal("0.01")
 STOCK_QUANTUM = Decimal("0.001")
@@ -112,20 +128,24 @@ _COMPARED_FIELDS = (
 )
 
 
-async def _changed_product_values(db: AsyncSession, product_values: list[dict]) -> list[dict]:
+async def _load_stored(db: AsyncSession, uuids: list) -> dict:
+    """{sicar_uuid: fila con _COMPARED_FIELDS} de los productos ya guardados de `uuids`."""
+    columns = [getattr(Product, f) for f in _COMPARED_FIELDS]
+    result = await db.execute(select(Product.sicar_uuid, *columns).where(Product.sicar_uuid.in_(uuids)))
+    return {row.sicar_uuid: row for row in result.all()}
+
+
+async def _changed_product_values(db: AsyncSession, product_values: list[dict], stored: dict | None = None) -> list[dict]:
     """Filtra la pagina a los productos nuevos o con algun campo distinto al guardado.
+    `stored` (de _load_stored) evita repetir la consulta si el llamador ya la hizo.
 
     Reescribir las ~87k filas cada 5 minutos, cambiaran o no, generaba ~400 MB de WAL por
     pasada (last_sync_id esta indexado, asi que ninguna era HOT y cada una reescribia todos
     los indices, incluidos los GIN de trigramas). Se compara en Python y no con un WHERE en
     el ON CONFLICT porque Postgres bloquea la fila en conflicto antes de evaluar ese WHERE,
     y ese bloqueo tambien escribe WAL."""
-    columns = [getattr(Product, f) for f in _COMPARED_FIELDS]
-    result = await db.execute(
-        select(Product.sicar_uuid, *columns)
-        .where(Product.sicar_uuid.in_([v["sicar_uuid"] for v in product_values]))
-    )
-    stored = {row.sicar_uuid: row for row in result.all()}
+    if stored is None:
+        stored = await _load_stored(db, [v["sicar_uuid"] for v in product_values])
 
     changed = []
     for values in product_values:
@@ -166,7 +186,15 @@ async def _mark_missing_as_deleted(db: AsyncSession, seen_uuids: set[str]) -> in
     return result.rowcount
 
 
-async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
+async def sync_sicar_catalog(db: AsyncSession, offset: int = 0, refresh_hidden: bool | None = None):
+    """`refresh_hidden`: True consulta `hidden` para todo el catalogo, False solo para los
+    productos nuevos, None lo decide HIDDEN_REFRESH_INTERVAL."""
+    global _last_full_hidden_refresh
+    started_at = datetime.now(timezone.utc)
+    if refresh_hidden is None:
+        refresh_hidden = _full_hidden_refresh_due(started_at)
+    hidden_failed = False
+
     items_per_page = 300
     total_procesados = 0
     has_more_products = True
@@ -248,7 +276,22 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 has_more_products = False
                 break
 
-            hidden_map = await _fetch_hidden_map(client, [p.get("uuid") for p in items if p.get("uuid")])
+            page_uuids = [p.get("uuid") for p in items if p.get("uuid")]
+            stored = await _load_stored(db, page_uuids)
+            to_check = page_uuids if refresh_hidden else [u for u in page_uuids if u not in stored]
+            hidden_map = await _fetch_hidden_map(client, to_check) if to_check else {}
+            if hidden_map is None:
+                hidden_failed = True
+                checked: set = set()
+                hidden_map = {}
+            else:
+                checked = set(to_check)
+
+            def is_active(uuid) -> bool:
+                if uuid in checked:
+                    return not hidden_map.get(uuid, False)
+                row = stored.get(uuid)
+                return row.is_active if row is not None else True
 
             product_values = []
             for p in items:
@@ -271,7 +314,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                     "department_uuid": p.get("departmentUuid"),
                     "category_uuid": p.get("categoryUuid"),
                     "is_bulk": p.get("bulk", False),
-                    "is_active": not hidden_map.get(p.get("uuid"), False),
+                    "is_active": is_active(p.get("uuid")),
                     "price": Decimal(str(prices_obj.get(price_key, 0.0))).quantize(PRICE_QUANTUM, rounding=ROUND_HALF_UP),
                     "stock": Decimal(str(p.get("stock", 0.0))).quantize(STOCK_QUANTUM, rounding=ROUND_HALF_UP),
                     "is_deleted": False,
@@ -280,7 +323,7 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
                 })
             seen_uuids.update(v["sicar_uuid"] for v in product_values if v["sicar_uuid"])
             if product_values:
-                changed = await _changed_product_values(db, product_values)
+                changed = await _changed_product_values(db, product_values, stored)
                 if changed:
                     await _upsert_products(db, changed)
                     await db.commit()
@@ -290,7 +333,14 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0):
             logger.debug(f"Bloque procesado. Total en base de datos local: {total_procesados} productos.")
             
             offset += len(items)
-        logger.info(f"Sincronizacion finalizada. {total_cambiados} de {total_procesados} productos cambiaron.")
+        logger.info(
+            f"Sincronizacion finalizada. {total_cambiados} de {total_procesados} productos cambiaron "
+            f"(estado 'hidden': {'revision completa' if refresh_hidden else 'solo nuevos'})."
+        )
+
+    # Una revision completa con bloques fallidos no cuenta: se reintenta en la siguiente pasada.
+    if refresh_hidden and sync_completed_successfully and not hidden_failed:
+        _last_full_hidden_refresh = started_at
 
     deactivated_count = 0
     if sync_completed_successfully and not seen_uuids:
