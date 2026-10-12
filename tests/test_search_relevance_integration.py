@@ -177,7 +177,7 @@ async def test_http_endpoints(indexed):
         assert response.status_code == 200
         body = response.json()
         assert len(body["products"]) <= 3
-        assert set(body["products"][0]) == {"sicarUuid", "sku", "name", "imageUrl", "price"}
+        assert set(body["products"][0]) == {"sicarUuid", "sku", "name", "imageUrl", "price", "compareAtPrice", "saleEndsAt"}
         assert body["brands"][0]["name"] == "Truper"
 
         assert (await client.get("/v1/search/suggest", params={"q": ""}, headers=headers)).status_code == 422
