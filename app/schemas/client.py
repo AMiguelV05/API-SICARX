@@ -1,11 +1,13 @@
 import re
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import EmailStr, Field, field_validator, model_validator
 from app.schemas.base import CamelModel
 from app.schemas.cart import CartResponse
 
 _ZIP_CODE_RE = re.compile(r"^\d{5}$")
+
+_PRIVACY_NOTICE_VERSION_DESCRIPTION = "Version vigente del aviso de privacidad que vio la persona (constante PRIVACY_NOTICE_VERSION del frontend, p. ej. \"2026-10-12\"). Se guarda en el historial de consentimiento de marketing."
 
 def _validate_zip_code(v: Optional[str]) -> Optional[str]:
     if v is not None and not _ZIP_CODE_RE.match(v):
@@ -21,6 +23,8 @@ class ClientRegister(CamelModel):
     terms_accepted: bool = Field(description="Debe ser explícitamente true - el usuario aceptó los Términos y Condiciones / Aviso de Privacidad")
     terms_version: str = Field(min_length=1, description="Versión de los Términos y Condiciones aceptada (texto libre, lo decide el frontend)")
     marketing_emails: bool = Field(default=False, description="Acepta recibir correos de marketing (baja de precio en favoritos, carrito abandonado). Por defecto false.")
+    marketing_consent_source: Literal["register_checkbox"] = Field(default="register_checkbox", description="Como se dio el consentimiento. En el registro solo puede ser register_checkbox; se registra aunque marketingEmails sea false.")
+    privacy_notice_version: Optional[str] = Field(default=None, max_length=64, description=_PRIVACY_NOTICE_VERSION_DESCRIPTION)
 
     @model_validator(mode="after")
     def validate_terms_accepted(self):
@@ -37,6 +41,8 @@ class GoogleLogin(CamelModel):
     id_token: str = Field(min_length=1, description="ID token JWT emitido por Google Identity Services del lado del frontend")
     cart_token: Optional[str] = Field(default=None, description="cartToken de un carrito anonimo a fusionar, si existe")
     marketing_emails: bool = Field(default=False, description="Solo se aplica si este login CREA la cuenta; en una cuenta existente se ignora (usar PATCH /auth/me).")
+    marketing_consent_source: Literal["google_signup"] = Field(default="google_signup", description="Como se dio el consentimiento. Con Google solo puede ser google_signup; solo se registra si este login crea la cuenta.")
+    privacy_notice_version: Optional[str] = Field(default=None, max_length=64, description=_PRIVACY_NOTICE_VERSION_DESCRIPTION)
 
 class VerifyEmailRequest(CamelModel):
     token: str = Field(min_length=1, description="Token de verificación recibido por correo")
@@ -111,6 +117,10 @@ class ClientPublic(CamelModel):
     terms_accepted_at: Optional[datetime] = Field(default=None, description="Momento en que se aceptaron los Términos y Condiciones. Null si nunca se aceptaron (cuenta previa a este campo, o vía Google).")
     terms_accepted_version: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada.")
     marketing_emails: bool = Field(default=False, description="Si acepta correos de marketing. Se cambia con PATCH /auth/me o con el enlace de baja de los correos.")
+    marketing_consent_at: Optional[datetime] = Field(
+        default=None, validation_alias="marketing_emails_updated_at", serialization_alias="marketingConsentAt",
+        description="Momento (UTC) del ultimo cambio de marketingEmails, para mostrar \"Activo desde...\". Null si nunca se ha registrado.",
+    )
 
 class ClientAuthResponse(CamelModel):
     token: str
@@ -122,4 +132,6 @@ class ClientUpdate(CamelModel):
     phone: Optional[str] = Field(default=None, description="Nuevo teléfono, si se quiere cambiar")
     current_password: Optional[str] = Field(default=None, description="Contraseña actual, requerida solo si se envía new_password")
     new_password: Optional[str] = Field(default=None, min_length=8, description="Nueva contraseña, mínimo 8 caracteres")
-    marketing_emails: Optional[bool] = Field(default=None, description="Activa/desactiva los correos de marketing.")
+    marketing_emails: Optional[bool] = Field(default=None, description="Activa/desactiva los correos de marketing. Si cambia, queda en el historial de consentimiento.")
+    marketing_consent_source: Literal["account_toggle"] = Field(default="account_toggle", description="Como se dio el cambio. Aqui solo puede ser account_toggle.")
+    privacy_notice_version: Optional[str] = Field(default=None, max_length=64, description=_PRIVACY_NOTICE_VERSION_DESCRIPTION)

@@ -52,7 +52,7 @@ def build_filter_by(*, department_uuid: Optional[str] = None, category_uuid: Opt
                     category_uuids: Optional[list[str]] = None, vehicle_uuid: Optional[str] = None,
                     brand: Optional[str] = None, has_brand: Optional[bool] = None,
                     in_stock: Optional[bool] = False, on_sale: Optional[bool] = None,
-                    now_epoch: Optional[int] = None) -> str:
+                    min_price=None, max_price=None, now_epoch: Optional[int] = None) -> str:
     """Mismos filtros y misma semantica que catalog_service._apply_search_filters.
     `category_uuids` ya viene expandido con descendientes (taxonomyUuid)."""
     clauses = []
@@ -77,21 +77,44 @@ def build_filter_by(*, department_uuid: Optional[str] = None, category_uuid: Opt
         # oferta, o SALE_NO_END si no tiene fin - "vigente ahora" = sale_until > ahora.
         now = now_epoch if now_epoch is not None else int(time.time())
         clauses.append(f"sale_until:>{now}")
+    if min_price is not None:
+        clauses.append(f"price:>={float(min_price)}")
+    if max_price is not None:
+        clauses.append(f"price:<={float(max_price)}")
     return " && ".join(clauses)
 
 
+def _tiebreak_eval(criteria: list[str]) -> str:
+    """_eval lexicografico sobre filtros booleanos, en orden de importancia.
+
+    Typesense NO suma los pesos de las clausulas que cumple un documento: le asigna el de una
+    sola (comprobado contra Typesense 28: con (in_stock):2 y (has_image):1 sueltos, un producto
+    con ambos empataba con uno que solo tenia existencia). Por eso cada combinacion va como su
+    propia clausula, de la mas alta a la mas baja: el puntaje es la mascara de bits de los
+    criterios cumplidos (el primero es el bit mas alto), que da el mismo orden tanto si
+    Typesense toma la primera clausula que cumple como la de mayor puntaje."""
+    n = len(criteria)
+    clauses = []
+    for mask in range(2**n - 1, 0, -1):
+        terms = [c for i, c in enumerate(criteria) if mask & (1 << (n - 1 - i))]
+        clauses.append(f"({' && '.join(terms)}):{mask}")
+    return f"_eval([{', '.join(clauses)}]):desc"
+
+
 def _relevance_sort(words: list[str]) -> str:
-    """A igual coincidencia de texto (empates frecuentes: casi todo el catalogo tiene
-    sales_count 0), desempata por "tipo de producto" y disponibilidad en un solo campo
-    _eval ponderado: nombre que EMPIEZA con una palabra de la consulta (peso 3) + en
-    existencia (peso 1); luego popularidad. Asi "martillo" pone los martillos antes que
-    "Engrapadora tipo martillo", y "llave 10mm" las llaves antes que los candados."""
+    """La coincidencia de texto manda; a igual coincidencia (empates frecuentes: casi todo el
+    catalogo tiene sales_count 0) desempata un solo _eval (Typesense admite solo 3 criterios
+    en sort_by), en este orden estricto:
+    1. nombre que EMPIEZA con una palabra de la consulta: "martillo" pone los martillos antes
+       que "Engrapadora tipo martillo";
+    2. con existencia, y 3. con foto: agotados y sin foto al final.
+    Luego popularidad."""
     content = [w for w in words if w not in search_index.STOPWORDS]
-    if not content:
-        return "_text_match:desc,_eval(in_stock:=true):desc,sales_count:desc"
-    first_words = ",".join(_quote(w) for w in dict.fromkeys(content))
-    return (f"_text_match:desc,_eval([(name_first:=[{first_words}]):3, (in_stock:=true):1]):desc,"
-            "sales_count:desc")
+    criteria = ["in_stock:=true", "has_image:=true"]
+    if content:
+        first_words = ",".join(_quote(w) for w in dict.fromkeys(content))
+        criteria.insert(0, f"name_first:=[{first_words}]")
+    return f"_text_match:desc,{_tiebreak_eval(criteria)},sales_count:desc"
 
 
 def build_search_params(normalized_q: str, *, filter_by: str, sort_by: Optional[str],
@@ -132,6 +155,25 @@ def _exact_sku_search(raw_q: str, filter_by: str) -> dict[str, Any]:
     }
 
 
+def _price_stats_search(normalized_q: str, filter_by: str) -> dict[str, Any]:
+    """Misma consulta de texto y mismos filtros SIN minPrice/maxPrice, sin hits: solo las
+    stats (min/max) del facet de price, para priceRange. price > 0 por la misma razon que
+    catalog_service._MIN_PRICE."""
+    params = build_search_params(normalized_q, filter_by=filter_by, sort_by=None, limit=0, offset=0)
+    for key in ("limit", "offset", "sort_by", "include_fields"):
+        params.pop(key)
+    params["filter_by"] = f"{filter_by} && price:>0" if filter_by else "price:>0"
+    return {**params, "per_page": 0, "facet_by": "price", "max_facet_values": 1}
+
+
+def _price_range_from_stats(result: dict[str, Any]) -> Optional[dict[str, float]]:
+    facet = next((f for f in result.get("facet_counts", []) if f.get("field_name") == "price"), None)
+    stats = (facet or {}).get("stats") or {}
+    if result.get("found", 0) == 0 or stats.get("min") is None or stats.get("max") is None:
+        return None
+    return {"min": float(stats["min"]), "max": float(stats["max"])}
+
+
 async def hydrate(db: AsyncSession, ids: list[str]) -> list[Product]:
     """Productos de Postgres en el orden dado por Typesense. Un id que ya no este activo (se
     desactivo en los ~30s antes de reindexarse) simplemente se omite."""
@@ -150,6 +192,7 @@ async def _postgres_search(db: AsyncSession, f: SearchFilter) -> dict[str, Any]:
         department_uuid=f.department_uuid, category_uuid=f.category_uuid,
         taxonomy_uuid=f.taxonomy_uuid, vehicle_uuid=f.vehicle_uuid,
         brand=f.brand, has_brand=f.has_brand, in_stock=f.in_stock, on_sale=f.on_sale, sort_by=f.sort_by,
+        min_price=f.min_price, max_price=f.max_price,
     )
 
 
@@ -168,20 +211,25 @@ async def search(db: AsyncSession, f: SearchFilter) -> dict[str, Any]:
         category_uuids = await get_descendant_uuids(db, f.taxonomy_uuid)
         if not category_uuids:
             # Nodo inexistente: Postgres devuelve vacio (IN de una lista vacia) - igual aqui.
-            return {"total": 0, "docs": []}
+            return {"total": 0, "docs": [], "price_range": None}
 
-    filter_by = build_filter_by(
+    base_filters = dict(
         department_uuid=f.department_uuid, category_uuid=f.category_uuid,
         category_uuids=category_uuids, vehicle_uuid=f.vehicle_uuid,
         brand=f.brand, has_brand=f.has_brand, in_stock=f.in_stock, on_sale=f.on_sale,
     )
+    # Un solo "ahora" para los dos filter_by, para que onSale signifique lo mismo en ambos.
+    now_epoch = int(time.time())
+    filter_by = build_filter_by(**base_filters, min_price=f.min_price, max_price=f.max_price, now_epoch=now_epoch)
+    unpriced_filter_by = build_filter_by(**base_filters, now_epoch=now_epoch)
     normalized_q = search_index.normalize_search_text(f.q).strip()
     if not normalized_q:
-        return {"total": 0, "docs": []}
+        return {"total": 0, "docs": [], "price_range": None}
 
     main = {"collection": search_index.ALIAS,
             **build_search_params(normalized_q, filter_by=filter_by, sort_by=f.sort_by, limit=f.limit, offset=f.offset)}
-    searches = [main]
+    # Orden fijo: [principal, stats de precio, pin de SKU (solo pagina 1)].
+    searches = [main, {"collection": search_index.ALIAS, **_price_stats_search(normalized_q, unpriced_filter_by)}]
     pin = f.offset == 0
     if pin:
         searches.append({"collection": search_index.ALIAS, **_exact_sku_search(f.q, filter_by)})
@@ -194,8 +242,9 @@ async def search(db: AsyncSession, f: SearchFilter) -> dict[str, Any]:
 
     ids = [hit["document"]["id"] for hit in results[0].get("hits", [])]
     total = results[0].get("found", 0)
+    price_range = _price_range_from_stats(results[1])
     if pin:
-        pinned = [hit["document"]["id"] for hit in results[1].get("hits", [])]
+        pinned = [hit["document"]["id"] for hit in results[2].get("hits", [])]
         if pinned:
             if pinned[0] in ids:
                 ids.remove(pinned[0])
@@ -206,7 +255,7 @@ async def search(db: AsyncSession, f: SearchFilter) -> dict[str, Any]:
             # la siguiente (solo pasa en busquedas por SKU, que rara vez paginan).
             ids = (pinned[:1] + ids)[:f.limit]
 
-    return {"total": total, "docs": await hydrate(db, ids)}
+    return {"total": total, "docs": await hydrate(db, ids), "price_range": price_range}
 
 
 async def suggest(db: AsyncSession, q: str, limit: int) -> dict[str, Any]:

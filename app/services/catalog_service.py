@@ -46,6 +46,81 @@ async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, categor
 
     return stmt
 
+# Orden por defecto ("relevance"): primero lo que se puede comprar y se ve bien - con
+# existencia antes que agotado, con foto antes que sin foto - y despues el criterio propio de
+# cada endpoint. Product.id al final de todo orden: sales_count/name/price se repiten mucho
+# (casi todo el catalogo tiene sales_count 0), y sin un desempate unico Postgres puede
+# devolver los empates en distinto orden entre dos consultas, repitiendo o saltando
+# productos entre paginas consecutivas.
+_IN_STOCK_FIRST = (Product.available_stock > 0).desc()
+_WITH_IMAGE_FIRST = and_(Product.image_url.isnot(None), Product.image_url != "").desc()
+
+
+def _apply_price_range(stmt, min_price, max_price):
+    """minPrice/maxPrice inclusivos, sobre el precio que se cobra (price, con IVA) - nunca
+    compareAtPrice."""
+    if min_price is not None:
+        stmt = stmt.where(Product.price >= min_price)
+    if max_price is not None:
+        stmt = stmt.where(Product.price <= max_price)
+    return stmt
+
+
+# priceRange: precios > 0 nada mas - un producto que la sincronizacion dejo en 0.00 no se
+# puede comprar (validate_cart_items lo rechaza) y no debe estirar el limite inferior.
+_MIN_PRICE = func.min(Product.price).filter(Product.price > 0)
+_MAX_PRICE = func.max(Product.price).filter(Product.price > 0)
+
+
+def _price_range_dict(min_value, max_value):
+    if min_value is None or max_value is None:
+        return None
+    return {"min": float(min_value), "max": float(max_value)}
+
+
+async def _fetch_page(db: AsyncSession, stmt, unpriced_stmt, limit: int, offset: int, price_filtered: bool):
+    """Pagina + total + priceRange.
+
+    count(*) OVER() en la MISMA consulta que trae la pagina, en vez de un SELECT COUNT(*)
+    aparte contra una subconsulta identica - una sola ida a Postgres en el camino comun. El
+    total sigue siendo sobre el conjunto filtrado COMPLETO (antes de LIMIT/OFFSET): la ventana
+    no lleva PARTITION BY/ORDER BY.
+
+    priceRange es el rango del conjunto filtrado SIN el propio filtro de precio
+    (`unpriced_stmt`), para que el control del frontend muestre los limites reales. Sin
+    filtro de precio sale de la misma ventana (gratis: la ventana ya recorre todas las
+    filas); con filtro de precio hace falta una consulta aparte sobre `unpriced_stmt`."""
+    columns = [func.count().over().label("total_count")]
+    if not price_filtered:
+        columns += [_MIN_PRICE.over().label("min_price"), _MAX_PRICE.over().label("max_price")]
+    result = await db.execute(stmt.add_columns(*columns).limit(limit).offset(offset))
+    rows = result.all()
+    products = [row[0] for row in rows]
+
+    if rows:
+        total_items = rows[0].total_count
+    elif offset == 0:
+        # Sin filas y sin offset: el filtro genuinamente no matchea nada.
+        total_items = 0
+    else:
+        # offset mas alla del conjunto filtrado: la ventana no viene en ninguna fila, asi que
+        # el total sale de un COUNT(*) aparte - el precio lo paga solo este caso.
+        total_items = await db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery()))
+
+    if rows and not price_filtered:
+        price_range = _price_range_dict(rows[0].min_price, rows[0].max_price)
+    elif not price_filtered and total_items == 0:
+        price_range = None
+    else:
+        sub = unpriced_stmt.order_by(None).subquery()
+        bounds = (await db.execute(select(
+            func.min(sub.c.price).filter(sub.c.price > 0), func.max(sub.c.price).filter(sub.c.price > 0),
+        ))).one()
+        price_range = _price_range_dict(*bounds)
+
+    return {"total": total_items, "docs": products, "price_range": price_range}
+
+
 def _apply_has_brand(stmt, has_brand):
     """hasBrand: true = solo con marca, false = solo sin marca ("Sin marca"), None = sin
     filtro. brand nunca se guarda como "" (brand_service.normalize_brand + migracion
@@ -96,52 +171,35 @@ async def get_local_catalog(db: AsyncSession, filters: dict):
     if filters.get("on_sale"):
         stmt = stmt.where(Product.is_on_sale)
 
+    unpriced_stmt = stmt
+    min_price, max_price = filters.get("min_price"), filters.get("max_price")
+    stmt = _apply_price_range(stmt, min_price, max_price)
+
     sort_by = filters.get("sort_by")
     if sort_by == "price_asc":
-        stmt = stmt.order_by(Product.price.asc())
+        stmt = stmt.order_by(Product.price.asc(), Product.id)
     elif sort_by == "price_desc":
-        stmt = stmt.order_by(Product.price.desc())
+        stmt = stmt.order_by(Product.price.desc(), Product.id)
     elif sort_by == "name_asc":
-        stmt = stmt.order_by(Product.name.asc())
+        stmt = stmt.order_by(Product.name.asc(), Product.id)
     elif sort_by == "relevance":
-        # Sin texto de busqueda aqui, "relevance" = popularidad (sales_count) - el proxy estandar de e-commerce para el orden por defecto de una categoria.
-        stmt = stmt.order_by(Product.sales_count.desc(), Product.name.asc())
-
-    offset = filters.get("offset", 0)
-
-    # count(*) OVER() en la MISMA consulta que trae la pagina, en vez de un SELECT COUNT(*)
-    # aparte contra una subconsulta identica - una sola ida a Postgres por llamada en el
-    # endpoint mas usado de la API, en vez de dos. El total sigue siendo sobre el conjunto
-    # filtrado COMPLETO (antes de LIMIT/OFFSET) - la ventana no lleva PARTITION BY/ORDER BY,
-    # asi que cuenta todas las filas que matchean el WHERE sin importar el orden/pagina.
-    paged_stmt = stmt.add_columns(func.count().over().label("total_count")).limit(filters.get("limit", 60)).offset(offset)
-
-    result = await db.execute(paged_stmt)
-    rows = result.all()
-    products = [row[0] for row in rows]
-
-    if rows:
-        total_items = rows[0].total_count
-    elif offset == 0:
-        # Sin filas y sin offset: el filtro genuinamente no matchea nada - total es 0, sin
-        # necesidad de una segunda consulta.
-        total_items = 0
+        # Sin texto de busqueda aqui, "relevance" = popularidad (sales_count) - el proxy
+        # estandar de e-commerce para el orden por defecto de una categoria - despues de
+        # existencia y foto. Con inStock: true el primer criterio es constante y no estorba.
+        stmt = stmt.order_by(_IN_STOCK_FIRST, _WITH_IMAGE_FIRST, Product.sales_count.desc(), Product.name.asc(), Product.id)
     else:
-        # offset mas alla del conjunto filtrado (se pidio una pagina que ya no existe) - la
-        # ventana count()OVER() no aparece en ninguna fila si esta pagina viene vacia, asi
-        # que la unica forma de que `total` siga siendo correcto (cuantas paginas hay EN
-        # TOTAL, no solo si esta pagina esta vacia) es un COUNT(*) aparte aqui - el precio de
-        # colapsar a una sola consulta lo paga solo este caso, no el camino comun.
-        total_items = await db.scalar(select(func.count()).select_from(stmt.subquery()))
+        # Sin sortBy: antes no habia ORDER BY (orden natural, no estable entre paginas).
+        stmt = stmt.order_by(Product.id)
 
-    logger.info(f"Consulta de catalogo exitosa. Filtros: {filters}. Total encontrados: {total_items}")
+    page = await _fetch_page(
+        db, stmt, unpriced_stmt, filters.get("limit", 60), filters.get("offset", 0),
+        price_filtered=min_price is not None or max_price is not None,
+    )
 
-    return {
-        "total": total_items,
-        "docs": products
-    }
+    logger.info(f"Consulta de catalogo exitosa. Filtros: {filters}. Total encontrados: {page['total']}")
+    return page
 
-async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None, has_brand: bool = None, on_sale: bool = None):
+async def search_products(db: AsyncSession, q: str, limit: int, offset: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, in_stock: bool = False, sort_by: str = "relevance", brand: str = None, has_brand: bool = None, on_sale: bool = None, min_price=None, max_price=None):
     """Busqueda por palabras: cada palabra de `q` debe aparecer (ILIKE, insensible a acentos via
     immutable_unaccent, migracion f1a3c7e9b2d4) en sku O name - sin exigir que la frase completa
     sea una sola subcadena contigua ni que las palabras esten en el mismo orden/campo. Esto es lo
@@ -163,7 +221,7 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
     norm_q = " ".join(q.replace("-", "").split())
     if not norm_q:
         # q era solo guiones/espacios - sin nada que buscar tras normalizar.
-        return {"total": 0, "docs": []}
+        return {"total": 0, "docs": [], "price_range": None}
     escaped_q = _escape_ilike(norm_q)
     words = norm_q.split()
     escaped_words = [_escape_ilike(w) for w in words]
@@ -189,38 +247,30 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
         and_(*[word_match(w) for w in escaped_words]),
     )
     stmt = await _apply_search_filters(db, stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand, on_sale)
+    price_filtered = min_price is not None or max_price is not None
 
     def apply_sort(stmt, relevance_priority):
         if sort_by == "price_asc":
-            return stmt.order_by(Product.price.asc())
+            return stmt.order_by(Product.price.asc(), Product.id)
         elif sort_by == "price_desc":
-            return stmt.order_by(Product.price.desc())
+            return stmt.order_by(Product.price.desc(), Product.id)
         elif sort_by == "name_asc":
-            return stmt.order_by(Product.name.asc())
+            return stmt.order_by(Product.name.asc(), Product.id)
         else:
-            return stmt.order_by(relevance_priority, Product.sales_count.desc(), Product.name.asc())
+            # La coincidencia de texto sigue mandando; existencia y foto desempatan antes que
+            # la popularidad (mismo criterio que get_local_catalog y que Typesense).
+            return stmt.order_by(relevance_priority, _IN_STOCK_FIRST, _WITH_IMAGE_FIRST, Product.sales_count.desc(), Product.name.asc(), Product.id)
 
     priority = case((full_phrase_match, 0), (starts_with_first_word, 1), else_=2)
-    stmt = apply_sort(stmt, priority)
+    page = await _fetch_page(
+        db, apply_sort(_apply_price_range(stmt, min_price, max_price), priority), stmt,
+        limit, offset, price_filtered,
+    )
+    total_items = page["total"]
 
-    # count(*) OVER() en la misma consulta que la pagina - mismo motivo/tradeoff que
-    # get_local_catalog arriba: una sola ida a Postgres en el camino comun, con fallback a un
-    # COUNT(*) aparte solo si offset cae mas alla del conjunto filtrado (ninguna fila que
-    # traiga la ventana consigo).
-    paged_stmt = stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)
-
-    result = await db.execute(paged_stmt)
-    rows = result.all()
-    products = [row[0] for row in rows]
-
-    if rows:
-        total_items = rows[0].total_count
-    elif offset == 0:
-        total_items = 0
-    else:
-        total_items = await db.scalar(select(func.count()).select_from(stmt.subquery()))
-
-    if total_items == 0:
+    # Fallback solo si las palabras no matchean nada; si matchean pero ninguna cae en el rango
+    # de precio pedido (price_range no nulo), el resultado correcto es 0, no otras palabras.
+    if total_items == 0 and page["price_range"] is None:
         # Fallback tolerante a errores de tipeo. Ojo: similarity()/`%` (usado aqui antes) compara
         # la CADENA COMPLETA de q contra la CADENA COMPLETA de name - para una palabra corta con
         # typo contra un name largo ("Desarmador Plano Punta Cruz 1/4 x 6 Truper"), los trigramas
@@ -262,23 +312,17 @@ async def search_products(db: AsyncSession, q: str, limit: int, offset: int, dep
             and_(*[word_fuzzy_match(wb) for wb in word_binds]),
         )
         fallback_stmt = await _apply_search_filters(db, fallback_stmt, department_uuid, category_uuid, taxonomy_uuid, vehicle_uuid, in_stock, brand, has_brand, on_sale)
-        fallback_stmt = apply_sort(fallback_stmt, fuzzy_score.desc())
+        page = await _fetch_page(
+            db, apply_sort(_apply_price_range(fallback_stmt, min_price, max_price), fuzzy_score.desc()), fallback_stmt,
+            limit, offset, price_filtered,
+        )
+        total_items = page["total"]
 
-        paged_fallback_stmt = fallback_stmt.add_columns(func.count().over().label("total_count")).limit(limit).offset(offset)
-        result = await db.execute(paged_fallback_stmt)
-        rows = result.all()
-        products = [row[0] for row in rows]
-        total_items = rows[0].total_count if rows else 0
-
-        if products:
+        if page["docs"]:
             logger.info(f"Busqueda '{q}' sin match exacto por palabras - usando fallback de word_similarity (typo-tolerant). Total encontrados: {total_items}")
 
     logger.info(f"Busqueda '{q}' exitosa. Total encontrados: {total_items}")
-
-    return {
-        "total": total_items,
-        "docs": products
-    }
+    return page
 
 async def get_available_now_products(db: AsyncSession, limit: int, department_uuid: str = None, category_uuid: str = None, taxonomy_uuid: str = None, vehicle_uuid: str = None, sort_by: str = None):
     """Productos con stock disponible e imagen, para la seccion "Disponible Ahora" de la

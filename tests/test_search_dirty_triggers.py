@@ -69,8 +69,9 @@ async def test_each_search_column_marks_dirty(db):
 async def test_sync_style_update_of_unindexed_columns_does_not_mark_dirty(db):
     """El upsert de sync_task.py reescribe las ~124k filas cada 5 minutos con un
     last_sync_id nuevo; si eso marcara todo, el worker reindexaria el catalogo entero cada
-    vez. Solo last_sync_id (y valores identicos) cambian aqui."""
-    product = await _new_clean_product(db, name="Llave española", price=Decimal("50.00"))
+    vez. Solo last_sync_id (y valores identicos) cambian aqui; cambiar una URL de imagen por
+    otra tampoco marca (solo importa si tiene foto o no)."""
+    product = await _new_clean_product(db, name="Llave española", price=Decimal("50.00"), image_url="https://img.example/vieja.jpg")
     await db.execute(
         update(Product).where(Product.id == product.id).values(
             last_sync_id="pase-nuevo", name="Llave española", price=Decimal("50.00"),
@@ -78,6 +79,15 @@ async def test_sync_style_update_of_unindexed_columns_does_not_mark_dirty(db):
         )
     )
     assert not await _dirty(db, product)
+
+
+async def test_gaining_or_losing_the_photo_marks_dirty(db):
+    """has_image del indice (orden por defecto de /search): solo el cruce con/sin foto."""
+    product = await _new_clean_product(db, image_url=None)
+    for image_url in ("https://img.example/x.jpg", "", "https://img.example/y.jpg", None):
+        await db.execute(update(Product).where(Product.id == product.id).values(image_url=image_url))
+        assert await _dirty(db, product), f"no marco dirty al cambiar image_url a {image_url!r}"
+        await _clear(db, product)
 
 
 async def test_reserved_change_that_keeps_stock_available_does_not_mark_dirty(db):

@@ -14,6 +14,7 @@ from app.core.security import decode_unsubscribe_token
 from app.models.client import ClientAccount
 from app.models.product import Product
 from app.models.stock_alert import StockAlert
+from app.services.marketing_consent_service import ConsentContext, ConsentSource, record_marketing_consent
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,9 @@ async def cancel_client_alert(db: AsyncSession, client: ClientAccount, product_u
     await db.commit()
 
 
-async def unsubscribe(db: AsyncSession, token: str) -> tuple[str, str]:
+async def unsubscribe(
+    db: AsyncSession, token: str, source: ConsentSource = "email_unsubscribe", consent_context: ConsentContext | None = None,
+) -> tuple[str, str]:
     """POST /notifications/unsubscribe -> (scope, correo enmascarado). Idempotente."""
     scope, sub = decode_unsubscribe_token(token)
     if scope == "marketing":
@@ -120,8 +123,7 @@ async def unsubscribe(db: AsyncSession, token: str) -> tuple[str, str]:
         if client is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enlace de baja inválido.")
         if client.marketing_emails:
-            client.marketing_emails = False
-            client.marketing_emails_updated_at = datetime.now(timezone.utc)
+            record_marketing_consent(db, client, False, source, context=consent_context)
             await db.commit()
             logger.info(f"Baja de correos de marketing: {mask_email(client.email)}.")
         return scope, mask_email(client.email)

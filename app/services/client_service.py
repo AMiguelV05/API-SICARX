@@ -14,13 +14,14 @@ from app.core.security import (
 )
 from app.services.client_notification_service import notify_verification_requested, notify_password_reset_requested
 from app.services.google_auth_service import GoogleIdentity
+from app.services.marketing_consent_service import ConsentContext, record_marketing_consent
 
 logger = logging.getLogger(__name__)
 
 # Hash dummy fijo para igualar el tiempo de respuesta cuando el correo no existe (evita enumerar cuentas por timing). Sincrono porque corre al importar, antes de que exista un event loop.
 _DUMMY_HASH = _hash_password_sync("timing-attack-mitigation-dummy-password")
 
-async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccount:
+async def register_client(db: AsyncSession, data: ClientRegister, consent_context: ConsentContext | None = None) -> ClientAccount:
     email = data.email.lower()
     existing = await db.scalar(select(ClientAccount).where(ClientAccount.email == email))
     if existing:
@@ -37,10 +38,13 @@ async def register_client(db: AsyncSession, data: ClientRegister) -> ClientAccou
         # terms_accepted ya viene garantizado True por ClientRegister.validate_terms_accepted.
         terms_accepted_at=datetime.now(timezone.utc),
         terms_accepted_version=data.terms_version,
-        marketing_emails=data.marketing_emails,
-        marketing_emails_updated_at=datetime.now(timezone.utc),
     )
     db.add(client)
+    # Siempre, aunque sea false: demuestra que la casilla se desmarco.
+    record_marketing_consent(
+        db, client, data.marketing_emails, data.marketing_consent_source,
+        privacy_notice_version=data.privacy_notice_version, context=consent_context,
+    )
     try:
         await db.commit()
     except IntegrityError:
@@ -74,7 +78,7 @@ async def authenticate_client(db: AsyncSession, data: ClientLogin) -> ClientAcco
     logger.info(f"Login exitoso para: {client.email}")
     return client
 
-async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpdate) -> ClientAccount:
+async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpdate, consent_context: ConsentContext | None = None) -> ClientAccount:
     if data.new_password:
         if client.hashed_password is None:
             # Cuenta de Google sin password local; solo evitamos el crash de verify_password(..., None).
@@ -92,8 +96,10 @@ async def update_client(db: AsyncSession, client: ClientAccount, data: ClientUpd
         client.phone = data.phone
 
     if data.marketing_emails is not None and data.marketing_emails != client.marketing_emails:
-        client.marketing_emails = data.marketing_emails
-        client.marketing_emails_updated_at = datetime.now(timezone.utc)
+        record_marketing_consent(
+            db, client, data.marketing_emails, data.marketing_consent_source,
+            privacy_notice_version=data.privacy_notice_version, context=consent_context,
+        )
 
     await db.commit()
     await db.refresh(client)
@@ -118,7 +124,10 @@ async def accept_terms(db: AsyncSession, client: ClientAccount, terms_version: s
     logger.info(f"Términos y Condiciones aceptados (versión {terms_version}): {client.email}")
     return client
 
-async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity, marketing_emails: bool = False) -> ClientAccount:
+async def get_or_create_google_client(
+    db: AsyncSession, identity: GoogleIdentity, marketing_emails: bool = False, *,
+    privacy_notice_version: str | None = None, consent_context: ConsentContext | None = None,
+) -> ClientAccount:
     """Resuelve la cuenta local para un identity de Google verificado. No se auto-vincula por email a una cuenta existente (el registro local no prueba propiedad del correo) - responde 409 y pide iniciar sesion con contraseña."""
     client = await db.scalar(select(ClientAccount).where(ClientAccount.google_sub == identity["sub"]))
     if client:
@@ -141,10 +150,12 @@ async def get_or_create_google_client(db: AsyncSession, identity: GoogleIdentity
         google_sub=identity["sub"],
         is_verified=identity["email_verified"],
         email_verified_at=datetime.now(timezone.utc) if identity["email_verified"] else None,
-        marketing_emails=marketing_emails,
-        marketing_emails_updated_at=datetime.now(timezone.utc),
     )
     db.add(client)
+    record_marketing_consent(
+        db, client, marketing_emails, "google_signup",
+        privacy_notice_version=privacy_notice_version, context=consent_context,
+    )
     await db.flush()
     if identity["email_verified"]:
         await link_guest_orders_by_email(db, client)

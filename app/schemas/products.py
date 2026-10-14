@@ -1,6 +1,7 @@
 from typing import List, Literal, Optional, Union
 from datetime import datetime
-from pydantic import Field
+from decimal import Decimal
+from pydantic import Field, model_validator
 from app.schemas.base import CamelModel
 
 # DataType/AttributeValue/AttributeValuePublic/VariantSiblingPublic/VariantGroupDetail viven
@@ -35,7 +36,23 @@ class VariantGroupDetail(CamelModel):
     variant_attribute_slug: Optional[str] = None
     siblings: List[VariantSiblingPublic] = []
 
-class LocalCatalogFilter(CamelModel):
+class PriceFilterMixin(CamelModel):
+    """minPrice/maxPrice de POST /products y POST /search. Mismo precio que `price` (con IVA,
+    el que se cobra; nunca compareAtPrice)."""
+    min_price: Optional[Decimal] = Field(default=None, ge=0, description="Precio minimo (MXN, con IVA), inclusivo.")
+    max_price: Optional[Decimal] = Field(default=None, ge=0, description="Precio maximo (MXN, con IVA), inclusivo.")
+
+    @model_validator(mode="after")
+    def _check_price_bounds(self):
+        if self.min_price is not None and self.max_price is not None and self.min_price > self.max_price:
+            raise ValueError("minPrice no puede ser mayor que maxPrice.")
+        return self
+
+class PriceRange(CamelModel):
+    min: float
+    max: float
+
+class LocalCatalogFilter(PriceFilterMixin):
     limit: int = Field(default=60, ge=1, le=200, description="Cantidad de productos por página (1-200)")
     # Techo de 10000 removido (2026-09-09): bloqueaba el recorrido legitimo del catalogo
     # completo (124k+ productos, ej. generacion de sitemap) sin estar documentado en
@@ -52,7 +69,7 @@ class LocalCatalogFilter(CamelModel):
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
     on_sale: Optional[bool] = Field(default=None, description="Si es true, solo productos con oferta vigente (compareAtPrice no nulo). Omitido/false = sin filtro.")
     sort_by: Optional[Literal["price_asc", "price_desc", "name_asc", "relevance"]] = Field(
-        default=None, description="Orden de los resultados: price_asc, price_desc, name_asc o relevance (mas vendidos primero)"
+        default=None, description="Orden de los resultados: price_asc, price_desc, name_asc o relevance (con existencia y con foto primero, luego mas vendidos)"
     )
 
 class ProductBasic(CamelModel):
@@ -97,6 +114,7 @@ class ProductAdminBasic(ProductBasic):
 class LocalCatalogResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
+    price_range: Optional[PriceRange] = Field(default=None, description="Precio minimo y maximo (> 0) del conjunto filtrado SIN aplicar minPrice/maxPrice, para los limites del control de precio. Null si el conjunto esta vacio.")
 
 class BestSellersResponse(CamelModel):
     docs: List[ProductBasic]

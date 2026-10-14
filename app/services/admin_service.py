@@ -110,6 +110,7 @@ async def _to_admin_order_public(order: Order) -> AdminOrderPublic:
     public.client_email = client_email
     public.client_name = resolve_client_name(order, client_account)
     public.is_guest = client_account is None
+    public.client_uuid = client_account.uuid if client_account else None
     public.guest_email = order.guest_email
     # delivery_address_snapshot no coincide de nombre con AdminOrderPublic.delivery_address - se mapea a mano.
     if order.delivery_address_snapshot:

@@ -2,9 +2,9 @@ from datetime import datetime
 from typing import List, Literal, Optional
 from pydantic import Field
 from app.schemas.base import CamelModel
-from app.schemas.products import ProductBasic
+from app.schemas.products import PriceFilterMixin, PriceRange, ProductBasic
 
-class SearchFilter(CamelModel):
+class SearchFilter(PriceFilterMixin):
     q: str = Field(min_length=1, description="Texto a buscar en sku o nombre del producto")
     limit: int = Field(default=60, ge=1, le=200, description="Cantidad de productos por página (1-200)")
     # Mismo cambio y misma razon que LocalCatalogFilter.offset (products.py) - el techo de
@@ -19,12 +19,13 @@ class SearchFilter(CamelModel):
     in_stock: Optional[bool] = Field(default=False, description="Si es true, solo muestra productos con stock > 0")
     on_sale: Optional[bool] = Field(default=None, description="Si es true, solo productos con oferta vigente (compareAtPrice no nulo). Omitido/false = sin filtro.")
     sort_by: Optional[Literal["relevance", "price_asc", "price_desc", "name_asc"]] = Field(
-        default="relevance", description="Orden de los resultados: relevance (default, coincidencia de texto + popularidad), price_asc, price_desc o name_asc"
+        default="relevance", description="Orden de los resultados: relevance (default: coincidencia de texto, luego con existencia y con foto primero, luego popularidad), price_asc, price_desc o name_asc"
     )
 
 class SearchResponse(CamelModel):
     total: int
     docs: List[ProductBasic]
+    price_range: Optional[PriceRange] = Field(default=None, description="Precio minimo y maximo (> 0) de los resultados SIN aplicar minPrice/maxPrice. Null si no hay resultados.")
 
 
 class ProductSuggestion(CamelModel):

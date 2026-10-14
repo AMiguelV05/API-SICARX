@@ -28,6 +28,7 @@ from app.models.wishlist import WishlistCollection, WishlistItem
 from app.models.search_synonym import SearchSynonym
 from app.models.webhook_outbox import WebhookOutbox
 from app.models.stock_alert import StockAlert
+from app.models.marketing_consent import MarketingConsentEvent
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

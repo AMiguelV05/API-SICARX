@@ -22,7 +22,9 @@ ALIAS = "products"
 # alias apunta a una version vieja y reconstruye el indice completo.
 # v2: name_first (desempate por "tipo de producto") reemplaza a in_stock_rank.
 # v3: sale_until (filtro onSale).
-SCHEMA_VERSION = 3
+# v4: has_image (orden por defecto: con foto antes que sin foto) y price con facet (stats
+#     para priceRange).
+SCHEMA_VERSION = 4
 
 # sale_until para una oferta sin fecha de fin: "vigente para siempre". 2^53 cabe en int64 y
 # en un float de JS sin perder precision.
@@ -139,7 +141,11 @@ def build_schema(collection_name: str) -> dict[str, Any]:
             {"name": "category_uuids", "type": "string[]"},
             {"name": "vehicle_uuids", "type": "string[]"},
             {"name": "in_stock", "type": "bool"},
-            {"name": "price", "type": "float"},
+            # Desempate del orden por defecto (search_service._relevance_sort). bool y no un
+            # int "rank": _eval ordena por filtros booleanos sin campo ordenable aparte.
+            {"name": "has_image", "type": "bool"},
+            # facet: solo para las stats (min/max) de priceRange; filtro minPrice/maxPrice.
+            {"name": "price", "type": "float", "facet": True},
             {"name": "name_sort", "type": "string", "sort": True},
             {"name": "sales_count", "type": "int64"},
             # Filtro onSale (search_service.build_filter_by): sale_until > ahora.
@@ -174,6 +180,7 @@ def to_document(row: Mapping[str, Any]) -> dict[str, Any]:
         "category_uuids": sorted(row["category_uuids"] or []),
         "vehicle_uuids": sorted(row["vehicle_uuids"] or []),
         "in_stock": in_stock,
+        "has_image": bool(row.get("image_url")),  # mismo criterio que catalog_service: no nulo ni ""
         "price": float(row["price"] or 0),
         "name_sort": strip_accents(name).lower(),
         "sales_count": int(row["sales_count"] or 0),
@@ -196,7 +203,7 @@ def sale_until(compare_at_price, price, sale_ends_at) -> int:
 # Una sola consulta por lote (sin N+1): los ids de categorias/vehiculos se agregan con
 # subconsultas correlacionadas, cubiertas por los indices de product_id de cada tabla.
 _DOC_SELECT = """
-    SELECT p.id, p.sicar_uuid, p.sku, p.additional_skus, p.name, p.brand, p.description,
+    SELECT p.id, p.sicar_uuid, p.sku, p.additional_skus, p.name, p.brand, p.description, p.image_url,
            p.department_uuid, p.category_uuid, p.price, p.stock, p.reserved, p.sales_count,
            p.compare_at_price, p.sale_ends_at,
            (SELECT array_agg(pc.category_uuid) FROM product_categories pc WHERE pc.product_id = p.id) AS category_uuids,

@@ -133,6 +133,12 @@ def test_to_document_basic_fields():
     assert doc["category_uuids"] == [] and doc["vehicle_uuids"] == []
     assert doc["description"] is None
     assert doc["name_sort"] == "llave espanola 1000 v"
+    assert doc["has_image"] is False  # _row() no trae image_url
+
+
+@pytest.mark.parametrize("image_url, expected", [(None, False), ("", False), ("https://img.example/x.jpg", True)])
+def test_to_document_has_image(image_url, expected):
+    assert to_document(_row(image_url=image_url))["has_image"] is expected
 
 
 def test_to_document_no_brand_sold_out_and_links():

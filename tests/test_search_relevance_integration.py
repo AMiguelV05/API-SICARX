@@ -53,6 +53,13 @@ CATALOG = [
     ("tee_disponible", dict(name='TEE PVC 3/4"', sku="PTEE19", stock=Decimal("5"))),
     ("llave_espanola", dict(name="Llave española 16 x 17 x 198 mm de largo, TRUPER", sku="15714", brand="Truper")),
     ("cinta", dict(name="Cinta de aislar de 18 m x 19 mm, gris, TRUPER", sku="12507", brand="Truper")),
+    # Mismo nombre (empate de texto): el orden lo decide existencia > foto > sales_count.
+    ("nivel_agotado", dict(name="Nivel de aluminio 24 pulgadas", sku="NIV-A", stock=Decimal("0"),
+                           image_url="https://img.example/n.jpg", price=Decimal("900.00"), sales_count=Decimal("50"))),
+    ("nivel_sin_foto", dict(name="Nivel de aluminio 24 pulgadas", sku="NIV-B", image_url=None,
+                            price=Decimal("80.00"), sales_count=Decimal("40"))),
+    ("nivel_foto", dict(name="Nivel de aluminio 24 pulgadas", sku="NIV-C", image_url="https://img.example/n.jpg",
+                        price=Decimal("250.00"))),
 ]
 
 
@@ -218,3 +225,19 @@ async def test_synonym_created_through_admin_service_changes_results_without_rei
         await search_index_worker.reconcile_synonyms()
 
     assert await _search("mecha") == []
+
+
+async def test_stock_and_photo_break_text_ties_and_price_range(indexed):
+    nivel = [indexed[k].sicar_uuid for k in ("nivel_foto", "nivel_sin_foto", "nivel_agotado")]
+    assert (await _search("nivel aluminio"))[:3] == nivel
+
+    async with database.AsyncSessionLocal() as session:
+        result = await search_service.search(session, SearchFilter(q="nivel aluminio", max_price=300))
+    assert [p.sicar_uuid for p in result["docs"]] == nivel[:2]
+    assert result["total"] == 2
+    # Rango sin aplicar el propio filtro de precio.
+    assert result["price_range"] == {"min": 80.0, "max": 900.0}
+
+    async with database.AsyncSessionLocal() as session:
+        result = await search_service.search(session, SearchFilter(q="nivel aluminio", min_price=100, max_price=250))
+    assert [p.sicar_uuid for p in result["docs"]] == nivel[:1]

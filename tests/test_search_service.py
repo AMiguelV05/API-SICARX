@@ -34,16 +34,41 @@ def test_filter_by_has_brand_false_and_backtick_stripping():
     assert build_filter_by(brand="Mar`ca") == "brand_lower:=`marca`"
 
 
-RELEVANCE_MARTILLO = "_text_match:desc,_eval([(name_first:=[`martillo`]):3, (in_stock:=true):1]):desc,sales_count:desc"
+def _eval_of(*criteria):
+    """Las 2^n - 1 combinaciones, de la mas alta a la mas baja (ver _tiebreak_eval)."""
+    n = len(criteria)
+    clauses = []
+    for mask in range(2**n - 1, 0, -1):
+        terms = [c for i, c in enumerate(criteria) if mask & (1 << (n - 1 - i))]
+        clauses.append(f"({' && '.join(terms)}):{mask}")
+    return f"_eval([{', '.join(clauses)}]):desc"
+
+
+RELEVANCE_MARTILLO = (
+    "_text_match:desc,"
+    "_eval([(name_first:=[`martillo`] && in_stock:=true && has_image:=true):7, "
+    "(name_first:=[`martillo`] && in_stock:=true):6, (name_first:=[`martillo`] && has_image:=true):5, "
+    "(name_first:=[`martillo`]):4, (in_stock:=true && has_image:=true):3, (in_stock:=true):2, (has_image:=true):1]):desc,"
+    "sales_count:desc"
+)
 
 
 def test_relevance_sort_boosts_query_words_as_product_type():
     params = build_search_params("truper martillo de bola", filter_by="", sort_by=None, limit=1, offset=0)
     assert params["sort_by"] == (
-        "_text_match:desc,_eval([(name_first:=[`truper`,`martillo`,`bola`]):3, (in_stock:=true):1]):desc,sales_count:desc"
+        "_text_match:desc,"
+        + _eval_of("name_first:=[`truper`,`martillo`,`bola`]", "in_stock:=true", "has_image:=true")
+        + ",sales_count:desc"
     )
     only_stopwords = build_search_params("de la", filter_by="", sort_by=None, limit=1, offset=0)
-    assert only_stopwords["sort_by"] == "_text_match:desc,_eval(in_stock:=true):desc,sales_count:desc"
+    assert only_stopwords["sort_by"] == (
+        "_text_match:desc,_eval([(in_stock:=true && has_image:=true):3, (in_stock:=true):2, (has_image:=true):1]):desc,sales_count:desc"
+    )
+
+
+def test_filter_by_price_range():
+    assert build_filter_by(min_price=Decimal("100"), max_price=Decimal("500")) == "price:>=100.0 && price:<=500.0"
+    assert build_filter_by(in_stock=True, max_price=Decimal("99.5")) == "in_stock:=true && price:<=99.5"
 
 
 @pytest.mark.parametrize("sort_by, expected", [
@@ -88,6 +113,15 @@ def _hits(*uuids, found=None):
     return {"found": len(uuids) if found is None else found, "hits": [{"document": {"id": u}} for u in uuids]}
 
 
+def _stats(min_price=None, max_price=None):
+    """Respuesta de la busqueda de stats de precio (facet_by price, per_page 0)."""
+    if min_price is None:
+        return {"found": 0, "hits": [], "facet_counts": []}
+    return {"found": 3, "hits": [], "facet_counts": [
+        {"field_name": "price", "counts": [], "stats": {"min": min_price, "max": max_price}},
+    ]}
+
+
 async def _products(db, *specs):
     products = [make_product(**spec) for spec in specs]
     db.add_all(products)
@@ -107,7 +141,7 @@ async def test_search_uses_typesense_order_total_and_live_price(db, typesense_on
 
     async def fake_multi_search(searches):
         captured["searches"] = searches
-        return [_hits(b.sicar_uuid, a.sicar_uuid, found=37), _hits()]
+        return [_hits(b.sicar_uuid, a.sicar_uuid, found=37), _stats(9.5, 870.0), _hits()]
 
     monkeypatch.setattr(typesense_client, "multi_search", fake_multi_search)
     result = await search_service.search(db, SearchFilter(q="Martillos", limit=10, in_stock=True))
@@ -115,7 +149,10 @@ async def test_search_uses_typesense_order_total_and_live_price(db, typesense_on
     assert result["total"] == 37
     assert [p.sicar_uuid for p in result["docs"]] == [b.sicar_uuid, a.sicar_uuid]
     assert result["docs"][1].price == Decimal("10.00")  # de Postgres, no del indice
-    main, pin = captured["searches"]
+    assert result["price_range"] == {"min": 9.5, "max": 870.0}
+    main, stats, pin = captured["searches"]
+    assert stats["filter_by"] == "in_stock:=true && price:>0"
+    assert (stats["per_page"], stats["facet_by"], stats["q"]) == (0, "price", "martillo")
     assert main["q"] == "martillo"  # normalizado (singular)
     assert main["filter_by"] == "in_stock:=true"
     assert pin["filter_by"] == "sku_lower:=`martillos` && in_stock:=true"
@@ -125,7 +162,7 @@ async def test_exact_sku_pin_goes_first_and_counts_once(db, typesense_on, monkey
     pinned, other = await _products(db, {"sku": "UBP1 1/4"}, {"sku": "X-1"})
 
     async def not_in_text_results(searches):
-        return [_hits(other.sicar_uuid, found=1), _hits(pinned.sicar_uuid)]
+        return [_hits(other.sicar_uuid, found=1), _stats(), _hits(pinned.sicar_uuid)]
 
     monkeypatch.setattr(typesense_client, "multi_search", not_in_text_results)
     result = await search_service.search(db, SearchFilter(q="UBP1 1/4"))
@@ -133,7 +170,7 @@ async def test_exact_sku_pin_goes_first_and_counts_once(db, typesense_on, monkey
     assert result["total"] == 2
 
     async def also_in_text_results(searches):
-        return [_hits(other.sicar_uuid, pinned.sicar_uuid, found=2), _hits(pinned.sicar_uuid)]
+        return [_hits(other.sicar_uuid, pinned.sicar_uuid, found=2), _stats(), _hits(pinned.sicar_uuid)]
 
     monkeypatch.setattr(typesense_client, "multi_search", also_in_text_results)
     result = await search_service.search(db, SearchFilter(q="UBP1 1/4"))
@@ -146,11 +183,11 @@ async def test_no_pin_after_first_page(db, typesense_on, monkeypatch):
 
     async def fake(searches):
         captured["n"] = len(searches)
-        return [_hits()]
+        return [_hits(), _stats()]
 
     monkeypatch.setattr(typesense_client, "multi_search", fake)
     await search_service.search(db, SearchFilter(q="martillo", offset=60))
-    assert captured["n"] == 1
+    assert captured["n"] == 2  # principal + stats de precio, sin pin
 
 
 async def test_unknown_taxonomy_node_returns_empty_without_calling_typesense(db, typesense_on, monkeypatch):
@@ -159,7 +196,7 @@ async def test_unknown_taxonomy_node_returns_empty_without_calling_typesense(db,
 
     monkeypatch.setattr(typesense_client, "multi_search", must_not_be_called)
     result = await search_service.search(db, SearchFilter(q="martillo", taxonomy_uuid="no-existe"))
-    assert result == {"total": 0, "docs": []}
+    assert result == {"total": 0, "docs": [], "price_range": None}
 
 
 # --- Fallback a Postgres --------------------------------------------------------------------
@@ -211,3 +248,29 @@ async def test_suggest_falls_back_without_brands(db, typesense_on, monkeypatch):
     result = await search_service.suggest(db, "taladro sugerido fallback", 6)
     assert [p.sicar_uuid for p in result["products"]] == [product.sicar_uuid]
     assert result["brands"] == []
+
+
+async def test_price_filter_goes_to_main_and_pin_but_not_to_stats(db, typesense_on, monkeypatch):
+    captured = {}
+
+    async def fake(searches):
+        captured["searches"] = searches
+        return [_hits(), _stats(), _hits()]
+
+    monkeypatch.setattr(typesense_client, "multi_search", fake)
+    result = await search_service.search(db, SearchFilter(q="martillo", min_price=100, max_price=500))
+    main, stats, pin = captured["searches"]
+    assert main["filter_by"] == "price:>=100.0 && price:<=500.0"
+    assert pin["filter_by"].endswith("&& price:>=100.0 && price:<=500.0")
+    assert stats["filter_by"] == "price:>0"
+    assert result["price_range"] is None  # sin resultados
+
+
+def test_price_bounds_validation():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SearchFilter(q="x", min_price=-1)
+    with pytest.raises(ValidationError):
+        SearchFilter(q="x", min_price=500, max_price=100)
+    assert SearchFilter(q="x", min_price=100, max_price=100).max_price == 100

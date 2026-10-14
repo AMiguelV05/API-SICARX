@@ -14,7 +14,7 @@ from app.core.config import settings
 FRONTEND_SSR_KEY = "frontend-ssr"
 
 
-def _is_trusted_frontend(request: Request) -> bool:
+def is_trusted_frontend(request: Request) -> bool:
     secret = settings.FRONTEND_PROXY_SECRET
     if not secret:
         return False
@@ -39,7 +39,7 @@ def get_client_ip(request: Request) -> str:
     que Railway mismo agrego. `request.client.host` seria la IP del proxy de Railway para *todas*
     las peticiones.
     """
-    if _is_trusted_frontend(request):
+    if is_trusted_frontend(request):
         client_ip = (request.headers.get("X-Client-IP") or "").strip()
         return client_ip or FRONTEND_SSR_KEY
 

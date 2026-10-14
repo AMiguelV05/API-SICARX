@@ -668,10 +668,15 @@ confundas con "calificación 0 estrellas" al renderizar.
 `"relevance"` (nuevo). Cualquier otro valor responde `422`. Si se omite (`null`), no hay orden
 garantizado entre llamadas — usa `sortBy` siempre que el orden le importe a la UI (p. ej. un
 selector de "Ordenar por: Precio menor a mayor / mayor a menor / Nombre A-Z / Más vendidos").
-`"relevance"` ordena por `salesCount` descendente (más vendidos primero, empate alfabético por
-nombre) — como aquí no hay texto de búsqueda, es el proxy estándar de "orden por defecto" que
-usan la mayoría de tiendas en línea; útil como el orden por defecto de una categoría o de una
-vista "Destacados".
+`"relevance"` pone primero los productos **con existencia**, luego los que **tienen foto**, y
+dentro de cada grupo ordena por `salesCount` descendente (más vendidos primero, empate
+alfabético por nombre) — ver "Funciones nuevas (2026-10-13)" más abajo. Como aquí no hay texto
+de búsqueda, es el orden por defecto de una categoría o de una vista "Destacados". Todos los
+órdenes son estables entre páginas: el mismo producto no se repite ni se salta entre `offset`
+consecutivos.
+
+`minPrice`/`maxPrice` (nuevo, 2026-10-13) filtran por precio y la respuesta trae `priceRange`
+— ver "Funciones nuevas (2026-10-13)".
 
 `limit` debe estar entre 1 y 200 (por defecto 60 si se omite) y `offset` debe ser ≥ 0 — valores
 fuera de esos rangos responden `422` en vez de aceptarse silenciosamente.
@@ -726,7 +731,10 @@ otro valor. Puedes omitirlo por completo y obtienes el comportamiento default de
 1. qué tan bien coincide el texto;
 2. a igualdad, primero los productos cuyo nombre **empieza** con una palabra buscada (el tipo de producto: "Martillo…" antes que "Engrapadora tipo martillo");
 3. después, los que están en existencia;
-4. por último, los más vendidos.
+4. después, los que tienen foto (nuevo, 2026-10-13);
+5. por último, los más vendidos.
+
+`minPrice`/`maxPrice` y `priceRange` funcionan igual que en `/v1/products` (nuevo, 2026-10-13).
 
 Ya viene paginado en ese orden; no hay que ordenar nada del lado del frontend. **Importante:**
 para que el cuadro de búsqueda se beneficie de este orden, manda `sortBy: "relevance"` (u
@@ -2465,6 +2473,7 @@ La existencia se revisa cada 5 minutos. Cuando vuelve a haber, llega **una sola 
 - `PATCH /v1/auth/me` acepta `{ "marketingEmails": true | false }`.
 - `POST /v1/auth/register` y `POST /v1/auth/google` aceptan `marketingEmails` (por defecto `false`). En Google solo cuenta si ese login **crea** la cuenta.
 - **El valor por defecto es `false` para todas las cuentas**, incluidas las que ya existían. Solo reciben correos de baja de precio y de carrito abandonado quienes lo aceptan.
+- Cada cambio queda en un historial de consentimiento (`marketingConsentSource`, `privacyNoticeVersion`, `marketingConsentAt`): ver "Funciones nuevas (2026-10-13)".
 
 ### `POST /v1/notifications/unsubscribe`: baja desde el enlace del correo
 
@@ -2541,6 +2550,115 @@ Se manda como máximo un correo por carrito cada 7 días, y solo si el carrito c
 
 El recordatorio de pedido apartado sin pagar (`order-payment-pending`) **no** se implementó, porque la reserva de un pedido sin pago dura solo 30 minutos.
 
+
+## Funciones nuevas (2026-10-13): orden por defecto, filtro de precio e historial de consentimiento
+
+Respuesta a `frontend_requests.md` (2026-10-12). Todo es aditivo: si no mandas los campos nuevos, el comportamiento es el de antes, salvo el orden de `sortBy: "relevance"`, que cambia sin que tengas que hacer nada.
+
+### 1. Agotados y sin foto al final (`sortBy: "relevance"`)
+
+**`POST /v1/products`** con `sortBy: "relevance"` ahora ordena así:
+
+```
+con existencia + con foto   (salesCount desc, name asc)
+con existencia + sin foto
+agotado        + con foto
+agotado        + sin foto
+```
+
+- "Con existencia" es el `stock` que ves en la respuesta (`> 0`, ya sin lo reservado).
+- "Con foto" es `imageUrl` no nulo ni vacío.
+- Con `inStock: true` solo queda el criterio de la foto.
+- `price_asc`, `price_desc` y `name_asc` no cambian.
+
+**`POST /v1/search`**: la coincidencia de texto sigue mandando. Existencia y foto desempatan entre productos que coinciden igual de bien, después del criterio de "tipo de producto" que ya existía y antes de `salesCount`. Así, un agotado que coincide mucho mejor (o un SKU exacto, que siempre va primero) puede quedar arriba de uno con existencia que apenas coincide. Lo mismo aplica cuando la búsqueda cae al respaldo de la base de datos.
+
+**Paginación estable**: todos los órdenes de los dos endpoints tienen un desempate final único, así que el mismo producto ya no aparece en dos páginas ni se salta entre `offset` consecutivos. Antes, en `/v1/products` sin `sortBy` no había ningún orden; ahora es estable, aunque arbitrario.
+
+### 2. Filtro por rango de precio (`minPrice`, `maxPrice`) y `priceRange`
+
+Dos campos nuevos y opcionales en el body de `POST /v1/products` y `POST /v1/search`:
+
+```http
+POST /v1/products
+x-api-key: <api-key>
+Content-Type: application/json
+
+{ "taxonomyUuid": "…", "minPrice": 100, "maxPrice": 500, "sortBy": "relevance" }
+```
+
+- Están en pesos MXN, con IVA, y comparan contra `price` (el precio que se cobra). En un producto en oferta **no** se usa `compareAtPrice`.
+- Los dos límites son inclusivos y puedes mandar solo uno.
+- `422` si alguno es negativo o si `minPrice > maxPrice`.
+- Se combinan con todos los demás filtros y respetan `sortBy`.
+
+La respuesta de los dos endpoints trae `priceRange`: el precio mínimo y máximo del conjunto filtrado **sin aplicar** `minPrice`/`maxPrice`, para los límites del control ("de $12 a $8,450 en esta categoría"):
+
+```json
+{
+  "total": 1240,
+  "docs": [ … ],
+  "priceRange": { "min": 12.0, "max": 8450.0 }
+}
+```
+
+- Es `null` si el conjunto, sin filtro de precio, está vacío.
+- Solo cuenta precios mayores que 0. Un producto con precio `0.00` es un error de sincronización y no se puede comprar.
+- Si el filtro de precio deja 0 resultados, `priceRange` sigue trayendo el rango real, para que el control muestre a dónde moverse.
+- En la búsqueda, el rango es el de los resultados de esa `q` con los demás filtros.
+
+### 3. Historial del consentimiento de correos de marketing
+
+Cada cambio de `marketingEmails` queda en un historial que solo crece: nunca se edita ni se borra, y la base de datos lo impide. Cada registro guarda el valor, la hora del servidor (UTC), `source`, `privacyNoticeVersion`, la IP y el user agent.
+
+**Campos nuevos (opcionales) en el body:**
+
+| Endpoint | `marketingConsentSource` | `privacyNoticeVersion` | Cuándo se registra |
+|---|---|---|---|
+| `POST /v1/auth/register` | `"register_checkbox"` (default) | p. ej. `"2026-10-12"` | Siempre, también con `marketingEmails: false` (prueba que la casilla se desmarcó) |
+| `POST /v1/auth/google` | `"google_signup"` (default) | p. ej. `"2026-10-12"` | Solo si ese login **crea** la cuenta |
+| `PATCH /v1/auth/me` | `"account_toggle"` (default) | p. ej. `"2026-10-12"` | Solo si `marketingEmails` cambia de valor |
+
+- Cada endpoint acepta únicamente su propio `source`; otro valor responde `422`. Puedes omitirlo.
+- `privacyNoticeVersion` es texto libre de hasta 64 caracteres. Manda tu constante `PRIVACY_NOTICE_VERSION`.
+
+```http
+POST /v1/auth/register
+x-api-key: <api-key>
+Content-Type: application/json
+
+{
+  "name": "Ana López",
+  "email": "ana@example.com",
+  "password": "********",
+  "termsAccepted": true,
+  "termsVersion": "2026-10-12",
+  "marketingEmails": true,
+  "marketingConsentSource": "register_checkbox",
+  "privacyNoticeVersion": "2026-10-12"
+}
+```
+
+**`POST /v1/notifications/unsubscribe`** acepta `source`:
+
+```json
+{ "token": "<unsubscribeToken>", "source": "one_click_unsubscribe" }
+```
+
+- `"email_unsubscribe"` (default) si la persona abrió el enlace; `"one_click_unsubscribe"` si llega por tu handler de `List-Unsubscribe-Post`.
+- Solo se registra con scope `marketing` y si la cuenta tenía `marketingEmails: true`. Repetir la baja no agrega nada.
+
+**`GET /v1/auth/me`** (y `client` en las respuestas de login/registro/`PATCH`) trae `marketingConsentAt`: la fecha del último cambio, para "Activo desde…". Es `null` si nunca se registró.
+
+```json
+{ "uuid": "…", "email": "ana@example.com", "marketingEmails": true, "marketingConsentAt": "2026-10-13T17:02:11.482190Z", "…": "…" }
+```
+
+**IP y user agent**: se toman del visitante con la misma regla que el rate limiting. Con `X-Frontend-Auth` válido se usan `X-Client-IP` (que ya mandas) y **`X-Client-User-Agent` (nuevo)**: reenvía ahí el `User-Agent` del navegador del visitante en las cuatro llamadas. Sin `X-Frontend-Auth` se usan la IP de la conexión y el `User-Agent` de la propia petición, que sería el de tu servidor. En un render sin visitante (sin `X-Client-IP`), la IP queda vacía.
+
+Las cuentas que ya tenían un valor guardado arrancan su historial con un registro `source: "migrated"` (fecha y valor de antes, sin versión, IP ni user agent).
+
+El panel admin consulta el historial completo en `GET /v1/admin/clients/{uuid}/consents` (ver `ADMIN_INTEGRATION.md`).
 
 ## Ejemplo mínimo (fetch, Next.js)
 

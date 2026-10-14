@@ -20,6 +20,7 @@ from app.services.client_service import (
 )
 from app.services.google_auth_service import verify_google_id_token
 from app.services.cart_service import get_cart_response, try_merge_cart_token
+from app.services.marketing_consent_service import ConsentContextDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Client Auth"], dependencies=[Depends(validate_api_key)])
@@ -45,13 +46,15 @@ async def _build_auth_response(
 
 @router.post("/auth/register", response_model=ClientAuthResponse, status_code=status.HTTP_201_CREATED, summary="Registrar una nueva cuenta de cliente")
 @limiter.limit("5/minute")
-async def register(request: Request, response: Response, db: DbDep, data: ClientRegister = Body()):
+async def register(request: Request, response: Response, db: DbDep, consent_context: ConsentContextDep, data: ClientRegister = Body()):
     """
     Crea una cuenta de cliente local; el correo debe ser único (`409` si ya existe).
     Devuelve un token de sesión, igual que `/auth/login`, para iniciar sesión
     automáticamente tras registrarse. Limitado a 5 intentos por minuto por IP.
+    Registra el estado inicial de `marketingEmails` en el historial de consentimiento
+    (`register_checkbox`, con `privacyNoticeVersion`, IP y user agent).
     """
-    client = await register_client(db, data)
+    client = await register_client(db, data, consent_context)
     return await _build_auth_response(db, client, data.cart_token, response)
 
 @router.post("/auth/login", response_model=ClientAuthResponse, summary="Iniciar sesión con una cuenta de cliente")
@@ -67,17 +70,21 @@ async def login(request: Request, response: Response, db: DbDep, data: ClientLog
 
 @router.post("/auth/google", response_model=ClientAuthResponse, summary="Iniciar sesión o registrarse con Google")
 @limiter.limit("10/minute")
-async def google_login(request: Request, response: Response, db: DbDep, data: GoogleLogin = Body()):
+async def google_login(request: Request, response: Response, db: DbDep, consent_context: ConsentContextDep, data: GoogleLogin = Body()):
     """
     Verifica un ID token de Google (obtenido en el frontend) y resuelve la cuenta local
     — la crea si es la primera vez. Devuelve la misma forma que `/auth/login`. Si el
     correo ya tiene cuenta local con contraseña, responde `409` en vez de fusionar
     automáticamente (evita que la contraseña de quien registró ese correo primero siga
     vigente sobre lo que su dueño real ahora cree asegurado por Google) — usar la
-    contraseña en ese caso. Cuentas creadas así ya quedan verificadas.
+    contraseña en ese caso. Cuentas creadas así ya quedan verificadas. Si crea la cuenta,
+    registra `marketingEmails` en el historial de consentimiento (`google_signup`).
     """
     identity = await verify_google_id_token(data.id_token)
-    client = await get_or_create_google_client(db, identity, data.marketing_emails)
+    client = await get_or_create_google_client(
+        db, identity, data.marketing_emails,
+        privacy_notice_version=data.privacy_notice_version, consent_context=consent_context,
+    )
     return await _build_auth_response(db, client, data.cart_token, response)
 
 @router.post("/auth/verify-email", response_model=ClientPublic, summary="Confirmar verificación de correo")
@@ -132,13 +139,14 @@ async def get_me(client: CurrentClientDep):
 
 @router.patch("/auth/me", response_model=ClientPublic, summary="Editar datos de la cuenta del cliente")
 @limiter.limit("10/minute")
-async def update_me(request: Request, client: CurrentClientDep, db: DbDep, data: ClientUpdate = Body()):
+async def update_me(request: Request, client: CurrentClientDep, db: DbDep, consent_context: ConsentContextDep, data: ClientUpdate = Body()):
     """
-    Actualiza nombre, teléfono y/o contraseña de la cuenta autenticada — todos los
-    campos son opcionales. Cambiar la contraseña requiere `current_password` junto con
-    `new_password`; `401` si no coincide. Limitado a 10 llamadas por minuto por IP.
+    Actualiza nombre, teléfono, contraseña y/o `marketingEmails` de la cuenta autenticada —
+    todos los campos son opcionales. Cambiar la contraseña requiere `current_password` junto
+    con `new_password`; `401` si no coincide. Si `marketingEmails` cambia, queda en el
+    historial de consentimiento (`account_toggle`). Limitado a 10 llamadas por minuto por IP.
     """
-    updated = await update_client(db, client, data)
+    updated = await update_client(db, client, data, consent_context)
     return updated
 
 @router.post("/auth/accept-terms", response_model=ClientPublic, summary="Registrar aceptación de Términos y Condiciones")

@@ -9,6 +9,7 @@ from app.schemas.notifications import (
 )
 from app.schemas.products import ProductBasic
 from app.services import stock_alert_service
+from app.services.marketing_consent_service import ConsentContextDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Notifications"], dependencies=[Depends(validate_api_key)])
@@ -60,9 +61,10 @@ async def delete_my_stock_alert(db: DbDep, client: CurrentClientDep, product_uui
 
 @router.post("/notifications/unsubscribe", response_model=UnsubscribeResponse, summary="Darse de baja desde el enlace de un correo")
 @limiter.limit("20/minute")
-async def unsubscribe(request: Request, db: DbDep, data: UnsubscribeRequest = Body()):
+async def unsubscribe(request: Request, db: DbDep, consent_context: ConsentContextDep, data: UnsubscribeRequest = Body()):
     """Sin sesion: el token del enlace prueba la identidad. `scope: marketing` apaga
-    `marketingEmails` de la cuenta; `scope: stock-alert` cancela esa suscripcion.
+    `marketingEmails` de la cuenta y, si estaba activo, lo registra en el historial de
+    consentimiento con `source`; `scope: stock-alert` cancela esa suscripcion.
     Idempotente. `400` si el token no es valido."""
-    scope, masked = await stock_alert_service.unsubscribe(db, data.token)
+    scope, masked = await stock_alert_service.unsubscribe(db, data.token, data.source, consent_context)
     return UnsubscribeResponse(scope=scope, email=masked)

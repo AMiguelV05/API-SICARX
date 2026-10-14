@@ -267,7 +267,7 @@ Full design, live-site findings (F1-F10) and the Phase 0/3 measurements: `docs/s
 
 **Ranking** (`search_service`; the weights were chosen by comparing variants over the full catalog; see the spec before changing them)
 - `sku_compact`/`name_compact` (`wd40`)/`additional_skus` have no typos. `name_first` (the name's first word = product type) has a deliberately **low** weight: at a high weight, `llave allen` returned artillery wrenches with "boca hexagonal". `text_match_type=max_weight`; prefix only when the last word has ≥ 3 chars.
-- Relevance sort: `_text_match`, then a weighted `_eval` tie-break (name **starts with** a query word ×3, in stock ×1), then `sales_count`. Nearly all products have `sales_count` 0, so text-match ties are common: without the tie-break, `martillos` put "Engrapadora tipo martillo" first.
+- Relevance sort: `_text_match`, then one lexicographic `_eval` tie-break (name **starts with** a query word > in stock > has photo; see "Orden por defecto…" (2026-10-13) for why it lists every combination instead of weights), then `sales_count`. Nearly all products have `sales_count` 0, so text-match ties are common: without the tie-break, `martillos` put "Engrapadora tipo martillo" first.
 - An exact SKU (any format, e.g. `UBP1 1/4`) is pinned first on page 1 via a second search filtering `sku_lower`. **Accepted edge:** if the pinned product isn't also a text match, the last text hit of page 1 doesn't reappear on page 2.
 
 **Endpoints**
@@ -306,7 +306,7 @@ These came from the frontend's `CAMBIOS_NECESARIOS.md`. The contract is document
 - **`onSale` filter.**
   - Postgres: `Product.is_on_sale`, backed by the partial index `ix_products_on_sale`.
   - Typesense: the `sale_until` int64 field (`0` = no valid sale, `SALE_NO_END` = no end date), filtered as `sale_until:>now`.
-- **Reindexing.** `SCHEMA_VERSION` is 3, so the worker rebuilds Typesense on its next start (~15 s). The search-dirty trigger now also watches the two columns.
+- **Reindexing.** `SCHEMA_VERSION` 3 added `sale_until` (now 4, see "Orden por defecto…"); a bump makes the worker rebuild Typesense on its next start (~15 s). The search-dirty trigger now also watches the two columns.
 - **Admin routes.** `PUT/DELETE /admin/products/{uuid}/sale`, plus bulk `PUT/DELETE /admin/products/sale` by uuids or by `categoryUuid`. Bulk accepts `compareAtPercent`. All are audited.
 
 **Productos relacionados** (`GET /products/{uuid}/related`, `related_service.py`)
@@ -336,7 +336,7 @@ These came from the frontend's `CAMBIOS_NECESARIOS.md`. The contract is document
 - **Accepted gaps.** Availability shorter than one tick is missed. Alerts expire after 90 days.
 
 **Correos de marketing**
-- **Consent.** `ClientAccount.marketing_emails` is `false` for everyone, including existing accounts. Users opt in at `register`/`google` (account creation only) or via `PATCH /auth/me`. `marketing_emails_updated_at` records the consent time.
+- **Consent.** `ClientAccount.marketing_emails` is `false` for everyone, including existing accounts. Users opt in at `register`/`google` (account creation only) or via `PATCH /auth/me`. `marketing_emails_updated_at` records the time of the last change; every change also goes to the append-only `marketing_consent_events` (see "Orden por defecto, filtro de precio e historial de consentimiento").
 - **Unsubscribe tokens.** `create_unsubscribe_token(scope, sub)` is a no-`exp` JWT on `CLIENT_JWT_SECRET` with `purpose: "unsubscribe"`, so it's rejected as a session. Scopes:
   - `marketing`: `sub` = client uuid;
   - `stock-alert`: `sub` = alert uuid.
@@ -348,6 +348,37 @@ These came from the frontend's `CAMBIOS_NECESARIOS.md`. The contract is document
   - Frequency: at most once per 7 days, and only if the cart changed after the previous email.
   - **Gotcha:** `Cart.updated_at` has `onupdate`. `abandoned_notified_at` is written with a core `UPDATE` that sets `updated_at=Cart.updated_at`, so marking doesn't look like a cart change.
 - **`order-payment-pending`** was deliberately not built (the user's decision): the unpaid reservation only lasts 30 min.
+
+### Orden por defecto, filtro de precio e historial de consentimiento (2026-10-13)
+
+These came from the frontend's `frontend_requests.md`. The contract is in `FRONTEND_INTEGRATION.md` ("Funciones nuevas (2026-10-13)") and `ADMIN_INTEGRATION.md` ("Clientes: historial de consentimiento"). Migrations: `a3d9f7c2e5b1`, `b6e2c9a4f1d7`.
+
+**Default order (`sortBy: "relevance"`)**
+- `POST /products`: in stock (`available_stock > 0`) first, then with photo (`image_url` not null/empty), then `sales_count desc, name`. Price/name sorts are unchanged.
+- `/search` (Typesense and the Postgres fallback): text match still rules. Stock and photo break ties after it, below `name_first` and above `sales_count`.
+- **Every sort ends in `Product.id`** (Postgres). `sales_count`/`name`/`price` tie constantly, and without a unique tie-breaker consecutive `offset`s could repeat or skip products. No `sortBy` on `/products` now means `ORDER BY id`, not "no order".
+- Cost: measured on the full local catalog, the new `ORDER BY` costs the same as the old one; the `count(*) OVER()` window already forces a scan of the whole filtered set.
+- **Typesense `_eval` gotcha.** `_eval([(a):3, (b):1])` does **not** sum the weights of the clauses a document matches; it gets one clause's score. This was verified against Typesense 28: a product with stock + photo tied one with stock only. So the old `name_first:3, in_stock:1` never let stock break ties among `name_first` matches. `search_service._tiebreak_eval` lists every combination as its own clause, scored by bitmask, highest first. It's lexicographic whether Typesense takes the first match or the max.
+- Index: `SCHEMA_VERSION` 4 adds `has_image` (bool) and `facet: true` on `price`. The search-dirty trigger now also fires when a product gains or loses its photo (only the crossing, not a URL change).
+
+**Price filter (`minPrice`/`maxPrice`) and `priceRange`**
+- `PriceFilterMixin` (`schemas/products.py`) is shared by `LocalCatalogFilter` and `SearchFilter`. `Decimal`, `ge=0`, inclusive, and `422` if `min > max`. It filters on `price`, never `compare_at_price`.
+- `priceRange` is the min/max of the filtered set **without** the price filter, over `price > 0` only (0.00 is a sync error and unpurchasable). It's `null` for an empty set.
+  - Postgres (`catalog_service._fetch_page`): without a price filter it rides the same `count(*) OVER()` window, at no extra cost. With one, it takes a separate aggregate over the unpriced statement.
+  - Typesense: a second search in the same `multi_search` (same `q`, unpriced `filter_by` + `price:>0`, `per_page: 0`, `facet_by: price`) reads the facet `stats`. Search order is fixed: `[main, price stats, SKU pin]`.
+- The Postgres typo fallback only runs when the unpriced word match is empty. If words match but nothing is in the price range, the answer is 0, not fuzzy matches.
+
+**Marketing consent history (`marketing_consent_events`, `marketing_consent_service.py`)**
+- Append-only legal evidence: a trigger rejects `UPDATE`/`DELETE`/`TRUNCATE`. There's no FK cascade either; the table holds evidence, like `Order`.
+- `record_marketing_consent` is the **only** writer of `ClientAccount.marketing_emails`. It sets the bool, `marketing_emails_updated_at` and the event in one transaction, with the same timestamp, so `marketingConsentAt` (`ClientPublic`) equals the latest `changedAt`. It doesn't commit.
+- When it records:
+  - register: always, even `false`;
+  - Google: only when the account is created;
+  - `PATCH /auth/me`: only on a real change;
+  - unsubscribe (scope `marketing`): only if it was `true`.
+- `source` is fixed per endpoint (`Literal` with a single value, `422` otherwise). Unsubscribe takes `email_unsubscribe`/`one_click_unsubscribe`. `admin` is reserved; no route uses it yet. The migration backfilled one `migrated` event per account that already had `marketing_emails_updated_at`.
+- IP/UA (`ConsentContextDep`) follow the rate-limit trust rule: with a valid `X-Frontend-Auth`, `X-Client-IP` and the new `X-Client-User-Agent`; otherwise the connection IP and the request's own `User-Agent`. An SSR render without a visitor gives a null IP. `rate_limit._is_trusted_frontend` became public (`is_trusted_frontend`) for this.
+- `GET /admin/clients/{uuid}/consents` (any admin) returns the full history. `AdminOrderPublic` gained `clientUuid` (null for guests) so the dashboard can get there from an order.
 
 ### Reserva local de stock (`Product.reserved`, `available_stock`) (2026-08-07)
 
@@ -777,8 +808,8 @@ All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted
 
 | Endpoint | Token used | Notes |
 |---|---|---|
-| `POST /products` (catalog listing) | none (just `x-api-key`) | Postgres only, paginated, filterable by `department_uuid`/`category_uuid`/`in_stock`, sortable via `sort_by`. |
-| `POST /search` | none (just `x-api-key`) | Typesense (see "Búsqueda con Typesense"): typo/plural/accent/unit-tolerant, admin-managed synonyms, exact SKU pinned first; price/stock hydrated from Postgres. Falls back to the Postgres search (substring match via `pg_trgm`) when Typesense is unavailable. Same filters as the catalog listing, plus `in_stock`; paginated; unchanged contract. |
+| `POST /products` (catalog listing) | none (just `x-api-key`) | Postgres only, paginated, filterable by `department_uuid`/`category_uuid`/`in_stock`/`minPrice`/`maxPrice`, sortable via `sort_by` (`relevance` = in stock, then with photo, then best-selling). Returns `priceRange`. |
+| `POST /search` | none (just `x-api-key`) | Typesense (see "Búsqueda con Typesense"): typo/plural/accent/unit-tolerant, admin-managed synonyms, exact SKU pinned first; price/stock hydrated from Postgres. Falls back to the Postgres search (substring match via `pg_trgm`) when Typesense is unavailable. Same filters as the catalog listing (incl. `minPrice`/`maxPrice`), plus `in_stock`; paginated; returns `priceRange` (additive). |
 | `GET /search/suggest` | none (just `x-api-key`) | Autocomplete: up to `limit` (1-10, default 6) products plus up to 4 matching brands with counts, in one call. `brands` is empty on the Postgres fallback. |
 | `GET /products/{uuid}/related` | none (just `x-api-key`) | "También te puede servir": bought together → taxonomy → brand → vehicles. `limit` 1-24. |
 | `POST /products/{uuid}/stock-alerts` | client account (`X-Client-Token`, optional) | "Avísame cuando llegue" for an out-of-stock product. `201`/`200` idempotent, `409` if in stock. |
@@ -883,6 +914,7 @@ Built for operational visibility (queue depth/failures were previously invisible
 | `PATCH /admin/products/brand` | Asigna/quita (`null`/`""`) la marca de 1-500 productos (`productUuids`) en un solo `UPDATE`. Éxito parcial: uuids que no resuelven vuelven en `notFound`. Auditado (`product.brand_bulk_set`). |
 | `POST /admin/brands/rename` | `{from, to}`: todo producto con `lower(brand) = lower(from)` pasa a `to` (fusiona si `to` ya existe; también corrige solo casing). `404` si nada coincide, `422` si alguno viene vacío. Auditado (`brand.rename`). |
 | `DELETE /admin/brands?name=X` | Pone `brand = null` en todo producto con esa marca (case-insensitive). Idempotente: `{updated: 0}` en vez de `404`. Auditado (`brand.delete`). |
+| `GET /admin/clients/{uuid}/consents` | Full append-only history of `marketingEmails` changes for one account (source, privacy-notice version, IP, UA, UTC time), newest first. Any admin. `404` if the account doesn't exist. |
 | `GET /admin/search/synonyms` | Paginated list of search synonyms (newest first); `q` matches the root or any word. Any admin. |
 | `POST /admin/search/synonyms` | `{root?, synonyms[]}` → `201`. Multi-way (no `root`, 2+ distinct words) or one-way (`root` + 1+ words). Words are normalized like searches (`Baterías` → `bateria`, `20 V` → `20v`) and returned in stored form. `422` for invalid shapes; `409` for an identical entry (same root + same word set). Response includes `syncedToSearch`. Audited (`search_synonym.create`). Any admin. See "Búsqueda con Typesense". |
 | `PATCH /admin/search/synonyms/{uuid}` | `exclude_unset`; explicit `root: null` makes it multi-way. Same validation. Audited with before/after (`search_synonym.update`). Any admin. |

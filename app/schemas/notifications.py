@@ -34,6 +34,10 @@ class StockAlertListResponse(CamelModel):
 
 class UnsubscribeRequest(CamelModel):
     token: str = Field(min_length=1, description="unsubscribeToken del enlace del correo.")
+    source: Literal["email_unsubscribe", "one_click_unsubscribe"] = Field(
+        default="email_unsubscribe",
+        description="one_click_unsubscribe si llega por la baja de un clic (List-Unsubscribe-Post); email_unsubscribe si la persona abrio el enlace. Se guarda en el historial de consentimiento (solo scope marketing).",
+    )
 
 
 class UnsubscribeResponse(CamelModel):

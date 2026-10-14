@@ -486,6 +486,7 @@ Respuesta `200`:
   "deletedAt": null,
   "clientEmail": "juan@example.com",
   "clientName": "Juan Pérez",
+  "clientUuid": "7f3c2a9e-…",
   "acceptedAt": null,
   "acceptedBy": null,
   "deliveryCompany": null,
@@ -2426,6 +2427,61 @@ existe. Respuesta `200`: `SearchSynonymPublic` + `syncedToSearch`.
 
 Respuesta `204`. `403` para un admin `staff`; `404` si no existe. Deja de aplicarse en el
 buscador de inmediato si el motor responde; si no, en la siguiente reconciliación (≤ 5 minutos).
+
+### Clientes: historial de consentimiento de correos de marketing (nuevo, 2026-10-13)
+
+Úsalo para atender una solicitud ARCO o una queja ante Profeco o la autoridad de datos personales. Muestra cuándo, cómo y con qué versión del aviso de privacidad un cliente aceptó o rechazó los correos de marketing. El historial solo crece: nadie, ni este endpoint ni la base de datos, puede editarlo o borrarlo.
+
+#### `GET /v1/admin/clients/{clientUuid}/consents`
+
+Lo puede usar cualquier admin autenticado (`staff` o `super_admin`). Devuelve `404` si la cuenta no existe. `clientUuid` es el `uuid` de la cuenta del cliente. Lo trae el detalle y el listado de pedidos (`clientUuid`, nuevo y aditivo; `null` en pedidos de invitado, que no tienen cuenta).
+
+```http
+GET /v1/admin/clients/7f3c…/consents
+Authorization: Bearer <token de admin>
+```
+
+Respuesta `200`:
+
+```json
+{
+  "clientUuid": "7f3c…",
+  "email": "ana@example.com",
+  "name": "Ana López",
+  "marketingEmails": false,
+  "marketingConsentAt": "2026-11-02T09:14:55.120331Z",
+  "events": [
+    {
+      "value": false,
+      "source": "one_click_unsubscribe",
+      "privacyNoticeVersion": null,
+      "ipAddress": "189.203.11.40",
+      "userAgent": "Mozilla/5.0 (iPhone; …)",
+      "changedAt": "2026-11-02T09:14:55.120331Z"
+    },
+    {
+      "value": true,
+      "source": "register_checkbox",
+      "privacyNoticeVersion": "2026-10-12",
+      "ipAddress": "189.203.11.40",
+      "userAgent": "Mozilla/5.0 (iPhone; …)",
+      "changedAt": "2026-10-13T17:02:11.482190Z"
+    }
+  ]
+}
+```
+
+- `events` es el historial completo, del más reciente al más antiguo, sin paginar. `marketingEmails` siempre coincide con el `value` del primero.
+- `changedAt` es la hora del servidor, en UTC.
+- `source` puede ser:
+  - `register_checkbox`: casilla del registro;
+  - `google_signup`: alta con Google;
+  - `account_toggle`: cambio en "Mi cuenta";
+  - `email_unsubscribe`: enlace de baja del correo;
+  - `one_click_unsubscribe`: baja de un clic del cliente de correo;
+  - `admin`: reservado, hoy no hay ruta admin que lo cambie;
+  - `migrated`: el estado que la cuenta ya tenía antes de que existiera este historial, sin versión, IP ni user agent.
+- `privacyNoticeVersion`, `ipAddress` y `userAgent` pueden ser `null` si el frontend no los mandó.
 
 ### Importación masiva por Excel
 
