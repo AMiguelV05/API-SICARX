@@ -9,10 +9,15 @@ name: Offsite database backup
 # dia datos que son 100% reconstruibles desde Sicar X (el catalogo de
 # `products` - ver "Local catalog vs. live SICAR X data" en CLAUDE.md):
 #
-#   - `frequent`: cada 5 minutos, TODO excepto `products` - ordenes, clientes,
-#     pagos, reviews, cupones, admin, taxonomia/vehiculos PIM. Esto es lo que
-#     da RPO de minutos para los datos genuinamente irremplazables. Retencion
-#     corta (7 dias) en R2.
+#   - `frequent`: cada 5 minutos, TODO excepto `products`, `vehicles` y
+#     `product_categories` - ordenes, clientes, pagos, reviews, cupones, admin,
+#     arbol de categorias. Esto es lo que da RPO de minutos para los datos
+#     genuinamente irremplazables. Retencion corta (7 dias) en R2.
+#     `vehicles` (~42k filas de referencia de Gonher, sembradas una vez por
+#     import_gonher_vehicles.py) y `product_categories` (~46k asignaciones, casi
+#     todas por carga masiva de Excel) eran ~95% del dump (~8.5 de ~9 MB
+#     transferidos desde Postgres por corrida) y cambian rara vez: quedan solo en
+#     `daily`, igual que los campos admin-curados de `products`.
 #   - `daily`: una vez al dia (09:00 UTC, madrugada en horario de Mexico),
 #     base de datos COMPLETA incluyendo `products` - captura los campos
 #     admin-curados que Sicar X no tiene (brand/bulletPoints/technicalSpecs/
@@ -64,7 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Dump database (excluding products)
+      - name: Dump database (excluding products, vehicles, product_categories)
         env:
           BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
         run: |
@@ -79,6 +84,8 @@ jobs:
             postgres:18-alpine \
             pg_dump --format=custom --no-owner --no-privileges \
               --exclude-table=public.products \
+              --exclude-table=public.vehicles \
+              --exclude-table=public.product_categories \
               --dbname="$BACKUP_DATABASE_URL" \
               --file="/backup/sicarx-${TIMESTAMP}.dump"
 
