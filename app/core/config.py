@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     CLIENT_JWT_EXPIRE_MINUTES: int = 10080  # 7 dias
     ENVIRONMENT: str = "production"  # "development" habilita cookies validas sobre HTTP local
 
+    # Pool de conexiones de cada proceso (ver database.py). Cada conexion ociosa es un backend
+    # de Postgres que ocupa RAM facturada; en Railway el worker usa uno mas chico que api.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
+
     # Minutos que una orden TO_PAY sin ningun intento de pago (mp_payment_id IS NULL) puede
     # quedar reservando stock localmente antes de que abandoned_order_worker.py la cancele automaticamente
     ABANDONED_ORDER_TIMEOUT_MINUTES: int = 30

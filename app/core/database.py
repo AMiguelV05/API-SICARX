@@ -17,8 +17,11 @@ engine = create_async_engine(
     pool_recycle=1800,
     # api y worker son dos procesos independientes, cada uno con su propio pool -- limites
     # explicitos y conservadores evitan agotar las conexiones del plan de Postgres en Railway.
-    pool_size=5,
-    max_overflow=5,
+    # Configurables por proceso (DB_POOL_SIZE/DB_MAX_OVERFLOW): las conexiones que el pool
+    # mantiene abiertas sin usar cuestan RAM en Postgres; el worker solo necesita overflow
+    # cuando se enciman sus jobs.
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
 )
 
 # Fábrica de sesiones asíncronas

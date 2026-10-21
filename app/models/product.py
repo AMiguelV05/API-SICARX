@@ -38,7 +38,7 @@ class Product(Base):
         Index("ix_products_on_sale", "sale_ends_at", postgresql_where=text("compare_at_price IS NOT NULL AND is_deleted = false AND is_active = true")),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
 
     sicar_uuid = Column(String, unique=True, index=True, nullable=False)
     sku = Column(String, nullable=True)
@@ -53,8 +53,9 @@ class Product(Base):
     sales_unit_uuid = Column(String, nullable=True)  # Para saber si se vende por PZA, MTR, KGS
     unit_short_name = Column(String, nullable=True)  # Nombre corto resuelto (p.ej. "PZA"/"MTR") via content.units - ver fetch_full_details_from_sicar
 
-    department_uuid = Column(String, index=True, nullable=True)
-    category_uuid = Column(String, index=True, nullable=True)
+    # Sin indice: el storefront no filtra por estos campos crudos de Sicar X (migracion c1f4a8e2d6b9).
+    department_uuid = Column(String, nullable=True)
+    category_uuid = Column(String, nullable=True)
 
     # PIM propio (no sincronizado desde Sicar X) - valores EAV libres por producto, clave=Attribute.slug.
     attributes = Column(JSONB, nullable=True)
@@ -151,7 +152,7 @@ class Product(Base):
 
     is_active = Column(Boolean, default=True)
     is_deleted = Column(Boolean, default=False)  # Para marcar productos que ya no existen en Sicar
-    last_sync_id = Column(String, index=True, nullable=True) # Columna para detectar productos a eliminar
+    last_sync_id = Column(String, nullable=True)  # Ultima pasada del sync que cambio la fila; sin indice (solo se consulta IS NOT NULL)
     details_updated_at = Column(DateTime(timezone=True), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 

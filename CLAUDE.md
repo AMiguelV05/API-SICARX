@@ -73,7 +73,16 @@ Before this, the bill was ~80% RAM (`railway usage --json`, per service: `railwa
 
 Result, measured 2026-10-06 (≈4.7 days after the Postgres fix): Postgres 0.97 → 0.30 GB RAM and 0.044 → 0.004 vCPU; spend ~$0.58/day (~$17.50/30 days) vs ~$26.60/month before the fixes.
 
-Watch it with `railway metrics --all --since 7d` and `railway usage`. No workspace usage limit is set.
+Watch it with `railway metrics --all --since 7d` and `railway usage`. The workspace has a usage limit: soft $20, **hard $25** (services stop at the hard limit).
+
+**Review 2026-10-21** (billing period from 2026-10-14): ~$0.69/day ≈ $21/month, 92% RAM.
+- The `frontend` service (Next.js, its own repo) now lives in this project and is the biggest line: ~$7.40/month, 0.4–1.4 GB.
+- Then `typesense` (~$6.40, steady 0.63 GB; the schema has no unused fields), Postgres (~$3.30, 0.29 GB), `worker` (~$2.10) and `api` (~$1.80).
+- Measured WAL: 0.86 MB per sync pass. Changes made:
+  - migration `c1f4a8e2d6b9` drops `ix_products_id` (duplicate of the PK), `ix_products_last_sync_id`, `ix_products_department_uuid` and `ix_products_category_uuid` (1-3 scans since 2026-09-09; the storefront filters by `taxonomyUuid`), all with `DROP INDEX CONCURRENTLY`;
+  - the sync commits right after reading each page, so it no longer stays `idle in transaction` across the SICAR X HTTP calls;
+  - pool size is configurable (`DB_POOL_SIZE`/`DB_MAX_OVERFLOW`, default 5/5); the `worker` uses 2/6 on Railway;
+  - `MALLOC_ARENA_MAX=2` is set on `api` and `worker`.
 
 ### Disaster recovery and backups (2026-09-09)
 

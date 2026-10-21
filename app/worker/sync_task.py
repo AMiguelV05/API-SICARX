@@ -282,6 +282,11 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0, refresh_hidden: 
 
             page_uuids = [p.get("uuid") for p in items if p.get("uuid")]
             stored = await _load_stored(db, page_uuids)
+            # Cierra la transaccion de lectura antes de las llamadas HTTP (hidden y la pagina
+            # siguiente). Sin esto, una pagina sin cambios no hacia commit y la transaccion
+            # seguia abierta ("idle in transaction") mientras se esperaba a Sicar X,
+            # reteniendo una conexion y el horizonte de VACUUM.
+            await db.commit()
             to_check = page_uuids if refresh_hidden else [u for u in page_uuids if u not in stored]
             hidden_map = await _fetch_hidden_map(client, to_check) if to_check else {}
             if hidden_map is None:
