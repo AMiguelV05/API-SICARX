@@ -72,3 +72,26 @@ async def test_invalid_tokens(api, db):
     # ...ni un enlace de baja como sesion.
     unsub = create_unsubscribe_token("marketing", client.uuid)
     assert (await api.get("/v1/auth/me", headers={"Authorization": unsub})).status_code == 401
+
+
+async def test_unsubscribe_survives_secret_rotation(api, db, monkeypatch):
+    """Tras rotar CLIENT_JWT_SECRET, un enlace de baja ya enviado sigue sirviendo con
+    CLIENT_JWT_SECRET_PREVIOUS, pero una sesion firmada con el secreto viejo no."""
+    from app.core.config import settings
+
+    client = make_client_account(email="elena@example.com", marketing_emails=True)
+    db.add(client)
+    await db.flush()
+    old_unsub = create_unsubscribe_token("marketing", client.uuid)
+    old_session = create_client_token(client.uuid)
+
+    monkeypatch.setattr(settings, "CLIENT_JWT_SECRET_PREVIOUS", settings.CLIENT_JWT_SECRET)
+    monkeypatch.setattr(settings, "CLIENT_JWT_SECRET", "secreto-rotado-para-la-prueba-0123456789")
+
+    assert (await api.get("/v1/auth/me", headers={"Authorization": old_session})).status_code == 401
+    response = await api.post("/v1/notifications/unsubscribe", json={"token": old_unsub})
+    assert response.status_code == 200, response.text
+    assert client.marketing_emails is False
+
+    monkeypatch.setattr(settings, "CLIENT_JWT_SECRET_PREVIOUS", None)
+    assert (await api.post("/v1/notifications/unsubscribe", json={"token": old_unsub})).status_code == 400

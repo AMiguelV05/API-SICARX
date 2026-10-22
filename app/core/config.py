@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     SICAR_PRICE_LIST_ID: str
     CASH_REGISTER_UUID: str
     CLIENT_JWT_SECRET: str
+    # Secreto anterior tras una rotacion. Solo se acepta para los tokens de baja de los correos
+    # (sin exp, ya enviados), nunca para sesiones ni verificacion: ver decode_unsubscribe_token.
+    CLIENT_JWT_SECRET_PREVIOUS: Optional[str] = None
     CLIENT_JWT_EXPIRE_MINUTES: int = 10080  # 7 dias
     ENVIRONMENT: str = "production"  # "development" habilita cookies validas sobre HTTP local
 

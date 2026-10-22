@@ -115,9 +115,19 @@ def create_unsubscribe_token(scope: str, sub: str) -> str:
 def decode_unsubscribe_token(token: str) -> tuple[str, str]:
     """Inverso de create_unsubscribe_token -> (scope, sub). 400 si no es valido."""
     invalid = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enlace de baja inválido.")
-    try:
-        payload = jwt.decode(token, settings.CLIENT_JWT_SECRET, algorithms=[CLIENT_JWT_ALGORITHM])
-    except jwt.InvalidTokenError:
+    # Tras rotar CLIENT_JWT_SECRET, los enlaces de correos ya enviados siguen firmados con el
+    # anterior y no caducan; se aceptan con CLIENT_JWT_SECRET_PREVIOUS. Aunque ese secreto se
+    # haya filtrado, con el solo se puede dar de baja a alguien, nunca iniciar sesion.
+    payload = None
+    for secret in (settings.CLIENT_JWT_SECRET, settings.CLIENT_JWT_SECRET_PREVIOUS):
+        if not secret:
+            continue
+        try:
+            payload = jwt.decode(token, secret, algorithms=[CLIENT_JWT_ALGORITHM])
+            break
+        except jwt.InvalidTokenError:
+            continue
+    if payload is None:
         raise invalid
     scope, sub = payload.get("scope"), payload.get("sub")
     if payload.get("purpose") != "unsubscribe" or scope not in UNSUBSCRIBE_SCOPES or not sub:
