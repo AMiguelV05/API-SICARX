@@ -214,3 +214,56 @@ async def test_mediation_then_real_chargeback_fires_both_alerts(db, monkeypatch)
 
     mock_chargeback.assert_awaited_once()  # la escalacion SI debe re-avisar
     assert order.disputed_at == first_disputed_at  # marcador historico, no se pisa
+
+
+def _signed_webhook(data_id: str, type_: str) -> tuple[str, dict]:
+    """URL y headers de una notificacion firmada como lo documenta Mercado Pago:
+    HMAC-SHA256(clave secreta, "id:{data.id};request-id:{x-request-id};ts:{ts};")."""
+    import hashlib
+    import hmac
+
+    from app.core.config import settings
+
+    ts, request_id = "1761400000", "req-abc-123"
+    manifest = f"id:{data_id.lower()};request-id:{request_id};ts:{ts};"
+    v1 = hmac.new(settings.MP_WEBHOOK_SECRET.encode(), manifest.encode(), hashlib.sha256).hexdigest()
+    url = f"/v1/payments/webhook?data.id={data_id}&type={type_}"
+    return url, {"x-signature": f"ts={ts},v1={v1}", "x-request-id": request_id}
+
+
+async def test_webhook_routes_topic_chargebacks_wh_to_chargeback_service(api, db, monkeypatch):
+    """El evento "Contracargos" llega con type "topic_chargebacks_wh" (no "chargebacks"):
+    debe consultarse /v1/chargebacks/{id}, nunca /v1/payments/{id} con el id del caso."""
+    from app.services import payment_service
+
+    order = _make_paid_order(mp_payment_id="mp-901")
+    db.add(order)
+    await db.flush()
+
+    get_chargeback = AsyncMock(return_value=_mp_chargeback_payload(chargeback_id="233000061680860000", mp_payment_id="mp-901"))
+    get_payment = AsyncMock(side_effect=AssertionError("no debe consultarse como pago"))
+    monkeypatch.setattr(payment_service, "get_chargeback", get_chargeback)
+    monkeypatch.setattr(payment_service, "get_payment", get_payment)
+
+    url, headers = _signed_webhook("233000061680860000", "topic_chargebacks_wh")
+    response = await api.post(url, headers=headers, json={"type": "topic_chargebacks_wh", "data": {"id": 233000061680860000}})
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    get_chargeback.assert_awaited_once_with("233000061680860000")
+    chargeback = await db.scalar(select(Chargeback).where(Chargeback.order_id == order.id))
+    assert chargeback is not None and chargeback.status == "IN_PROCESS"
+
+
+async def test_webhook_rejects_bad_signature(api, monkeypatch):
+    from app.services import payment_service
+
+    get_payment = AsyncMock(side_effect=AssertionError("no debe procesarse"))
+    monkeypatch.setattr(payment_service, "get_payment", get_payment)
+
+    url, headers = _signed_webhook("123", "payment")
+    headers["x-signature"] = headers["x-signature"][:-4] + "0000"
+    response = await api.post(url, headers=headers, json={"type": "payment", "data": {"id": "123"}})
+
+    assert response.json() == {"status": "invalid signature"}
+    get_payment.assert_not_awaited()

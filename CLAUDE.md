@@ -52,6 +52,8 @@ Gotchas hit during that deploy:
 
 **Cutover done 2026-09-26 22:29 UTC**: the two variables are now set on `api` too, so production `/search`/`/search/suggest` run on Typesense. Verified live: suggest returns brands (only possible via Typesense) and searches take ~0.25-0.36 s, with 0 fallback/breaker lines in the `api` logs. Rollback: unset `TYPESENSE_URL`/`TYPESENSE_API_KEY` on `api`; search falls back to Postgres on the redeploy, with no code change.
 
+**Frontend Node version is pinned (2026-10-22)**: the `frontend` service has `RAILPACK_NODE_VERSION=24.22.1`. Railpack resolved `engines: "24.x"` to 24.21.0 even after the 24.22.1 security release (CVE-2026-111497, Brotli RCE), and the env var takes precedence over `engines`. It freezes Node: bump it on every Node 24 security release, or delete it once Railpack resolves `24.x` to the latest (check the `mise node@` line in the build log).
+
 **Running a one-off script inside a service** (e.g. `railway ssh --service worker -- python -u search_eval.py`) needs:
 - an SSH key registered with `railway ssh keys add`;
 - `ssh.railway.com` in `~/.ssh/known_hosts` (`ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts`), since the non-interactive shell can't answer the host-key prompt;
@@ -756,7 +758,12 @@ below never fires):
    deliberately untouched (stays `PAID`) — same "money-only event" policy as partial
    refunds (see "Admin RBAC, audit log, and partial refunds" below).
 2. **Enriched path, needs the dashboard topic enabled** — `POST /payments/webhook`
-   branches on `topic`/`type` before assuming `payment`; a `chargebacks` topic calls
+   branches on `topic`/`type` before assuming `payment`. **Correction (2026-10-25)**: the
+   "Contracargos" event arrives with `type: "topic_chargebacks_wh"`, not `chargebacks` (per
+   Mercado Pago's own notification example); the route used to match only `chargebacks`,
+   so an enabled topic would have fallen through to `get_payment` with a case id and
+   errored on every retry. It now matches both (`CHARGEBACK_TOPICS` in `routes/payments.py`;
+   HTTP-level test with a real signature in `tests/test_chargebacks.py`). A chargeback topic calls
    `payment_service.get_chargeback(id)` (`GET /v1/chargebacks/{id}`, a **different**
    Mercado Pago resource/id than a payment) and hands the response to
    `chargeback_service.process_chargeback_notification`, which resolves the `Order` via

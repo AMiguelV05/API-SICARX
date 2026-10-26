@@ -8,6 +8,11 @@ from app.services.order_history_service import get_order_by_uuid, finalize_order
 
 logger = logging.getLogger(__name__)
 
+# El evento "Contracargos" llega con type "topic_chargebacks_wh" (ejemplo oficial en
+# developers/es/docs/checkout-pro-preferences/chargebacks/notifications); "chargebacks" se
+# conserva por si alguna integracion vieja lo manda asi.
+CHARGEBACK_TOPICS = {"topic_chargebacks_wh", "chargebacks"}
+
 # Sin validate_api_key a proposito: Mercado Pago no puede mandar nuestra x-api-key
 # estatica. La autenticidad se garantiza con verify_mercadopago_webhook_signature
 # (x-signature/x-request-id contra MP_WEBHOOK_SECRET) - ver payment_service.py.
@@ -46,7 +51,7 @@ async def mercado_pago_webhook(request: Request, db: DbDep, background_tasks: Ba
     # Requiere habilitar el topic "Chargebacks" en el dashboard de Mercado Pago (ver
     # CLAUDE.md, "Contracargos de Mercado Pago"); si nunca se habilita, el mismo evento se
     # detecta igual via el topic "payment" de abajo (payment.status == "charged_back").
-    if topic == "chargebacks":
+    if topic in CHARGEBACK_TOPICS:
         mp_chargeback = await payment_service.get_chargeback(str(resource_id))
         await chargeback_service.process_chargeback_notification(db, mp_chargeback, background_tasks)
         return {"status": "ok"}

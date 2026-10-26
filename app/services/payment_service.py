@@ -203,7 +203,7 @@ async def cancel_payment(payment_id: str) -> dict:
     return response.json()
 
 async def verify_mercadopago_webhook_signature(request: Request) -> bool:
-    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET (esquema distinto al webhook saliente propio de este backend, ver notify_order_confirmed). El formato del manifest esta confirmado por fuentes de la comunidad pero no verificado contra una notificacion real - verificar con el simulador de MP antes de confiar en produccion."""
+    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET (esquema distinto al webhook saliente propio de este backend, ver notify_order_confirmed). Manifest `id:{data.id};request-id:{x-request-id};ts:{ts};` con data.id en minusculas: coincide con la guia oficial de Webhooks ("Validar origen de una notificacion", seccion Sin SDKs, revisada 2026-10-25). Falta confirmarlo con una notificacion real o el simulador de MP."""
     x_signature = request.headers.get("x-signature")
     x_request_id = request.headers.get("x-request-id")
     if not x_signature or not x_request_id:
