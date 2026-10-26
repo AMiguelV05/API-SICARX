@@ -18,10 +18,9 @@ async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantitie
     disponible pueden leer `available_stock` ANTES de que cualquiera de los dos escriba su
     reserva (`apply_reserved_deltas` es un UPDATE incondicional, sin re-chequeo contra stock),
     dejando `reserved` > `stock` y ambas ordenes avanzan a pago real por la misma unidad. El
-    lock se sostiene hasta el unico commit de routes/orders.py::create_order (linea 266),
-    igual que coupon_service.lock_and_validate_coupon con Coupon - incluye la llamada a
-    Mercado Pago (create_preference), aceptable porque MP_TIMEOUT acota esa espera a ~20s y
-    ya es el trade-off aceptado hoy para el lock de Coupon en esta misma funcion. No bloquea
+    lock se sostiene hasta el unico commit de routes/orders.py::create_order, igual que
+    coupon_service.lock_and_validate_coupon con Coupon; esa transaccion no hace llamadas
+    externas (ya no se crea una preferencia de Mercado Pago al hacer checkout). No bloquea
     lecturas normales (GET /catalog, /search, GET /products/{uuid}, etc.): son SELECT sin
     FOR UPDATE, que bajo MVCC de Postgres nunca esperan el lock de otra transaccion.
 

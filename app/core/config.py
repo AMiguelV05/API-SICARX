@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     MP_ACCESS_TOKEN: str
     MP_WEBHOOK_SECRET: str  # valida x-signature en las notificaciones entrantes
     FRONTEND_BASE_URL: str  # dominio real del frontend
-    API_BASE_URL: str  # dominio publico la API
 
     # Webhook saliente hacia el frontend (correo de confirmacion de pedido via Resend en el frontend)
     FRONTEND_WEBHOOK_SECRET: str

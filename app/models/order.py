@@ -92,14 +92,11 @@ class Order(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
     # Datos del pago con Mercado Pago; nulos hasta el primer intento de cobro.
-    mp_payment_id = Column(String, unique=True, index=True, nullable=True)
-    mp_status = Column(String, nullable=True)  # approved/pending/in_process/rejected/cancelled/refunded
+    mp_payment_id = Column(String, unique=True, index=True, nullable=True)  # id de la order de MP (ORD...)
+    mp_status = Column(String, nullable=True)  # approved/pending/in_process/rejected/cancelled/refunded (ver payment_service._order_as_payment)
     mp_status_detail = Column(String, nullable=True)
-    mp_payment_method_id = Column(String, nullable=True)  # visa/oxxo/account_money/...
-    mp_ticket_url = Column(String, nullable=True)  # external_resource_url (p. ej. ficha OXXO)
-
-    # Persistido para reconstruir OrderResponse en un reintento idempotente sin volver a llamar a Mercado Pago.
-    mp_preference_id = Column(String, nullable=True)
+    mp_payment_method_id = Column(String, nullable=True)  # visa/oxxo/...
+    mp_ticket_url = Column(String, nullable=True)  # ticket_url de la transaccion (p. ej. ficha OXXO)
 
     # Aceptacion admin; accepted_by es texto libre (no hay modelo de usuarios admin). Independiente de dispatch_status.
     accepted_at = Column(DateTime(timezone=True), nullable=True)

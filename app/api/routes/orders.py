@@ -54,10 +54,9 @@ async def create_order(
     enlace de verificación, o login con Google con correo ya verificado), este pedido se
     vincula automáticamente a esa cuenta - ver `client_service.link_guest_orders_by_email`.
 
-    Esta llamada SOLO reserva el pedido localmente (`TO_PAY`) y crea la preferencia de
-    Mercado Pago — todavía no cobra nada. Devuelve `preferenceId`/`amount` para el
-    Payment Brick y `orderUuid`/`id` para `POST /orders/{id}/pay` (tarjeta/OXXO); si el
-    comprador paga con Wallet, la confirmación llega vía `POST /payments/webhook`.
+    Esta llamada SOLO reserva el pedido localmente (`TO_PAY`) — todavía no cobra nada ni
+    llama a Mercado Pago. Devuelve `amount` para el Payment Brick y `orderUuid`/`id` para
+    `POST /orders/{id}/pay` (tarjeta/OXXO).
 
     `deliveryInfo.deliveryType`: `PICKUP` o `DELIVERYMAN` (requiere `addressUuid` de una
     dirección ya guardada del cliente, o `address` inline si es invitado). No se calcula ni
@@ -120,7 +119,6 @@ async def create_order(
                         date=None,
                         status=cached_order.status,
                         orderUuid=cached_order.uuid,
-                        preferenceId=cached_order.mp_preference_id,
                         amount=float(cached_order.total),
                         discountAmount=float(cached_order.discount_amount) if cached_order.discount_amount is not None else 0.0,
                     )
@@ -271,31 +269,12 @@ async def create_order(
 
         logger.info(f"Orden {local_order.uuid} reservada (TO_PAY) en la sucursal {branch_id} para {'cliente ' + client.email if client else 'invitado ' + str(guest_email)}.")
 
-        # Se crea DESPUES del commit de arriba, con los locks FOR UPDATE de Product/Coupon
-        # ya liberados: antes, la llamada HTTP a Mercado Pago (hasta MP_TIMEOUT) se hacia
-        # con esas filas todavia bloqueadas y una conexion del pool retenida - varios
-        # checkouts concurrentes sobre un SKU con poco stock (o un cupon con tope de usos)
-        # podian entonces agotar el pool (pool_size=5 + max_overflow=5 por proceso) mientras
-        # esperaban a Mercado Pago. No fatal: si falla o tarda, la orden ya quedo creada y
-        # sigue soportando tarjeta/OXXO sin la opcion de wallet - ver payment_service.create_preference.
-        preference_id = None
-        try:
-            preference = await payment_service.create_preference(local_order)
-            if preference:
-                preference_id = preference.get("id")
-                local_order.mp_preference_id = preference_id
-                await db.commit()
-        except Exception as e:
-            await db.rollback()
-            logger.error(f"Error inesperado creando la preferencia de Mercado Pago para la orden {local_order.uuid} (la orden ya se creo correctamente, se continua sin preferenceId): {type(e).__name__}: {e!r}")
-
         return OrderResponse(
             id=local_order.sicar_order_id,
             serieFolio=None,
             date=None,
             status="TO_PAY",
             orderUuid=local_order.uuid,
-            preferenceId=preference_id,
             amount=total_amount,
             discountAmount=float(discount_amount),
         )

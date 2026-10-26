@@ -91,17 +91,16 @@ después de armar el carrito sin sesión, por si el visitante inicia sesión o s
 2. POST /v1/products                                 → mostrar catálogo / resultados de filtro
 3. GET  /v1/products/{uuid}                          → detalle al abrir una ficha de producto
 4. POST /v1/orders                                   → reservar el pedido localmente (queda TO_PAY) + preparar el cobro
-5. Renderizar el Payment Brick (Mercado Pago) con `amount`/`preferenceId` del paso 4
+5. Renderizar el Payment Brick (Mercado Pago) con el `amount` del paso 4
 6. POST /v1/orders/{order_id}/pay                    → cobrar (tarjeta/OXXO — el Brick llama a esto en su onSubmit)
-   (el método Wallet de Mercado Pago NO llama a este paso — redirige directo a Mercado Pago)
 7. (si aplica) POST /v1/orders/{order_id}/cancel     → cancelar el pedido (usa el token del paso 1, o el `id`/`orderUuid` del paso 4 si fue invitado)
 ```
 
 **Importante — esto es un cambio incompatible sobre el flujo anterior**: `POST /v1/orders`
 ya **no** cobra ni deja el pedido pagado de inmediato — ahora solo lo reserva localmente
-(`status: "TO_PAY"`) y prepara una preferencia de Mercado Pago. El pago real ocurre en el
-paso 6 (`POST /v1/orders/{order_id}/pay`) o, si el comprador elige pagar con su cuenta de
-Mercado Pago (Wallet), nunca pasa por este backend en absoluto — se confirma por webhook.
+(`status: "TO_PAY"`). El pago real ocurre en el paso 6 (`POST /v1/orders/{order_id}/pay`).
+**(2026-10-25)** Ya no hay pago con cuenta de Mercado Pago (Wallet) ni `preferenceId`: el
+Brick ofrece tarjeta de crédito/débito y OXXO.
 
 **Importante — segundo cambio incompatible (2026-07-31): Sicar X ya no se entera de un
 pedido en absoluto hasta que un administrador lo acepta.** Antes, `POST /v1/orders` creaba
@@ -1518,7 +1517,6 @@ Respuesta `201` (creación real; ver la nota de idempotencia más abajo para cu�
   "date": null,
   "status": "TO_PAY",
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "preferenceId": "123456789-abcdef01-2345-6789-abcd-ef0123456789",
   "amount": 129.99,
   "total": 129.99,
   "discountAmount": 0.0
@@ -1548,12 +1546,11 @@ siguen presentes con los mismos nombres:
   confirmación de pedido), esa UI necesita quitar o reemplazar esos campos.
 
 **Esta llamada ya NO cobra ni deja el pedido pagado** — solo lo reserva localmente (`status`
-viene `"TO_PAY"`) y prepara el cobro con Mercado Pago. **Guarda `id`** — se usa como
+viene `"TO_PAY"`); no llama a Mercado Pago. **Guarda `id`** — se usa como
 `{order_id}` tanto en `POST /v1/orders/{order_id}/pay` (siguiente paso) como en
 `POST /v1/orders/{order_id}/cancel`. **Guarda `orderUuid`** — identificador local del pedido,
-usado en `GET /v1/auth/me/orders/{orderUuid}`. `preferenceId` puede venir `null` si Mercado
-Pago no respondió al crear la preferencia (no es fatal — el pedido igual se creó y sigue
-soportando tarjeta/OXXO, solo no tendrá la opción de pagar con cuenta/Wallet de Mercado Pago).
+usado en `GET /v1/auth/me/orders/{orderUuid}`. **(2026-10-25)** `preferenceId` ya no se manda
+(se quitó el pago con Wallet).
 `amount`/`total` es el total autoritativo calculado por el backend — úsalo en
 `initialization.amount` del Payment Brick, no un total calculado en el frontend.
 
@@ -1891,30 +1888,24 @@ la lista no pertenece al cliente.
 
 Después de `POST /v1/orders`, renderiza el **Payment Brick** de Mercado Pago
 (`@mercadopago/sdk-react` o el script `sdk.mercadopago.com/js/v2`) con
-`initialization.{amount, preferenceId}` de la respuesta anterior. La clave pública de
+`initialization.amount` de la respuesta anterior (sin `preferenceId`: no hay Wallet). La clave pública de
 Mercado Pago (`NEXT_PUBLIC_MP_PUBLIC_KEY` o similar) vive en el **env del frontend** —
 esta API nunca la expone ni la necesita, solo usa el access token privado internamente.
 
-El Brick soporta tres caminos, y **solo dos de ellos llaman a esta API**:
-
-- **Tarjeta u OXXO/ticket** — el `onSubmit` del Brick entrega un `formData`
-  (`token` solo para tarjeta, `paymentMethodId`, `issuerId`, `installments`, `payer`).
-  Reenvíalo tal cual a `POST /v1/orders/{order_id}/pay` (ver abajo).
-- **Cuenta/Wallet de Mercado Pago** — el Brick redirige directo al sitio de Mercado Pago;
-  **esto nunca llama a esta API**. El comprador vuelve a tu sitio via los `back_urls` que
-  esta API configuró al crear la preferencia (`/checkout/success`, `/checkout/failure`,
-  `/checkout/pending` sobre tu propio dominio — esas páginas las implementa el frontend).
-  El pago se confirma por webhook del lado del backend; para saber si ya se aplicó, consulta
-  `GET /v1/auth/me/orders/{orderUuid}` (el `status` pasa a `"PAID"` cuando el webhook lo
-  confirma — puede tardar unos segundos tras el regreso a `/checkout/success`).
+Habilita solo tarjeta de crédito, débito y OXXO/ticket. El `onSubmit` del Brick entrega un
+`formData` (`token` solo para tarjeta, `paymentMethodId`, `issuerId`, `installments`, `payer`)
+más `selectedPaymentMethod`; reenvíalos a `POST /v1/orders/{order_id}/pay` (ver abajo).
+**(2026-10-25)** Se quitó el pago con cuenta de Mercado Pago (Wallet): dependía de una
+preferencia de Checkout Pro y de las páginas de regreso `/checkout/success|failure|pending`,
+que ya no existen.
 
 **El correo de confirmación de pedido lo envía el frontend, pero el disparo lo hace este
 backend** — en el momento exacto en que un pedido pasa a `"PAID"`, este backend llama a un
-webhook saliente en tu propio dominio (ver "Webhook saliente" más abajo). Cubre los tres
-caminos de pago por igual (tarjeta/OXXO síncrono, y Wallet/OXXO tardío vía webhook),
-incluido el caso Wallet donde nunca hay una respuesta síncrona ni garantía de que el
-navegador del comprador siga abierto — por eso el disparo no puede vivir en el navegador
-(ni por polling), tiene que ser esta llamada servidor-a-servidor.
+webhook saliente en tu propio dominio (ver "Webhook saliente" más abajo). Cubre los dos
+caminos de pago por igual (tarjeta/OXXO síncrono, y OXXO/tarjeta confirmados después vía
+webhook, cuando no hay garantía de que el navegador del comprador siga abierto) — por eso el
+disparo no puede vivir en el navegador (ni por polling), tiene que ser esta llamada
+servidor-a-servidor.
 
 ### Webhook saliente: `POST {tu dominio}/api/webhooks/order-confirmed`
 
@@ -2203,6 +2194,7 @@ Content-Type: application/json
 {
   "token": "ff8080814c11e237014c1ff593b57b4d",
   "paymentMethodId": "visa",
+  "paymentTypeId": "credit_card",
   "issuerId": "310",
   "installments": 1,
   "payer": {
@@ -2216,12 +2208,26 @@ Manda exactamente el `formData` que entrega el `onSubmit` del Brick — `token` 
 para métodos sin tarjeta (p. ej. OXXO). **No mandes ningún monto** — el backend siempre cobra
 el `amount` ya calculado en `POST /v1/orders`, nunca un valor que venga del frontend.
 
+**(2026-10-25) Cobro por la Orders API de Mercado Pago.** Las credenciales de las apps nuevas
+de Mercado Pago ya no aceptan la Payments API, así que el backend cobra con `POST /v1/orders`
+de MP. Para el frontend cambian tres cosas:
+- `paymentTypeId` (nuevo, opcional): manda el `selectedPaymentMethod` del `onSubmit` del Brick
+  (`credit_card`, `debit_card`, `prepaid_card`, `ticket`, ...). Si falta, el backend lo deduce
+  del catálogo de MP. `issuerId` se sigue aceptando pero ya no se usa.
+- `mpPaymentId` ahora es el id de la order de MP (`ORD01...`), no un número. No uses el **Status
+  Screen Brick** (solo acepta ids numéricos de la API anterior): muestra tu propio resultado.
+- `mpStatusDetail` usa los códigos de la Orders API en los rechazos: `rejected_by_issuer`,
+  `bad_filled_card_data`, `insufficient_amount`, `card_insufficient_amount`,
+  `invalid_installments`, `required_call_for_authorize`, `card_disabled`,
+  `max_attempts_exceeded`, `high_risk`. OXXO pendiente llega como `waiting_payment`.
+  `mpStatus` sigue en el vocabulario anterior (`approved`/`pending`/`rejected`/...).
+
 Respuesta `200`:
 ```json
 {
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "status": "PAID",
-  "mpPaymentId": "123456789",
+  "mpPaymentId": "ORD01JS2V6CM8KJ0EC4H502TGK1WP",
   "mpStatus": "approved",
   "mpStatusDetail": "accredited",
   "ticketUrl": null
@@ -2742,8 +2748,8 @@ async function mergeCartAfterLogin(clientToken: string, cartToken: string) {
   return res.json();
 }
 
-// Ya NO cobra -- solo reserva el pedido localmente (TO_PAY) y prepara el cobro con
-// Mercado Pago. Renderiza el Payment Brick con el `amount`/`preferenceId` de la respuesta.
+// Ya NO cobra -- solo reserva el pedido localmente (TO_PAY). Renderiza el Payment Brick
+// con el `amount` de la respuesta.
 // clientToken es opcional (2026-08-11) -- omitelo (undefined) para checkout de invitado;
 // en ese caso contactInfo.email es obligatorio y no se puede mandar couponCode.
 async function createOrder(
@@ -2767,13 +2773,12 @@ async function createOrder(
     const err = await res.json();
     throw new Error(err.detail ?? "No se pudo crear el pedido");
   }
-  return res.json(); // { id, serieFolio, date, status, orderUuid, preferenceId, amount }
+  return res.json(); // { id, serieFolio, date, status, orderUuid, amount, total, discountAmount }
   // Guarda `id`/`orderUuid` -- si fue checkout de invitado (sin clientToken), son la unica
   // forma de reclamar el pedido despues en payOrder/cancel/DELETE/GET /orders/guest/{id}.
 }
 
-// Llamado desde el onSubmit del Payment Brick (tarjeta/OXXO) -- NO se llama para el
-// metodo Wallet, que redirige directo a Mercado Pago (ver "Pagos con Mercado Pago").
+// Llamado desde el onSubmit del Payment Brick (tarjeta/OXXO).
 // clientToken es opcional -- omitelo para un pedido de invitado (el propio orderId ya
 // prueba pertenencia en ese caso).
 async function payOrder(orderId: string, clientToken: string | undefined, formData: Record<string, unknown>) {
@@ -2830,8 +2835,7 @@ async function payOrder(orderId: string, clientToken: string | undefined, formDa
   completo (email obligatorio, dirección inline en vez de `addressUuid`, sin cupones, y cómo
   se prueba pertenencia sin sesión).
 - **`POST /v1/orders` ya no cobra ni confirma el pedido de inmediato** — solo lo reserva
-  (`status: "TO_PAY"`). El cobro real ocurre en `POST /v1/orders/{order_id}/pay` (tarjeta/OXXO) o,
-  para el método Wallet de Mercado Pago, nunca pasa por este backend — se confirma por webhook.
+  (`status: "TO_PAY"`). El cobro real ocurre en `POST /v1/orders/{order_id}/pay` (tarjeta/OXXO).
   No asumas que un pedido está pagado solo porque `POST /v1/orders` respondió `200`.
 - **Seguimiento post-compra sí existe**: `GET /v1/auth/me/orders` (lista) y
   `GET /v1/auth/me/orders/{orderUuid}` (detalle, con `dispatchStatus`/`dispatchHistory`) — ver

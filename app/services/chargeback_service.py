@@ -19,33 +19,23 @@ def _map_coverage_to_status(coverage_applied: bool | None) -> str:
     return "WON" if coverage_applied else "LOST"
 
 
-async def process_chargeback_notification(db: AsyncSession, mp_chargeback: dict, background_tasks: BackgroundTasks) -> None:
-    """Aplica el detalle de `GET /v1/chargebacks/{id}` (topic "chargebacks" de Mercado
-    Pago - debe habilitarse explicitamente en su dashboard, ver CLAUDE.md) a la orden
-    local. Camino "enriquecido": a diferencia de la deteccion via topic "payment" en
-    `finalize_order_payment` (siempre disponible pero solo sabe que hay un contracargo),
-    este trae deadline/elegibilidad y, al resolverse, el resultado real
-    (`coverage_applied`).
+async def process_chargeback(db: AsyncSession, order: Order, mp_chargeback: dict, background_tasks: BackgroundTasks) -> None:
+    """Aplica a `order` el detalle de `GET /v1/chargebacks/{case_id}`. El webhook lo llama
+    por cada caso en `transactions.chargebacks[]` de la order de Mercado Pago (Orders API):
+    a diferencia de la deteccion por estado en `finalize_order_payment` (que solo sabe que
+    hay un contracargo), este trae deadline/elegibilidad y, al resolverse, el resultado real
+    (`coverage_applied`). Antes se buscaba la orden por `payments[0]` del contracargo, un id
+    numerico de la Payments API que ya no coincide con nada.
 
     Idempotente: se identifica por `mp_chargeback_id`, asi que una notificacion repetida
     (incluida la de resolucion) solo refresca los campos de la fila existente en vez de
     duplicarla. No toca `Order.status` ni `Product.stock`/`reserved` - evento solo
     monetario/de registro, mismo criterio que un reembolso parcial."""
     mp_chargeback_id = str(mp_chargeback.get("id")) if mp_chargeback.get("id") is not None else None
-    payments = mp_chargeback.get("payments") or []
-    mp_payment_id = str(payments[0]) if payments else None
+    mp_payment_id = order.mp_payment_id
 
-    if not mp_payment_id:
-        logger.warning(f"Notificacion de contracargo sin payments[] (chargeback {mp_chargeback_id}) - no se puede resolver la orden.")
-        return
-
-    locked_result = await db.execute(
-        select(Order).where(Order.mp_payment_id == mp_payment_id).with_for_update()
-    )
-    order = locked_result.scalar_one_or_none()
-    if not order:
-        logger.warning(f"Notificacion de contracargo para un mp_payment_id desconocido: {mp_payment_id} (chargeback {mp_chargeback_id}).")
-        return
+    locked_result = await db.execute(select(Order).where(Order.id == order.id).with_for_update())
+    order = locked_result.scalar_one()
 
     chargeback = None
     if mp_chargeback_id:

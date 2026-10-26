@@ -1,7 +1,7 @@
 """Cubre la deteccion de contracargos ("Compra no reconocida"): el camino por defecto via
 finalize_order_payment (topic "payment" de Mercado Pago, payment.status == "charged_back")
-y el camino enriquecido via chargeback_service.process_chargeback_notification (topic
-"chargebacks"). Ninguno debe tocar Order.status/Product.stock/reserved - evento solo
+y el camino enriquecido via chargeback_service.process_chargeback (detalle de
+/v1/chargebacks/{case_id} para cada caso en transactions.chargebacks[] de la order). Ninguno debe tocar Order.status/Product.stock/reserved - evento solo
 monetario/de registro, mismo criterio que un reembolso parcial. Ver CLAUDE.md,
 "Contracargos de Mercado Pago"."""
 import uuid
@@ -79,9 +79,7 @@ async def test_chargebacks_topic_notification_creates_row_and_marks_disputed(db)
     db.add(order)
     await db.flush()
 
-    await chargeback_service.process_chargeback_notification(
-        db, _mp_chargeback_payload(mp_payment_id="mp-555"), BackgroundTasks()
-    )
+    await chargeback_service.process_chargeback(db, order, _mp_chargeback_payload(mp_payment_id="mp-555"), BackgroundTasks())
 
     await db.refresh(order)
     assert order.disputed_at is not None
@@ -99,12 +97,8 @@ async def test_chargeback_lost_resolution_updates_status_without_touching_order(
     db.add(order)
     await db.flush()
 
-    await chargeback_service.process_chargeback_notification(
-        db, _mp_chargeback_payload(chargeback_id="cb-2", mp_payment_id="mp-777"), BackgroundTasks()
-    )
-    await chargeback_service.process_chargeback_notification(
-        db, _mp_chargeback_payload(chargeback_id="cb-2", mp_payment_id="mp-777", coverage_applied=False), BackgroundTasks()
-    )
+    await chargeback_service.process_chargeback(db, order, _mp_chargeback_payload(chargeback_id="cb-2", mp_payment_id="mp-777"), BackgroundTasks())
+    await chargeback_service.process_chargeback(db, order, _mp_chargeback_payload(chargeback_id="cb-2", mp_payment_id="mp-777", coverage_applied=False), BackgroundTasks())
 
     chargeback = await db.scalar(select(Chargeback).where(Chargeback.mp_chargeback_id == "cb-2"))
     assert chargeback.status == "LOST"
@@ -119,12 +113,8 @@ async def test_chargeback_won_resolution_updates_status(db):
     db.add(order)
     await db.flush()
 
-    await chargeback_service.process_chargeback_notification(
-        db, _mp_chargeback_payload(chargeback_id="cb-3", mp_payment_id="mp-888"), BackgroundTasks()
-    )
-    await chargeback_service.process_chargeback_notification(
-        db, _mp_chargeback_payload(chargeback_id="cb-3", mp_payment_id="mp-888", coverage_applied=True), BackgroundTasks()
-    )
+    await chargeback_service.process_chargeback(db, order, _mp_chargeback_payload(chargeback_id="cb-3", mp_payment_id="mp-888"), BackgroundTasks())
+    await chargeback_service.process_chargeback(db, order, _mp_chargeback_payload(chargeback_id="cb-3", mp_payment_id="mp-888", coverage_applied=True), BackgroundTasks())
 
     chargeback = await db.scalar(select(Chargeback).where(Chargeback.mp_chargeback_id == "cb-3"))
     assert chargeback.status == "WON"
@@ -136,20 +126,11 @@ async def test_repeated_notification_for_same_chargeback_id_does_not_duplicate_r
     await db.flush()
 
     payload = _mp_chargeback_payload(chargeback_id="cb-4", mp_payment_id="mp-999")
-    await chargeback_service.process_chargeback_notification(db, payload, BackgroundTasks())
-    await chargeback_service.process_chargeback_notification(db, payload, BackgroundTasks())
+    await chargeback_service.process_chargeback(db, order, payload, BackgroundTasks())
+    await chargeback_service.process_chargeback(db, order, payload, BackgroundTasks())
 
     count = len((await db.execute(select(Chargeback).where(Chargeback.mp_chargeback_id == "cb-4"))).scalars().all())
     assert count == 1
-
-
-async def test_chargeback_notification_for_unknown_payment_id_is_ignored(db):
-    """No debe lanzar excepcion - es un webhook, no una llamada de un cliente autenticado."""
-    await chargeback_service.process_chargeback_notification(
-        db, _mp_chargeback_payload(mp_payment_id="mp-no-existe"), BackgroundTasks()
-    )
-    result = await db.execute(select(Chargeback))
-    assert result.scalars().all() == []
 
 
 async def test_charged_back_payment_on_cancelled_order_still_marks_disputed(db):
@@ -231,28 +212,50 @@ def _signed_webhook(data_id: str, type_: str) -> tuple[str, dict]:
     return url, {"x-signature": f"ts={ts},v1={v1}", "x-request-id": request_id}
 
 
-async def test_webhook_routes_topic_chargebacks_wh_to_chargeback_service(api, db, monkeypatch):
-    """El evento "Contracargos" llega con type "topic_chargebacks_wh" (no "chargebacks"):
-    debe consultarse /v1/chargebacks/{id}, nunca /v1/payments/{id} con el id del caso."""
+async def test_order_webhook_with_chargebacks_fills_chargeback_table(api, db, monkeypatch):
+    """Con la Orders API el contracargo llega como notificacion de la order
+    (`order.charged_back`) con `transactions.chargebacks[]`: por cada `case_id` se consulta
+    /v1/chargebacks/{case_id} y se registra contra ESA orden, sin buscarla por id de pago."""
     from app.services import payment_service
 
-    order = _make_paid_order(mp_payment_id="mp-901")
+    order = _make_paid_order(mp_payment_id="ORDTST01CHARGEBACK000000000000")
     db.add(order)
     await db.flush()
 
-    get_chargeback = AsyncMock(return_value=_mp_chargeback_payload(chargeback_id="233000061680860000", mp_payment_id="mp-901"))
-    get_payment = AsyncMock(side_effect=AssertionError("no debe consultarse como pago"))
+    mp_payment = {
+        "id": order.mp_payment_id, "status": "in_mediation", "status_detail": "in_process",
+        "external_reference": order.uuid, "transaction_details": {}, "chargeback_case_ids": ["233000061680860000"],
+    }
+    monkeypatch.setattr(payment_service, "get_payment", AsyncMock(return_value=mp_payment))
+    get_chargeback = AsyncMock(return_value=_mp_chargeback_payload(chargeback_id="233000061680860000", mp_payment_id="ignorado"))
     monkeypatch.setattr(payment_service, "get_chargeback", get_chargeback)
-    monkeypatch.setattr(payment_service, "get_payment", get_payment)
 
-    url, headers = _signed_webhook("233000061680860000", "topic_chargebacks_wh")
-    response = await api.post(url, headers=headers, json={"type": "topic_chargebacks_wh", "data": {"id": 233000061680860000}})
+    url, headers = _signed_webhook(order.mp_payment_id, "order")
+    response = await api.post(url, headers=headers, json={"type": "order", "action": "order.charged_back", "data": {"id": order.mp_payment_id}})
 
-    assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     get_chargeback.assert_awaited_once_with("233000061680860000")
     chargeback = await db.scalar(select(Chargeback).where(Chargeback.order_id == order.id))
     assert chargeback is not None and chargeback.status == "IN_PROCESS"
+    assert chargeback.mp_payment_id == order.mp_payment_id
+    await db.refresh(order)
+    assert order.disputed_at is not None and order.status == "PAID"
+
+
+async def test_standalone_chargeback_event_is_ignored(api, monkeypatch):
+    """El evento suelto "Contracargos" (`type=topic_chargebacks_wh`, id = case_id numerico)
+    ya no se procesa: lo cubre la notificacion de la order."""
+    from app.services import payment_service
+
+    get_payment = AsyncMock(side_effect=AssertionError("no debe consultarse"))
+    get_chargeback = AsyncMock(side_effect=AssertionError("no debe consultarse"))
+    monkeypatch.setattr(payment_service, "get_payment", get_payment)
+    monkeypatch.setattr(payment_service, "get_chargeback", get_chargeback)
+
+    url, headers = _signed_webhook("233000061680860000", "topic_chargebacks_wh")
+    response = await api.post(url, headers=headers, json={"type": "topic_chargebacks_wh", "data": {"id": 233000061680860000}})
+
+    assert response.json() == {"status": "ignored"}
 
 
 async def test_webhook_rejects_bad_signature(api, monkeypatch):

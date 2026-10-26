@@ -135,7 +135,6 @@ class OrderResponse(CamelModel):
     date: Optional[float] = Field(default=None, deprecated=True, description="Ya no aplica - Sicar X no crea ningun documento al hacer checkout. Siempre null.")
     status: str = Field(description="Estado local de la orden justo despues de crearla (siempre TO_PAY)")
     orderUuid: str = Field(description="UUID local de la orden - usar con GET /auth/me/orders/{orderUuid} y con POST /orders/{id}/pay")
-    preferenceId: Optional[str] = Field(default=None, description="ID de preferencia de Mercado Pago para initialization.preferenceId del Payment Brick (null si Mercado Pago no respondio)")
     # deprecated=True (Pydantic, no solo el texto de description): aparece marcado en
     # /openapi.json y renderizado tachado en /docs, asi que un futuro cliente que integre
     # contra esta API ve la desaprobacion en la propia especificacion, no solo si lee el
@@ -163,6 +162,7 @@ class PaymentSubmit(CamelModel):
     """Shape del `formData` del onSubmit del Payment Brick de Mercado Pago - se reenvia tal cual."""
     token: Optional[str] = Field(default=None, description="Token de tarjeta generado por el Brick (ausente en OXXO/otros metodos sin tarjeta)")
     paymentMethodId: str = Field(description="p. ej. visa, oxxo, etc.")
+    paymentTypeId: Optional[str] = Field(default=None, description="`selectedPaymentMethod` del onSubmit del Brick: credit_card, debit_card, prepaid_card, ticket, atm o bank_transfer. Opcional: si falta, el backend lo deduce del catálogo de Mercado Pago.")
     issuerId: Optional[str] = None
     installments: Optional[int] = Field(default=1)
     payer: PaymentPayer
@@ -170,9 +170,9 @@ class PaymentSubmit(CamelModel):
 class OrderPayResponse(CamelModel):
     orderUuid: str = Field(description="UUID local de la orden")
     status: str = Field(description="Estado local de la orden despues del intento de cobro: TO_PAY, PAID o CANCELLED")
-    mpPaymentId: Optional[str] = Field(default=None, description="ID del pago en Mercado Pago")
-    mpStatus: Optional[str] = Field(default=None, description="Estado crudo de Mercado Pago: approved/pending/in_process/rejected/cancelled")
-    mpStatusDetail: Optional[str] = Field(default=None, description="Detalle del estado, p. ej. motivo de rechazo")
+    mpPaymentId: Optional[str] = Field(default=None, description="ID en Mercado Pago: `ORD...` (Orders API) en cobros nuevos, numérico en pedidos anteriores a la migración. El Status Screen Brick solo acepta ids numéricos.")
+    mpStatus: Optional[str] = Field(default=None, description="Estado normalizado al vocabulario de la Payments API: approved/pending/in_process/rejected/cancelled")
+    mpStatusDetail: Optional[str] = Field(default=None, description="Detalle del estado, p. ej. motivo de rechazo. En cobros por la Orders API usa sus códigos (rejected_by_issuer, bad_filled_card_data, ...).")
     ticketUrl: Optional[str] = Field(default=None, description="Liga a la ficha/barcode de pago (OXXO y similares) si aplica")
 
 class OrderPublic(CamelModel):
