@@ -336,4 +336,23 @@ async def verify_mercadopago_webhook_signature(request: Request) -> bool:
         return False
 
     manifest = f"id:{data_id.lower()};request-id:{x_request_id};ts:{ts};"
-    return verify_hmac_sha256(settings.MP_WEBHOOK_SECRET, manifest.encode(), v1)
+    ok = verify_hmac_sha256(settings.MP_WEBHOOK_SECRET, manifest.encode(), v1)
+    if not ok:
+        # DIAGNOSTICO TEMPORAL (2026-10-27): quitar en cuanto se valide la firma de MP.
+        secret = settings.MP_WEBHOOK_SECRET
+        variants = {
+            "lower": manifest,
+            "original": f"id:{data_id};request-id:{x_request_id};ts:{ts};",
+            "sin_request_id": f"id:{data_id.lower()};ts:{ts};",
+            "secret_strip": manifest,
+        }
+        matched = [
+            name for name, m in variants.items()
+            if verify_hmac_sha256(secret.strip() if name == "secret_strip" else secret, m.encode(), v1)
+        ]
+        logger.warning(
+            "DIAG firma MP: x-signature=%r x-request-id=%r data.id=%r query=%r secret_sha=%s len=%d coincide=%s",
+            x_signature, x_request_id, data_id, dict(request.query_params),
+            hashlib.sha256(secret.encode()).hexdigest()[:10], len(secret), matched or "ninguna",
+        )
+    return ok
