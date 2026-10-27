@@ -8,6 +8,8 @@ import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import pytest
+
 from fastapi import BackgroundTasks
 from sqlalchemy import select
 
@@ -197,16 +199,17 @@ async def test_mediation_then_real_chargeback_fires_both_alerts(db, monkeypatch)
     assert order.disputed_at == first_disputed_at  # marcador historico, no se pisa
 
 
-def _signed_webhook(data_id: str, type_: str) -> tuple[str, dict]:
-    """URL y headers de una notificacion firmada como lo documenta Mercado Pago:
-    HMAC-SHA256(clave secreta, "id:{data.id};request-id:{x-request-id};ts:{ts};")."""
+def _signed_webhook(data_id: str, type_: str, *, signed_id: str | None = None) -> tuple[str, dict]:
+    """URL y headers de una notificacion firmada como Mercado Pago:
+    HMAC-SHA256(clave secreta, "id:{data.id};request-id:{x-request-id};ts:{ts};"), con data.id
+    tal cual (lo que firma MP de verdad) salvo que `signed_id` diga otra cosa."""
     import hashlib
     import hmac
 
     from app.core.config import settings
 
     ts, request_id = "1761400000", "req-abc-123"
-    manifest = f"id:{data_id.lower()};request-id:{request_id};ts:{ts};"
+    manifest = f"id:{data_id if signed_id is None else signed_id};request-id:{request_id};ts:{ts};"
     v1 = hmac.new(settings.MP_WEBHOOK_SECRET.encode(), manifest.encode(), hashlib.sha256).hexdigest()
     url = f"/v1/payments/webhook?data.id={data_id}&type={type_}"
     return url, {"x-signature": f"ts={ts},v1={v1}", "x-request-id": request_id}
@@ -254,6 +257,15 @@ async def test_standalone_chargeback_event_is_ignored(api, monkeypatch):
 
     url, headers = _signed_webhook("233000061680860000", "topic_chargebacks_wh")
     response = await api.post(url, headers=headers, json={"type": "topic_chargebacks_wh", "data": {"id": 233000061680860000}})
+
+    assert response.json() == {"status": "ignored"}
+
+
+@pytest.mark.parametrize("signed_id", ["Prueba", "prueba"])
+async def test_webhook_accepts_signature_with_original_or_lowercase_id(api, signed_id):
+    """El simulador del panel firma con data.id tal cual; la guia pide minusculas. Ambas pasan."""
+    url, headers = _signed_webhook("Prueba", "order", signed_id=signed_id)
+    response = await api.post(url, headers=headers, json={"type": "order", "data": {"id": "Prueba"}})
 
     assert response.json() == {"status": "ignored"}
 

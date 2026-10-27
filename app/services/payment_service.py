@@ -319,7 +319,7 @@ async def cancel_payment(mp_order_id: str) -> dict:
     return _order_as_payment(response.json())
 
 async def verify_mercadopago_webhook_signature(request: Request) -> bool:
-    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET (esquema distinto al webhook saliente propio de este backend, ver notify_order_confirmed). Manifest `id:{data.id};request-id:{x-request-id};ts:{ts};` con data.id en minusculas (los ids `ORD...` llegan en mayusculas): coincide con la guia oficial de Webhooks ("Validar origen de una notificacion", seccion Sin SDKs, revisada 2026-10-25)."""
+    """Valida x-signature/x-request-id contra MP_WEBHOOK_SECRET (esquema distinto al webhook saliente propio de este backend, ver notify_order_confirmed). Manifest `id:{data.id};request-id:{x-request-id};ts:{ts};`. La guia oficial de Webhooks ("Validar origen de una notificacion", seccion Sin SDKs) pide data.id en minusculas, pero el simulador del panel firma con data.id tal cual llega (verificado 2026-10-27 con un log de diagnostico): se aceptan ambas formas."""
     x_signature = request.headers.get("x-signature")
     x_request_id = request.headers.get("x-request-id")
     if not x_signature or not x_request_id:
@@ -335,24 +335,9 @@ async def verify_mercadopago_webhook_signature(request: Request) -> bool:
     if not data_id:
         return False
 
-    manifest = f"id:{data_id.lower()};request-id:{x_request_id};ts:{ts};"
-    ok = verify_hmac_sha256(settings.MP_WEBHOOK_SECRET, manifest.encode(), v1)
-    if not ok:
-        # DIAGNOSTICO TEMPORAL (2026-10-27): quitar en cuanto se valide la firma de MP.
-        secret = settings.MP_WEBHOOK_SECRET
-        variants = {
-            "lower": manifest,
-            "original": f"id:{data_id};request-id:{x_request_id};ts:{ts};",
-            "sin_request_id": f"id:{data_id.lower()};ts:{ts};",
-            "secret_strip": manifest,
-        }
-        matched = [
-            name for name, m in variants.items()
-            if verify_hmac_sha256(secret.strip() if name == "secret_strip" else secret, m.encode(), v1)
-        ]
-        logger.warning(
-            "DIAG firma MP: x-signature=%r x-request-id=%r data.id=%r query=%r secret_sha=%s len=%d coincide=%s",
-            x_signature, x_request_id, data_id, dict(request.query_params),
-            hashlib.sha256(secret.encode()).hexdigest()[:10], len(secret), matched or "ninguna",
-        )
-    return ok
+    # Primero data.id tal cual llega (lo que firma MP de verdad, medido 2026-10-27); en
+    # minusculas como respaldo, que es lo que pide la guia.
+    return any(
+        verify_hmac_sha256(settings.MP_WEBHOOK_SECRET, f"id:{candidate};request-id:{x_request_id};ts:{ts};".encode(), v1)
+        for candidate in dict.fromkeys((data_id, data_id.lower()))
+    )
