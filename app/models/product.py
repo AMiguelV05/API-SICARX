@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from sqlalchemy import Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, and_, or_, text, func
+from sqlalchemy import CheckConstraint, Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, and_, or_, text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
 from app.core.database import Base
@@ -36,6 +36,15 @@ class Product(Base):
         # respalda el filtro onSale de POST /products y del fallback Postgres de /search
         # (ver Product.is_on_sale). Migracion d5f1a9c3e7b2.
         Index("ix_products_on_sale", "sale_ends_at", postgresql_where=text("compare_at_price IS NOT NULL AND is_deleted = false AND is_active = true")),
+        # Medidas de empaque: las cuatro o ninguna, y siempre positivas - migracion e2a7c4b9d1f3.
+        CheckConstraint(
+            "num_nonnulls(package_weight_kg, package_length_cm, package_width_cm, package_height_cm) IN (0, 4)",
+            name="ck_products_package_dims_all_or_none",
+        ),
+        CheckConstraint(
+            "package_weight_kg > 0 AND package_length_cm > 0 AND package_width_cm > 0 AND package_height_cm > 0",
+            name="ck_products_package_dims_positive",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -105,6 +114,16 @@ class Product(Base):
     @property
     def effective_sale_ends_at(self):
         return self.sale_ends_at if self.is_on_sale else None
+
+    # Peso y medidas del EMPAQUE de una pieza (unidad de venta), para cotizar envios. PIM
+    # propio: nunca en el upsert de sync_task.py ni en products_mark_search_dirty (no afectan
+    # la busqueda). Las cuatro van juntas o ninguna (ck_products_package_dims_all_or_none):
+    # una cotizacion necesita las cuatro. Escritas solo por package_dimensions_service, la
+    # hoja "Medidas" de la importacion masiva e import_package_dimensions.py.
+    package_weight_kg = Column(Numeric(8, 3), nullable=True)
+    package_length_cm = Column(Numeric(7, 2), nullable=True)
+    package_width_cm = Column(Numeric(7, 2), nullable=True)
+    package_height_cm = Column(Numeric(7, 2), nullable=True)
     # Numeric (no Float): evita error de representacion binaria en la aritmetica de stock. 3 decimales para productos por peso (is_bulk).
     # Verdad de Sicar X: solo lo escribe el upsert de sync_task.py y los dos "espejos"
     # locales en sicar_sync_worker.py (exito de ACCEPT/CANCEL). Checkout/cancelacion ya NO

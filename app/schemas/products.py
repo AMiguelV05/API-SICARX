@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from pydantic import Field, model_validator
 from app.schemas.base import CamelModel
+from app.services.package_dimensions_service import MAX_DIMENSION_CM, MAX_WEIGHT_KG
 
 # DataType/AttributeValue/AttributeValuePublic/VariantSiblingPublic/VariantGroupDetail viven
 # aqui (no en schemas/attribute.py) para que este modulo se quede como base/hoja - taxonomy.py
@@ -128,6 +129,27 @@ class RelatedProductsResponse(CamelModel):
 class ProductBrandsResponse(CamelModel):
     docs: List[str]
 
+class PackageDimensions(CamelModel):
+    """Peso y medidas del empaque de UNA pieza (unidad de venta), para cotizar envios - ver
+    Product.package_*. Siempre las cuatro juntas; si el producto no las tiene, el campo que
+    lo contiene viene en null."""
+    weight_kg: float = Field(description="Peso del empaque en kg.")
+    length_cm: float = Field(description="Largo del empaque en cm.")
+    width_cm: float = Field(description="Ancho del empaque en cm.")
+    height_cm: float = Field(description="Alto del empaque en cm.")
+
+
+def package_dimensions_public(product) -> Optional[PackageDimensions]:
+    """Product -> PackageDimensions, o None si no tiene medidas (las cuatro van juntas, ver
+    ck_products_package_dims_all_or_none)."""
+    if product.package_weight_kg is None:
+        return None
+    return PackageDimensions(
+        weight_kg=product.package_weight_kg, length_cm=product.package_length_cm,
+        width_cm=product.package_width_cm, height_cm=product.package_height_cm,
+    )
+
+
 class ProductDetail(CamelModel):
     id: int
     sicar_uuid: str
@@ -162,6 +184,7 @@ class ProductDetail(CamelModel):
     bullet_points: Optional[str] = None
     technical_specs: Optional[str] = None
     contents: Optional[str] = None
+    package_dimensions: Optional[PackageDimensions] = Field(default=None, description="Peso y medidas del empaque de una pieza; null si el producto todavia no las tiene capturadas.")
 
 
 class ProductInfoUpdateRequest(CamelModel):
@@ -184,3 +207,18 @@ class ProductInfoPublic(CamelModel):
     bullet_points: Optional[str] = None
     technical_specs: Optional[str] = None
     contents: Optional[str] = None
+
+
+class PackageDimensionsSetRequest(CamelModel):
+    """PUT /admin/products/{uuid}/package-dimensions: reemplaza las cuatro medidas (todas
+    obligatorias - una cotizacion no sirve con medidas parciales). Se redondean a 3 decimales
+    (kg) y 2 (cm). Topes en package_dimensions_service.MAX_*."""
+    weight_kg: Decimal = Field(gt=0, le=MAX_WEIGHT_KG, description=f"Peso del empaque en kg (> 0, <= {MAX_WEIGHT_KG}).")
+    length_cm: Decimal = Field(gt=0, le=MAX_DIMENSION_CM, description=f"Largo del empaque en cm (> 0, <= {MAX_DIMENSION_CM}).")
+    width_cm: Decimal = Field(gt=0, le=MAX_DIMENSION_CM, description=f"Ancho del empaque en cm (> 0, <= {MAX_DIMENSION_CM}).")
+    height_cm: Decimal = Field(gt=0, le=MAX_DIMENSION_CM, description=f"Alto del empaque en cm (> 0, <= {MAX_DIMENSION_CM}).")
+
+
+class ProductPackageDimensionsPublic(CamelModel):
+    product_uuid: str
+    package_dimensions: Optional[PackageDimensions] = None

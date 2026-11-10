@@ -4,9 +4,9 @@ from app.schemas.base import CamelModel
 
 # Carga masiva desde .xlsx; resuelve productos por sku (+ additional_skus), no por sicar_uuid - el admin no conoce los uuids internos.
 # Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos e InfoProducto hacen MERGE (una corrida posterior con un valor corregido SI se aplica);
-# Variantes REEMPLAZA (variant_group_uuid es un solo valor por producto, no un tag) - ver bulk_import_service.import_bulk_assignments.
+# Variantes y Medidas REEMPLAZAN (un solo valor por producto, no un tag) - ver bulk_import_service.import_bulk_assignments.
 
-SheetName = Literal["Categorias", "Vehiculos", "Atributos", "Variantes", "InfoProducto"]
+SheetName = Literal["Categorias", "Vehiculos", "Atributos", "Variantes", "InfoProducto", "Medidas"]
 
 ReasonCode = Literal[
     "MISSING_FIELDS",
@@ -17,6 +17,7 @@ ReasonCode = Literal[
     "ATTRIBUTE_SLUG_NOT_FOUND",
     "VALUE_TYPE_MISMATCH",
     "VARIANT_GROUP_SLUG_NOT_FOUND",
+    "INVALID_DIMENSIONS",
 ]
 
 
@@ -41,3 +42,4 @@ class BulkImportProductsResponse(CamelModel):
     attributes: BulkImportSheetResult
     variants: BulkImportSheetResult
     product_info: BulkImportSheetResult
+    package_dimensions: BulkImportSheetResult

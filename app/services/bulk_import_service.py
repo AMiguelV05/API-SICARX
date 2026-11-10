@@ -16,6 +16,7 @@ from app.models.taxonomy import Category, product_categories
 from app.models.vehicle import Vehicle, product_vehicles
 from app.models.attribute import Attribute, VariantGroup
 from app.services.attribute_service import coerce_and_validate_value
+from app.services.package_dimensions_service import PackageDimensions, validate_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ VARIANTS_REQUIRED_COLUMNS = ("sku", "variantGroupSlug")
 PRODUCT_INFO_REQUIRED_COLUMNS = ("sku",)  # description/brand/bulletPoints/technicalSpecs/contents son opcionales, ver _process_product_info_rows
 PRODUCT_INFO_COLUMNS = ("description", "brand", "bulletPoints", "technicalSpecs", "contents")
 PRODUCT_INFO_FIELD_BY_COLUMN = {"description": "description", "brand": "brand", "bulletPoints": "bullet_points", "technicalSpecs": "technical_specs", "contents": "contents"}
+PACKAGE_DIMENSIONS_SHEET = "Medidas"
+PACKAGE_DIMENSIONS_REQUIRED_COLUMNS = ("sku", "weightKg", "lengthCm", "widthCm", "heightCm")
 PRODUCT_INFO_NULL_MARKER = "NULL"  # texto literal (insensible a mayusculas) para borrar un campo explicitamente - ver _process_product_info_rows
 
 
@@ -61,6 +64,7 @@ class BulkImportOutcome:
     attributes: _SheetOutcome
     variants: _SheetOutcome
     product_info: _SheetOutcome
+    package_dimensions: _SheetOutcome
 
 
 def _load_workbook(file_bytes: bytes):
@@ -110,7 +114,7 @@ def _read_sheet(wb, sheet_name: str, required_columns: tuple[str, ...]) -> tuple
 
 
 def _parse_workbook(file_bytes: bytes):
-    """Carga el .xlsx y lee las 4 hojas de una sola vez - openpyxl (zip+XML) es
+    """Carga el .xlsx y lee todas las hojas de una sola vez - openpyxl (zip+XML) es
     sincrono/bloqueante, asi que import_bulk_assignments corre esto entero en un thread
     (asyncio.to_thread) en vez de bloquear el event loop, mismo criterio que
     google_auth_service.py ya usa para PyJWKClient.fetch_data()."""
@@ -122,6 +126,7 @@ def _parse_workbook(file_bytes: bytes):
             _read_sheet(wb, ATTRIBUTES_SHEET, ATTRIBUTES_REQUIRED_COLUMNS),
             _read_sheet(wb, VARIANTS_SHEET, VARIANTS_REQUIRED_COLUMNS),
             _read_sheet(wb, PRODUCT_INFO_SHEET, PRODUCT_INFO_REQUIRED_COLUMNS),
+            _read_sheet(wb, PACKAGE_DIMENSIONS_SHEET, PACKAGE_DIMENSIONS_REQUIRED_COLUMNS),
         )
     finally:
         wb.close()
@@ -535,12 +540,67 @@ async def _apply_product_info_updates(db: AsyncSession, updates: dict[int, dict[
     return written
 
 
+def _process_package_dimensions_rows(
+    rows: list[tuple[int, dict]], product_map: dict[str, int]
+) -> tuple[dict[int, PackageDimensions], list[_RowError]]:
+    """Devuelve product_id -> PackageDimensions. REEMPLAZO, igual que Variantes: las cuatro
+    medidas son un solo valor por producto (sku repetido en el archivo, la ultima fila gana).
+    Las cuatro son obligatorias en cada fila; para borrarlas se usa
+    DELETE /admin/products/{uuid}/package-dimensions."""
+    updates: dict[int, PackageDimensions] = {}
+    errors: list[_RowError] = []
+    for row_num, data in rows:
+        sku = _clean_str(data.get("sku"))
+        if not sku:
+            errors.append(_RowError(row_num, "MISSING_FIELDS", "Fila incompleta: falta sku.", None))
+            continue
+        try:
+            dims = validate_dimensions(data.get("weightKg"), data.get("lengthCm"), data.get("widthCm"), data.get("heightCm"))
+        except ValueError as exc:
+            errors.append(_RowError(row_num, "INVALID_DIMENSIONS", f"Medidas invalidas: {exc}", sku))
+            continue
+        product_id = product_map.get(sku.upper())
+        if product_id is None:
+            errors.append(_RowError(row_num, "SKU_NOT_FOUND", f"SKU no encontrado: {sku}.", sku))
+            continue
+        updates[product_id] = dims
+    return updates, errors
+
+
+async def _apply_package_dimensions_updates(db: AsyncSession, updates: dict[int, PackageDimensions]) -> int:
+    """Escribe solo los productos cuyas medidas cambian: re-subir el mismo archivo no
+    reescribe ~15k filas de products (WAL/RAM, mismo criterio que el sync del catalogo).
+    Devuelve cuantos productos cambiaron."""
+    if not updates:
+        return 0
+    columns = ("package_weight_kg", "package_length_cm", "package_width_cm", "package_height_cm")
+    result = await db.execute(select(Product.id, *[getattr(Product, c) for c in columns]).where(Product.id.in_(list(updates))))
+    current = {row[0]: tuple(row[1:]) for row in result.all()}
+
+    rows_to_update = []
+    for product_id, dims in updates.items():
+        values = dims.as_columns()
+        if current.get(product_id) != tuple(values[c] for c in columns):
+            rows_to_update.append({"pid": product_id, **values})
+    if not rows_to_update:
+        return 0
+
+    stmt = (
+        update(Product)
+        .where(Product.id == bindparam("pid"))
+        .values({c: bindparam(c) for c in columns})
+        .execution_options(dml_strategy="core_only")
+    )
+    await db.execute(stmt, rows_to_update)
+    return len(rows_to_update)
+
+
 async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkImportOutcome:
     """Orquestador: parsea el .xlsx, resuelve productos/categorias/vehiculos/atributos/
     grupos de variantes/info de producto en un numero constante de consultas, y hace un solo
     commit final. Categorias/Vehiculos son ADITIVOS (ON CONFLICT DO NOTHING); Atributos e
-    InfoProducto hacen merge (no pisan campos de una corrida anterior) y Variantes REEMPLAZA
-    (variant_group_uuid es un solo valor por producto, no un tag) - ver los docstrings de
+    InfoProducto hacen merge (no pisan campos de una corrida anterior) y Variantes/Medidas
+    REEMPLAZAN (un solo valor por producto, no un tag) - ver los docstrings de
     cada _process_*_rows. Las validaciones por fila nunca tocan la base de datos."""
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
@@ -550,13 +610,13 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
 
     (
         (cat_found, cat_rows), (veh_found, veh_rows), (attr_found, attr_rows), (var_found, var_rows),
-        (info_found, info_rows),
+        (info_found, info_rows), (dims_found, dims_rows),
     ) = await asyncio.to_thread(_parse_workbook, file_bytes)
 
-    if not cat_found and not veh_found and not attr_found and not var_found and not info_found:
+    if not any((cat_found, veh_found, attr_found, var_found, info_found, dims_found)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"El archivo no contiene ninguna hoja '{CATEGORIES_SHEET}', '{VEHICLES_SHEET}', '{ATTRIBUTES_SHEET}', '{VARIANTS_SHEET}' ni '{PRODUCT_INFO_SHEET}'.",
+            detail=f"El archivo no contiene ninguna hoja '{CATEGORIES_SHEET}', '{VEHICLES_SHEET}', '{ATTRIBUTES_SHEET}', '{VARIANTS_SHEET}', '{PRODUCT_INFO_SHEET}' ni '{PACKAGE_DIMENSIONS_SHEET}'.",
         )
 
     all_skus = (
@@ -565,6 +625,7 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
         | {_clean_str(r.get("sku")) for _, r in attr_rows if _clean_str(r.get("sku"))}
         | {_clean_str(r.get("sku")) for _, r in var_rows if _clean_str(r.get("sku"))}
         | {_clean_str(r.get("sku")) for _, r in info_rows if _clean_str(r.get("sku"))}
+        | {_clean_str(r.get("sku")) for _, r in dims_rows if _clean_str(r.get("sku"))}
     )
     product_map = await _resolve_products(db, all_skus)
 
@@ -594,12 +655,14 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
     attr_updates, attr_errors = _process_attributes_rows(attr_rows, product_map, attribute_map)
     var_updates, var_errors = _process_variantes_rows(var_rows, product_map, variant_group_map)
     info_updates, info_errors = _process_product_info_rows(info_rows, product_map)
+    dims_updates, dims_errors = _process_package_dimensions_rows(dims_rows, product_map)
 
     cat_assigned = await _bulk_insert_pairs(db, product_categories, cat_pairs, ["category_uuid", "product_id"], product_categories.c.category_uuid)
     veh_assigned = await _bulk_insert_pairs(db, product_vehicles, veh_pairs, ["vehicle_uuid", "product_id"], product_vehicles.c.vehicle_uuid)
     attr_assigned = await _apply_attribute_updates(db, attr_updates)
     var_assigned = await _apply_variant_group_updates(db, var_updates)
     info_assigned = await _apply_product_info_updates(db, info_updates)
+    dims_assigned = await _apply_package_dimensions_updates(db, dims_updates)
     await db.commit()
 
     logger.info(
@@ -607,7 +670,8 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
         f"Vehiculos={len(veh_rows)} filas/{veh_assigned} nuevos/{len(veh_errors)} errores, "
         f"Atributos={len(attr_rows)} filas/{attr_assigned} escritos/{len(attr_errors)} errores, "
         f"Variantes={len(var_rows)} filas/{var_assigned} productos/{len(var_errors)} errores, "
-        f"InfoProducto={len(info_rows)} filas/{info_assigned} escritos/{len(info_errors)} errores."
+        f"InfoProducto={len(info_rows)} filas/{info_assigned} escritos/{len(info_errors)} errores, "
+        f"Medidas={len(dims_rows)} filas/{dims_assigned} productos cambiados/{len(dims_errors)} errores."
     )
     return BulkImportOutcome(
         categories=_SheetOutcome(cat_found, len(cat_rows), cat_assigned, cat_errors),
@@ -615,6 +679,7 @@ async def import_bulk_assignments(db: AsyncSession, file_bytes: bytes) -> BulkIm
         attributes=_SheetOutcome(attr_found, len(attr_rows), attr_assigned, attr_errors),
         variants=_SheetOutcome(var_found, len(var_rows), var_assigned, var_errors),
         product_info=_SheetOutcome(info_found, len(info_rows), info_assigned, info_errors),
+        package_dimensions=_SheetOutcome(dims_found, len(dims_rows), dims_assigned, dims_errors),
     )
 
 
@@ -681,6 +746,15 @@ def build_template_workbook() -> bytes:
         "contents": "Opcional. Texto libre - que incluye/accesorios trae el producto. Escribe NULL para borrar el valor ya guardado.",
     })
     ws_info.append(["SKU-EJEMPLO-1", "Descripcion larga de ejemplo del producto.", "Marca-Ejemplo", "-Punto clave 1\n-Punto clave 2", "-Especificacion 1\n-Especificacion 2", "Incluye manual de usuario"])
+
+    ws_dims = wb.create_sheet(PACKAGE_DIMENSIONS_SHEET)
+    _write_header(ws_dims, PACKAGE_DIMENSIONS_REQUIRED_COLUMNS, {
+        "weightKg": "Peso del EMPAQUE de una pieza, en kg (> 0, maximo 1500). Las cuatro medidas son obligatorias en cada fila. REEMPLAZA las medidas ya guardadas del producto; para borrarlas usa el admin (DELETE .../package-dimensions), no esta hoja.",
+        "lengthCm": "Largo del empaque en cm (> 0, maximo 600).",
+        "widthCm": "Ancho del empaque en cm (> 0, maximo 600).",
+        "heightCm": "Alto del empaque en cm (> 0, maximo 600).",
+    })
+    ws_dims.append(["SKU-EJEMPLO-1", 5.75, 22, 19, 36])
 
     buffer = BytesIO()
     wb.save(buffer)

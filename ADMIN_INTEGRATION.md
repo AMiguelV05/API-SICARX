@@ -1,43 +1,23 @@
 # Conectando el dashboard admin a API SICARX
 
-Guía práctica para quien construya el dashboard administrativo (dentro del mismo dominio que el
-frontend de Ferretería Charly, `https://ferreteriacharly.com/`): cómo autenticarse contra
-`/v1/admin/*` y qué hace cada endpoint. **No confundir con `FRONTEND_INTEGRATION.md`** — ese
-documento es para el storefront de cara al comprador; este es exclusivamente para el panel admin,
-un consumidor completamente distinto de esta misma API.
-
-## URLs base
+Contrato de `/v1/admin/*` para el panel administrativo (vive dentro de
+`https://ferreteriacharly.com/`). El storefront tiene su propio documento:
+`FRONTEND_INTEGRATION.md`. Son APIs distintas con ciclos de cambio propios.
 
 | Entorno | URL |
 |---|---|
-| Producción (Railway) | `https://api-production-cf7a.up.railway.app` |
-| Local (dev) | `http://127.0.0.1:8000` (o el puerto que uses con `uvicorn --reload`) |
+| Producción | `https://api-production-cf7a.up.railway.app` |
+| Local | `http://127.0.0.1:8000` |
 
-## Arquitectura obligatoria: server-to-server, nunca desde el navegador
+## Reglas generales
 
-**Actualización (2026-08-18): el antiguo `X-Admin-Key` compartido fue reemplazado por login
-real por administrador (`AdminUser`) con JWT propio.** Si integraste este dashboard antes de
-esta fecha, todo lo de esta sección cambió — sigue leyendo, no asumas que `X-Admin-Key` sigue
-funcionando (ya no existe, la ruta que lo validaba fue eliminada).
+- **Siempre servidor a servidor** (Route Handler o Server Action). El token de admin nunca debe llegar al navegador; guárdalo en una sesión de servidor del dashboard. Por eso CORS no aplica.
+- La única cabecera de autenticación es `Authorization: Bearer <admin-token>`. **No** se usan `x-api-key` ni `X-Client-Token`.
+- Errores: `{"detail": "..."}`. Paginación: `limit` (1-200; el default varía por ruta, 50 o 60) y `offset` ≥ 0. Listas: `{ total, docs }`.
+- `productUuid` siempre es el `sicarUuid` del producto, nunca el `id` interno.
+- Esta API no reintenta las llamadas fallidas del dashboard; si las necesitas, implementa tus reintentos.
 
-El token que emite `POST /admin/auth/login` (ver abajo) es una credencial de sesión real, con
-expiración (12h) e identidad de admin — pero el mismo principio de arquitectura de antes sigue
-aplicando: **nunca debe llegar al navegador**. La llamada a `/v1/admin/*` (incluyendo el login
-en sí) debe hacerse desde el backend/servidor del dashboard (p. ej. un Route Handler o Server
-Action de Next.js), no desde JavaScript del lado del cliente — si el token viajara a un
-navegador, cualquiera con acceso a las devtools podría copiarlo y llamar a `/v1/admin/*`
-directamente hasta que expire, sin pasar por ningún control de acceso propio del dashboard.
-Guarda el email/password del admin (o el token ya emitido) en una sesión de servidor propia del
-dashboard, nunca en una cookie/localStorage accesible por JS.
-
-Como consecuencia de ser 100% server-to-server, **CORS no aplica aquí** — no hay ninguna petición
-cross-origin del navegador hacia `api-production-cf7a.up.railway.app` para estas rutas, así que no
-hace falta agregar nada a `allow_origins`/`allow_headers` en `app/main.py` para este flujo (esos
-ya cubren el storefront, un caso distinto).
-
-## Autenticación — login real por administrador, distinto del storefront
-
-Primero, login (una sola vez, o de nuevo cuando el token expire/un 401 lo indique):
+## Autenticación y roles
 
 ```http
 POST /v1/admin/auth/login
@@ -46,2837 +26,423 @@ Content-Type: application/json
 {"email": "admin@ferreteriacharly.com", "password": "..."}
 ```
 
-Respuesta `200`:
+→ `200 {"token": "<jwt>", "admin": {"uuid", "email", "name", "role", "isActive", "lastLoginAt", "createdAt"}}`.
+El rate limit es de 5 por minuto por IP.
+
+- El token dura **12 h**. Un `401` (token faltante, inválido, expirado o admin desactivado) significa que hay que volver a hacer login.
+- Roles: `super_admin` (todo) y `staff` (todo **excepto** gestionar admins, ver el audit log, emitir reembolsos y hacer `DELETE` de categorías, vehículos, cupones y sinónimos). Si `staff` llama a una ruta restringida recibe `403`.
+- El primer `super_admin` se crea con `create_admin_user.py`, y sus credenciales se entregan por fuera de este repo.
+
+| Ruta | Rol | Notas |
+|---|---|---|
+| `GET /v1/admin/auth/me` | cualquiera | Mismo objeto `admin` |
+| `POST /v1/admin/admins` `{ email, name, password, role }` | super_admin | `role`: `super_admin` \| `staff`. `409` si el correo está duplicado |
+| `GET /v1/admin/admins` | super_admin | Paginado |
+| `PATCH /v1/admin/admins/{uuid}` | super_admin | Parcial: `name`, `role`, `isActive`, `newPassword` (restablece directo, sin correo) |
+| `GET /v1/admin/audit-log` | super_admin | Filtros opcionales: `adminUserUuid`, `action`, `resourceType`, `dateFrom`, `dateTo`; paginado |
+
+Entrada del audit log: `{ id, adminUserUuid, adminUserName, action, resourceType, resourceId, detail, createdAt }`.
+Acciones registradas: `order.accept`, `order.cancel`, `order.refund`, `admin_user.create`,
+`admin_user.update`, `coupon.create`, `coupon.update`, `coupon.delete`, `category.delete`,
+`vehicle.delete`, `review.moderate`, `review.delete`, `brand.rename`, `brand.delete`,
+`product.brand_bulk_set`, `product.sale_set`, `product.sale_clear`, `product.sale_bulk_set`,
+`product.sale_bulk_clear`, `search_synonym.create`, `search_synonym.update`,
+`search_synonym.delete`.
+
+---
+
+## Operación
+
+### `GET /v1/admin/health`
+
+`{ "databaseOk": true, "sicarTokenPresent": true, "outboxCounts": { "PENDING": 0, "IN_PROGRESS": 0, "SUCCEEDED": 12, "FAILED": 0 } }`.
+`sicarTokenPresent` solo indica que hay un token en memoria, no que sea válido.
+
+### `GET /v1/admin/sync/catalog-status`
 
 ```json
-{"token": "<jwt>", "admin": {"uuid": "...", "email": "...", "name": "...", "role": "super_admin", "isActive": true, "lastLoginAt": "...", "createdAt": "..."}}
+{ "lastRunStartedAt": "...", "lastRunFinishedAt": "...", "lastSuccessAt": "...", "productsProcessed": 124813, "productsDeactivated": 3, "lastError": null }
 ```
 
-Luego, en cada llamada a `/v1/admin/*`:
+Si nunca ha corrido, todos los campos vienen en `null`. `lastSuccessAt` solo avanza con una corrida
+exitosa; `lastRunFinishedAt` y `lastError` siempre reflejan la última corrida. Es la forma de
+confirmar que el catálogo se sigue sincronizando.
 
-```http
-Authorization: Bearer <admin-token>
-```
+### Cola `sicar_sync_outbox`
 
-Es la **única** cabecera de autenticación que exige `/v1/admin/*` — a diferencia de cada ruta del
-storefront (que siempre exige `x-api-key`), este router **no** valida `x-api-key` en absoluto,
-solo esta. No reutilices la `x-api-key` del storefront aquí ni esperes que haga falta.
+A Sicar X solo se le avisan **deltas de inventario**: `ACCEPT` (descuenta stock al aceptar un
+pedido) y `CANCEL` (lo devuelve al cancelar un pedido ya aceptado). El estado local ya es correcto
+antes de encolar. Los reintentos usan backoff de 1/2/4/8/16 min, hasta 5 intentos, y luego la
+fila queda `FAILED`.
 
-- `401` si falta la cabecera, si el token es inválido/expiró, o si la cuenta de admin fue
-  desactivada. **A diferencia del antiguo `X-Admin-Key`, el token expira (12h)** — el backend
-  del dashboard debe volver a hacer login (mismo `POST /admin/auth/login`) cuando reciba un
-  `401`, en vez de asumir una credencial de vida indefinida.
-- Dos roles: `super_admin` (todo, incluyendo gestionar otros `AdminUser`) y `staff` (operación
-  del día a día — aceptar/cancelar órdenes, moderar reseñas, dashboard — pero no puede
-  gestionar admins, borrar categorías/vehículos/cupones, ni emitir reembolsos). Una llamada de
-  `staff` a una ruta `super_admin`-only responde `403` (no `401` — sí está autenticado, solo
-  sin permiso), con el mismo token que ya venía usando.
-- Las credenciales del primer `super_admin` se crean fuera de esta API (script
-  `create_admin_user.py`, no expuesto por HTTP) y se entregan **fuera de este repo**, por un
-  canal seguro aparte (mismo criterio que `FRONTEND_WEBHOOK_SECRET`) — nunca se documenta un
-  valor real aquí. Cuentas adicionales se crean vía `POST /admin/admins` (ver abajo) por un
-  `super_admin` ya autenticado.
+- `GET /v1/admin/sync/outbox?status=PENDING&status=FAILED&limit=50&offset=0`: `status` se puede repetir; por defecto excluye `SUCCEEDED`. Fila: `{ id, orderId, action, status, attempts, lastError, nextAttemptAt, createdAt, updatedAt }`.
+- `POST /v1/admin/sync/outbox/{id}/retry`: devuelve una fila `FAILED` a `PENDING` para el siguiente minuto. `404` si la fila no existe o no está `FAILED`.
 
-## Webhooks salientes hacia el dashboard admin
+Una fila `FAILED` hay que reconciliarla a mano en Sicar X, o reintentarla cuando se arregle la causa (casi siempre un problema de token o de red con Sicar X).
 
-Ademas de las rutas de `/v1/admin/*` que el dashboard llama hacia esta API (documentadas
-abajo), esta API llama **hacia el dashboard** en 3 situaciones puntuales. Implementa estas 3
-rutas en el backend/servidor del dashboard (nunca las recibe el navegador, mismo criterio
-"server-to-server" de arriba) para recibirlas.
+---
 
-**Verificacion de firma** (obligatoria, misma formula para las 3 - no se repite en cada una):
+## Pedidos
 
-```http
-POST /api/webhooks/<lo que corresponda>
-Content-Type: application/json
-X-Webhook-Timestamp: 1783961178
-X-Webhook-Signature: 3f2a9c...  (hex, HMAC-SHA256)
-```
+### `GET /v1/admin/orders`
 
-```
-manifest = "{X-Webhook-Timestamp}." + <raw request body, tal cual, sin re-serializar>
-signature = hex(HMAC_SHA256(ADMIN_WEBHOOK_SECRET, manifest))
-```
+Busca en **todas** las cuentas, ordenado por `createdAt` desc (sin `sortBy`). Filtros (AND):
+- `status` (`TO_PAY` / `PAID` / `CANCELLED`);
+- `dispatchStatus`;
+- `clientEmail` (exacto, sin distinguir mayúsculas);
+- `clientUuid`;
+- `includeDeleted` (default `false`; solo para auditar pedidos que el cliente "borró");
+- `limit` (default 50) y `offset`.
 
-`ADMIN_WEBHOOK_SECRET` es un secreto **distinto** de las credenciales de login de arriba (esas
-autentican llamadas *hacia* esta API; este firma llamadas *desde* esta API hacia el dashboard -
-un leak de uno no compromete al otro) y se entrega por el mismo canal seguro fuera de este
-repo, nunca documentado aqui. Recalcula `signature` con el mismo secreto y comparala contra
-`X-Webhook-Signature` con una comparacion en tiempo constante (no `===`/`==`), usando el
-**body crudo** para el HMAC - un JSON re-serializado puede no ser byte-a-byte identico al
-original. Rechaza tambien si `X-Webhook-Timestamp` tiene mas de ~5 minutos de antiguedad
-(proteccion contra replay).
+`clientEmail` y `clientUuid` **no** encuentran pedidos de invitado: búscalos sin esos filtros y revisa `isGuest` y `guestEmail`.
 
-**Sin reintentos de este lado para las 3** - responde `200` rapido; si tu endpoint falla o
-tarda, esta API no reintenta automaticamente (mismo comportamiento que los webhooks hacia el
-storefront, ver `FRONTEND_INTEGRATION.md`).
+### `GET /v1/admin/orders/{orderUuid}?includeDeleted=false`
 
-**Si `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET` no estan configurados del lado de esta
-API, las 3 llamadas se omiten silenciosamente** (se loguea a nivel INFO, no hay error
-visible) - confirma con el equipo de backend que ambos estan configurados en produccion antes
-de asumir que estas notificaciones estan llegando.
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/order-cancelled`
-
-Se llama en el momento exacto en que un pedido pasa a `"CANCELLED"` - mismo disparador
-(cliente cancela/elimina, o pago rechazado/cancelado en Mercado Pago) y mismo body
-(`OrderPublic` mas `clientEmail`/`clientName`) que el webhook homonimo hacia el storefront -
-ver `FRONTEND_INTEGRATION.md` para el shape completo, no lo repetimos aqui:
+`AdminOrderPublic` es el `OrderPublic` del storefront más:
 
 ```json
 {
-  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
-  "status": "CANCELLED",
-  "dispatchStatus": "PENDING_ACCEPTANCE",
-  "total": 129.99,
-  "totalQuantity": 3,
-  "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
-  "createdAt": "2026-07-10T18:32:05Z",
-  "cancellationReason": null,
-  "clientEmail": "juan@example.com",
-  "clientName": "Juan Pérez"
-}
-```
-
-**Importante - si el pedido ya habia sido aceptado por un administrador, avisarle a Sicar X
-puede seguir en curso cuando llega este webhook** (y si nunca fue aceptado, no se le avisa
-nada a Sicar X en absoluto) - la cancelacion local ya es un hecho consumado de cualquier
-forma, ver `POST /v1/orders/{order_id}/cancel` en `FRONTEND_INTEGRATION.md`.
-
-**`cancellationReason`** es un campo nuevo en este body: `null` cuando el disparador fue el
-cliente (self-cancel, `DELETE`, o pago rechazado/cancelado en Mercado Pago) o un texto libre
-cuando un administrador canceló el pedido vía `POST /v1/admin/orders/{orderUuid}/cancel` (ver
-arriba) — úsalo para distinguir ambos casos en la notificación que le muestres al cliente.
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/order-sicar-sync-failed`
-
-Senal de que `sicar_sync_outbox` agoto sus reintentos (`MAX_ATTEMPTS = 5`, backoff
-exponencial 1/2/4/8/16 min) intentando avisarle a Sicar X de un `ACCEPT`/`CANCEL` de
-inventario - requiere reconciliacion **manual** directamente en Sicar X, esta API ya no lo va
-a reintentar sola. Usa `GET /v1/admin/sync/outbox`/`POST .../retry` mas abajo para resolverlo
-desde el dashboard una vez identificado.
-
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
-  "lastError": "Connection timeout after 30s"
-}
-```
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/product-stock-drift`
-
-Senal de que uno o mas productos tienen `reserved` (unidades reservadas por pedidos locales
-todavia no aceptados) por encima de `stock` (el stock real, sincronizado desde Sicar X) - pasa
-cuando el stock real baja por una razon ajena a esta API (venta en tienda, otro canal)
-mientras habia unidades reservadas en linea, dejando `availableStock` en 0 en los endpoints de
-catalogo aunque `reserved` siga reteniendo mas de lo que fisicamente existe (ver `stock`/
-`availableStock` en la seccion de productos por categoria/vehiculo/grupo de variantes/atributo
-mas abajo). Se dispara desde el sync de catalogo (cada 5 minutos) cada vez que la corrida
-termina con al menos un producto en ese estado - puede repetirse en corridas consecutivas
-mientras la deriva no se resuelva manualmente (ajustando el stock en Sicar X o reconciliando
-el pedido correspondiente).
-
-```json
-{
-  "products": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "stock": 2.0, "reserved": 3.0 }
-  ]
-}
-```
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/order-chargeback-received`
-
-Senal **urgente** de que se abrio un contracargo ("Compra no reconocida") sobre una orden ya
-pagada - ver "Contracargos de Mercado Pago" en CLAUDE.md para el detalle completo de los dos
-caminos de deteccion. Mismo body (`OrderPublic` mas `clientEmail`/`clientName`) que
-`order-cancelled` arriba - `disputedAt` en el body es el dato nuevo a observar.
-
-```json
-{
-  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
-  "status": "PAID",
-  "disputedAt": "2026-08-31T14:22:03Z",
-  "total": 129.99,
-  "totalQuantity": 3,
-  "clientEmail": "cliente@example.com",
-  "clientName": "Juan Pérez"
-}
-```
-
-`status` se queda en `"PAID"` - un contracargo no cancela ni reembolsa nada
-automáticamente, es solo una señal de que hay que revisar el caso (usar
-`GET /v1/admin/orders/{uuid}/chargebacks` para el detalle/deadline si el topic
-"Chargebacks" está habilitado en el dashboard de Mercado Pago).
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/order-chargeback-resolved`
-
-Se dispara solo si el topic "Chargebacks" de Mercado Pago está habilitado (ver arriba) - el
-camino de detección por defecto nunca por sí solo confirma una resolución. `chargebackStatus`
-es `"WON"` (a favor, dinero devuelto) o `"LOST"` (en contra, dinero retirado) - nunca vuelve a
-`"IN_PROCESS"`.
-
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
-  "chargebackStatus": "LOST",
-  "amount": 129.99,
-  "resolvedAt": "2026-09-15T10:03:11Z"
-}
-```
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/order-payment-in-mediation`
-
-Etapa previa a un contracargo formal - Mercado Pago abrió una mediación sobre el pago de
-esta orden. Mismo body (`OrderPublic` más `clientEmail`/`clientName`) que
-`order-chargeback-received` - `status` se queda en `"PAID"`, esto es solo una alerta
-temprana, no cancela ni reembolsa nada.
-
-```json
-{
-  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
-  "status": "PAID",
-  "disputedAt": "2026-08-31T14:22:03Z",
-  "total": 129.99,
-  "totalQuantity": 3,
-  "clientEmail": "cliente@example.com",
-  "clientName": "Juan Pérez"
-}
-```
-
-### Webhook saliente: `POST {tu dominio}/api/webhooks/order-out-of-band-refund`
-
-Señal de que el pago de esta orden fue reembolsado directamente en el dashboard de Mercado
-Pago, fuera de `POST /admin/orders/{uuid}/refund` - la fila `Refund` correspondiente ya se
-creó antes de este webhook (visible vía `GET /admin/orders/{uuid}/refunds`), esto solo
-avisa. `status` se queda en `"PAID"` - un reembolso fuera de banda no cancela la orden
-automáticamente, un admin decide si también amerita eso.
-
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
-  "amount": 129.99
-}
-```
-
-## Referencia de endpoints
-
-### `POST /v1/admin/auth/login` — login
-
-Ver "Autenticación" arriba para el request/response completo. Sin rol requerido (obviamente
-— es la ruta que emite el token). Rate-limited (5/min por IP).
-
-### `GET /v1/admin/auth/me` — datos del admin autenticado
-
-```http
-GET /v1/admin/auth/me
-Authorization: Bearer <admin-token>
-```
-
-Respuesta `200`: el mismo shape `admin` del login. Útil para que el dashboard confirme
-`role` sin tener que decodificar el JWT del lado del cliente.
-
-### `POST` / `GET` / `PATCH /v1/admin/admins` — gestión de cuentas admin (solo `super_admin`)
-
-```http
-POST /v1/admin/admins
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{"email": "nuevo@ferreteriacharly.com", "name": "Nueva Persona", "password": "...", "role": "staff"}
-```
-
-`role` es `"super_admin"` o `"staff"`. `409` en correo duplicado. `GET /v1/admin/admins`
-(paginado, `limit`/`offset`) lista todas las cuentas. `PATCH /v1/admin/admins/{uuid}`
-(`exclude_unset`) actualiza `name`/`role`/`isActive`/`newPassword` — **restablece la
-contraseña de otro admin directamente**, sin flujo de correo (para eso está: no hay
-self-service, un `super_admin` lo hace por el colega). Una llamada de `staff` a cualquiera de
-estas tres rutas responde `403`.
-
-### `GET /v1/admin/audit-log` — historial de acciones admin (solo `super_admin`)
-
-```http
-GET /v1/admin/audit-log?adminUserUuid=...&action=order.cancel&resourceType=order&dateFrom=2026-08-01T00:00:00Z&dateTo=2026-08-18T23:59:59Z&limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Todos los query params son opcionales. Cubre estas acciones (no todavía las ~30 rutas admin
-completas — ver `CLAUDE.md`, "Admin RBAC, audit log, and partial refunds"): `order.accept`,
-`order.cancel`, `order.refund`, `admin_user.create`, `admin_user.update`, `coupon.create`,
-`coupon.update`, `coupon.delete`, `category.delete`, `vehicle.delete`, `review.moderate`,
-`review.delete`. Respuesta `200`:
-
-```json
-{
-  "total": 1,
-  "docs": [
-    {
-      "id": 1,
-      "adminUserUuid": "...",
-      "adminUserName": "Miguel",
-      "action": "order.cancel",
-      "resourceType": "order",
-      "resourceId": "<order uuid>",
-      "detail": {"reason": "Cliente lo pidió"},
-      "createdAt": "2026-08-18T10:00:00Z"
-    }
-  ]
-}
-```
-
-### `GET /v1/admin/health` — estado operativo
-
-```http
-GET /v1/admin/health
-Authorization: Bearer <admin-token>
-```
-
-Respuesta `200`:
-```json
-{
-  "databaseOk": true,
-  "sicarTokenPresent": true,
-  "outboxCounts": { "PENDING": 0, "IN_PROGRESS": 0, "SUCCEEDED": 12, "FAILED": 0 }
-}
-```
-
-`databaseOk` — resultado de un `SELECT 1` contra Postgres. `sicarTokenPresent` — si el proceso
-que atendió la petición actualmente sostiene un token administrativo de Sicar X en memoria (no
-confirma que el token sea válido, solo que existe uno). `outboxCounts` — conteo de
-`sicar_sync_outbox` agrupado por `status`, útil para ver de un vistazo si hay algo atorado.
-
-### `GET /v1/admin/sync/catalog-status` — última corrida del sync de catálogo
-
-```http
-GET /v1/admin/sync/catalog-status
-Authorization: Bearer <admin-token>
-```
-
-Respuesta `200`:
-```json
-{
-  "lastRunStartedAt": "2026-07-29T15:00:03Z",
-  "lastRunFinishedAt": "2026-07-29T15:04:47Z",
-  "lastSuccessAt": "2026-07-29T15:04:47Z",
-  "productsProcessed": 124813,
-  "productsDeactivated": 3,
-  "lastError": null
-}
-```
-
-Si el worker de sync nunca ha corrido en ese ambiente (base de datos recién migrada), responde
-`200` con todos los campos en `null` — no es un error, es un estado válido ("todavía no hay
-corridas registradas"). `lastSuccessAt` **no se pisa** por una corrida fallida posterior —
-`lastRunFinishedAt`/`lastError` sí reflejan siempre la corrida más reciente, exitosa o no, pero
-`lastSuccessAt` solo avanza en un éxito real. Esto reemplaza tener que revisar `sync.log`
-directamente (invisible en Railway, ver `CLAUDE.md`) para confirmar que el catálogo se sigue
-sincronizando.
-
-### `GET /v1/admin/sync/outbox` — cola de sincronización pendiente/fallida con Sicar X
-
-```http
-GET /v1/admin/sync/outbox?status=PENDING&status=FAILED&limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-- `status` (repetible, opcional) — uno o más de `PENDING`/`IN_PROGRESS`/`SUCCEEDED`/`FAILED`. Si se
-  omite, por defecto excluye `SUCCEEDED` (`PENDING`, `IN_PROGRESS`, `FAILED`) — normalmente lo que
-  interesa ver es "qué sigue sin resolverse", no el historial completo.
-- `limit` (1-200, default 50), `offset` (≥0, default 0).
-
-Respuesta `200`:
-```json
-{
-  "total": 1,
-  "docs": [
-    {
-      "id": 42,
-      "orderId": 187,
-      "action": "ACCEPT",
-      "status": "FAILED",
-      "attempts": 5,
-      "lastError": "Sicar X rechazo el avance de dispatchStatus a 'PENDING' para el documento ...: 409 - ...",
-      "nextAttemptAt": "2026-07-29T16:10:00Z",
-      "createdAt": "2026-07-29T15:50:00Z",
-      "updatedAt": "2026-07-29T16:09:12Z"
-    }
-  ]
-}
-```
-
-`action` es `"CANCEL"` (cancelación de un pedido), `"ACCEPT"` (avisar a Sicar X que
-`dispatchStatus` ya avanzó de `PENDING_ACCEPTANCE` a `PENDING`, ver `POST .../accept` abajo),
-`"DISPATCH"` (avisar a Sicar X que `dispatchStatus` ya avanzó a `DISPATCHED` tras generar una guía
-de envío, ver `POST .../shipping/generate` más abajo), o `"SYNC_DISPATCH_STATUS"` (avisar a Sicar X
-de cualquier otro avance/reversión de `dispatchStatus` disparado por `POST .../advance-status`, ver
-más abajo — el `dispatchStatus` objetivo viaja en la fila misma, no está hardcodeado como en las
-otras tres acciones). En los cuatro casos, el estado local (`dispatchStatus`, autoritativo desde el
-dashboard admin) ya se aplicó de inmediato antes de encolar la fila — esta cola es puramente para
-avisarle a Sicar X, nunca para decidir el estado. Una fila `FAILED`
-significa que se agotaron los 5 intentos con backoff exponencial (1/2/4/8/16 min) — el pedido
-sigue correcto del lado local, pero Sicar X todavía no se enteró; hace falta reconciliar manualmente
-en el panel nativo de Sicar X, o reintentar con el siguiente endpoint una vez resuelta la causa.
-
-### `POST /v1/admin/sync/outbox/{id}/retry` — reintentar una fila FAILED
-
-```http
-POST /v1/admin/sync/outbox/42/retry
-Authorization: Bearer <admin-token>
-```
-
-Resetea la fila a `PENDING` con `nextAttemptAt` = ahora, para que el worker (corre cada minuto) la
-vuelva a intentar en su siguiente ciclo. `404` si el `id` no existe o la fila no está en `FAILED`
-(no tiene sentido "reintentar" una fila que ya está `PENDING`/`IN_PROGRESS`/`SUCCEEDED`). Responde
-`200` con la fila actualizada (mismo shape que arriba).
-
-### `GET /v1/admin/orders` — búsqueda de pedidos (todas las cuentas)
-
-```http
-GET /v1/admin/orders?status=TO_PAY&dispatchStatus=PENDING_ACCEPTANCE&limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-A diferencia de `GET /v1/auth/me/orders` (storefront, acotado a una sola cuenta), esta ruta busca
-sobre **todas** las cuentas. Filtros opcionales, todos combinables con `AND`:
-
-- `status` — `TO_PAY`/`PAID`/`CANCELLED` (estado local de pago/cancelación).
-- `dispatchStatus` — `PENDING_ACCEPTANCE`/`PENDING`/`PREPARING`/`COMPLETE`/`DISPATCHED` (estado de
-  cumplimiento real de Sicar X).
-- `clientEmail` — coincidencia exacta (no `ILIKE`), normalizado a minúsculas antes de comparar.
-- `clientUuid` — el `uuid` público de `ClientAccount`, no el `id` interno.
-- `includeDeleted` (bool, default `false`) — si `true`, incluye pedidos soft-deleted
-  (`DELETE /v1/orders/{id}` desde el storefront) que de otra forma quedan ocultos.
-- `limit` (1-200, default 50), `offset` (≥0, default 0).
-
-Respuesta `200` — mismo shape que el detalle de abajo, dentro de `docs`, ordenado por
-`createdAt` descendente:
-```json
-{
-  "total": 3,
-  "docs": [ { "uuid": "...", "sicarOrderId": "...", "...": "..." } ]
-}
-```
-
-### `GET /v1/admin/orders/{orderUuid}` — detalle de un pedido (cualquier cuenta)
-
-```http
-GET /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6?includeDeleted=false
-Authorization: Bearer <admin-token>
-```
-
-Respuesta `200`:
-```json
-{
-  "uuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "sicarOrderId": "6a55165ada77fe7cd25d39e3",
-  "serieFolio": "TL518",
-  "status": "TO_PAY",
-  "dispatchStatus": "PENDING_ACCEPTANCE",
-  "dispatchHistory": null,
-  "total": 129.99,
-  "totalQuantity": 3,
-  "deliveryInfo": { "contactInfo": { "name": "Juan Pérez", "phone": "3151234567", "email": "juan@example.com" }, "deliveryType": "PICKUP" },
-  "items": [ { "uuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "description": "PORTAROLLO", "quantity": "1", "unit": "PZA", "imageUrl": "https://.../portarollo.jpg" } ],
-  "createdAt": "2026-07-10T18:32:05Z",
   "deletedAt": null,
-  "clientEmail": "juan@example.com",
-  "clientName": "Juan Pérez",
-  "clientUuid": "7f3c2a9e-…",
-  "acceptedAt": null,
-  "acceptedBy": null,
-  "deliveryCompany": null,
-  "deliveryAssignedAt": null,
-  "cancellationReason": null,
-  "disputedAt": null
+  "clientEmail": "juan@example.com", "clientName": "Juan Pérez", "clientUuid": "7f3c...",
+  "isGuest": false, "guestEmail": null,
+  "acceptedAt": null, "acceptedBy": null,
+  "deliveryCompany": null, "deliveryAssignedAt": null,
+  "cancellationReason": null, "disputedAt": null,
+  "deliveryAddress": { "street": "...", "extNumber": "...", "neighborhood": "...", "city": "...", "county": "...", "state": "...", "zipCode": "...", "...": "..." },
+  "shippingLabel": null,
+  "shippingCancellationReason": null, "shippingLabelCancelledAt": null
 }
 ```
 
-`disputedAt` es un marcador histórico: se puebla la primera vez que se detecta un contracargo
-sobre esta orden y nunca se vuelve a limpiar después, aunque el contracargo ya se haya resuelto
-- usar `GET .../chargebacks` (abajo) para el detalle/resultado. Ver "Contracargos de Mercado
-Pago" en CLAUDE.md.
+- `clientEmail` y `clientName` también vienen en pedidos de invitado (salen del contacto). `clientUuid` es `null` para invitados.
+- `deliveryAddress` (solo `DELIVERYMAN`) es una **foto fija** tomada al crear el pedido: es el destino del envío, aunque el cliente edite su libreta después.
+- `disputedAt` se llena la primera vez que hay una disputa y nunca se borra.
+- `404` si el pedido no existe, o si está borrado y no mandaste `includeDeleted=true`.
 
-Mismo shape base que `GET /v1/auth/me/orders/{orderUuid}` en el storefront (ver
-`FRONTEND_INTEGRATION.md`), más los campos exclusivos de este panel: `clientEmail`/`clientName`
-(resueltos igual que en el webhook `order-confirmed`), `deletedAt` (el storefront nunca lo
-expone), y los cuatro campos nuevos de aceptación/mensajería (`acceptedAt`/`acceptedBy`/
-`deliveryCompany`/`deliveryAssignedAt`). `404` si el `orderUuid` no existe (o está soft-deleted y
-no se mandó `includeDeleted=true`) — esta ruta no filtra por dueño, así que un `orderUuid` válido
-de cualquier cliente siempre resuelve. `cancellationReason` (también expuesto en
-`GET /v1/auth/me/orders/{orderUuid}` del storefront, no solo aquí) es `null` salvo que la orden
-haya sido cancelada vía `POST .../cancel` de abajo — una cancelación hecha por el propio cliente
-deja este campo en `null`.
+### Acciones sobre un pedido
 
-**Cambio a `GET /v1/admin/orders`/`GET .../{orderUuid}` (2026-08-11 — checkout de
-invitado)**: `POST /v1/orders` en el storefront ya no requiere cuenta (ver
-`FRONTEND_INTEGRATION.md`, "Checkout de invitado") — un pedido de invitado aparece aquí igual
-que cualquier otro, con dos diferencias:
-- Dos campos nuevos en la respuesta: `isGuest: boolean` (`true` mientras el pedido no tenga
-  cuenta asociada) y `guestEmail: string | null` (el correo capturado en el checkout de
-  invitado; `null` para un pedido de cuenta, o una vez que el pedido se vincula
-  retroactivamente a una cuenta — ver más abajo).
-- `clientEmail`/`clientName` siguen viniendo poblados igual para un pedido de invitado
-  (resueltos vía `deliveryInfo.contactInfo`, mismo mecanismo que ya usa el webhook
-  `order-confirmed`) — no hace falta revisar `isGuest` solo para mostrar esos dos campos.
-- Los filtros `clientEmail`/`clientUuid` de `GET /v1/admin/orders` hacen `JOIN` contra
-  `ClientAccount` y por lo tanto **nunca** encuentran un pedido todavía sin cuenta — para
-  ubicar pedidos de invitado hoy hay que buscar sin esos filtros y revisar `isGuest`/
-  `guestEmail` en los resultados; no existe un filtro dedicado `guestEmail`/`isGuest` todavía.
-- Si el invitado luego crea una cuenta con el mismo correo y la verifica, el pedido se
-  vincula solo (`isGuest` pasa a `false`, `guestEmail` a `null`, y a partir de ahí sí aparece
-  en los filtros `clientEmail`/`clientUuid`) — no requiere ninguna acción desde este panel.
+| Ruta | Body | Efecto | Errores |
+|---|---|---|---|
+| `POST .../{uuid}/accept` | `{ acceptedBy? }` (texto libre) | `acceptedAt`, `dispatchStatus: "PENDING"` de inmediato; encola `ACCEPT`. Dispara `order-accepted` al storefront | `404`; `409` si ya estaba aceptado |
+| `POST .../{uuid}/cancel` | `{ reason }` (obligatorio, el cliente lo ve) | Reembolsa o cancela el pago en Mercado Pago, cancela y libera la reserva. Si estaba aceptado encola `CANCEL` (el stock vuelve cuando la fila se procesa). Nunca hace soft-delete | `404`; `409` si ya estaba cancelado o `dispatchStatus == DISPATCHED` |
+| `POST .../{uuid}/advance-status` | `{ dispatchStatus }` | Ver tabla abajo. Solo local | `404`; `409` si la transición es ilegal, el pedido está cancelado, es `DISPATCHED` sobre `PICKUP` o es un revert con guía real |
+| `POST .../{uuid}/assign-delivery` | `{ deliveryCompany }` (texto libre) | Metadato local; se puede reasignar | `404`; `409` si está cancelado o es `PICKUP` |
+| `POST .../{uuid}/refund` | `{ amount, reason }` | **super_admin**. Reembolso parcial o total en Mercado Pago. No cambia `status` (sigue `PAID`) ni el inventario | `409` si no está `PAID` o no tiene pago; `400` si `amount` excede lo que falta por reembolsar |
+| `GET .../{uuid}/refunds` | | Lista paginada (cualquier admin). Incluye los reembolsos automáticos por cancelación (`issuedByAdminId: null` si canceló el cliente) | |
+| `GET .../{uuid}/chargebacks` | | Lista paginada; se detectan solos | |
 
-### `POST /v1/admin/orders/{orderUuid}/accept` — aceptar un pedido
+Respuestas:
+- `accept`: `{ orderUuid, acceptedAt, acceptedBy, dispatchStatus, syncStatus: "QUEUED", note }`.
+- `cancel`: `{ orderUuid, cancelledAt, reason, status: "CANCELLED", syncStatus: "QUEUED" | "NOT_NEEDED", note }`. `NOT_NEEDED` significa que el pedido no estaba aceptado, así que Sicar X nunca supo de él.
+- `advance-status`: `{ orderUuid, dispatchStatus, syncStatus: "QUEUED", note }`. Aquí `syncStatus` es un valor fijo: **a Sicar X no se le avisa nada** de los cambios de `dispatchStatus`.
+- `assign-delivery`: `{ orderUuid, deliveryCompany, deliveryAssignedAt }`.
+- `refund`: `{ id, orderId, amount, reason, mpRefundId, issuedByAdminId, createdAt }`.
+- Contracargo: `{ id, orderId, mpChargebackId, mpPaymentId, amount, reason, status: "IN_PROCESS" | "WON" | "LOST", coverageEligible, documentationRequired, documentationDeadline, createdAt, resolvedAt }`. Un contracargo, un reembolso fuera de banda o una mediación nunca cambian `status`, stock ni el pedido en automático: el admin decide.
 
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/accept
-Authorization: Bearer <admin-token>
-Content-Type: application/json
+**Transiciones de `advance-status`** (`PENDING_ACCEPTANCE` → `PENDING` solo con `/accept`):
 
-{ "acceptedBy": "Miguel" }
-```
-
-`acceptedBy` es opcional y sigue siendo **texto libre**, independiente de la identidad real del
-`AdminUser` autenticado (que ahora sí existe, y queda registrada aparte en `admin_audit_log` -
-ver la sección de autenticación arriba) — `acceptedBy` no es una FK a `admin_users`, solo un
-identificador legible mandado por el dashboard. Respuesta `200`:
-
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "acceptedAt": "2026-07-29T16:36:45Z",
-  "acceptedBy": "Miguel",
-  "dispatchStatus": "PENDING",
-  "syncStatus": "QUEUED",
-  "note": "La aceptación ya se aplicó localmente (dispatchStatus = PENDING); se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
-}
-```
-
-**`dispatchStatus` ya es `PENDING` en esta misma respuesta** — `acceptedAt`/`acceptedBy` y
-`dispatchStatus` se aplican de inmediato en Postgres (el dashboard admin es la única fuente de
-verdad de este campo; Sicar X ya nunca lo sobreescribe — ver `CLAUDE.md`). Lo único asíncrono es
-avisarle a Sicar X: eso ocurre en el siguiente ciclo del worker (cada minuto), vía la misma cola
-`sicar_sync_outbox` que ya usa la cancelación. Si sospechas que ese aviso no llegó, consulta
-`GET /v1/admin/sync/outbox?status=FAILED`. `404` si el pedido no existe (o está soft-deleted). `409`
-si el pedido ya fue aceptado antes (`acceptedAt` ya tenía un valor) — no se puede "re-aceptar".
-
-### `POST /v1/admin/orders/{orderUuid}/cancel` — cancelar un pedido como administrador
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/cancel
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "reason": "Producto agotado en tienda" }
-```
-
-`reason` es **obligatorio y no puede estar vacío** — a diferencia de `acceptedBy` en `/accept`,
-esto no es solo auditoría interna: queda guardado en la orden (`cancellationReason`, visible en
-`GET .../orders/{orderUuid}` de arriba y en `GET /v1/auth/me/orders/{orderUuid}` del storefront)
-y viaja en el webhook `order-cancelled` de abajo — es lo que el cliente ve como motivo de su
-cancelación. No hay `cancelledBy` en este contrato (`reason` es la única cosa que el cliente
-necesita ver) — quién canceló sí queda registrado ahora, pero en `admin_audit_log`
-(`action="order.cancel"`, ver la sección de autenticación arriba), no en un campo de este
-response.
-
-Respuesta `200`:
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "cancelledAt": "2026-08-07T19:35:29Z",
-  "reason": "Producto agotado en tienda",
-  "status": "CANCELLED",
-  "syncStatus": "QUEUED",
-  "note": "La cancelación ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona vía sicar_sync_outbox."
-}
-```
-
-Mismo mecanismo de fondo que `POST /v1/orders/{order_id}/cancel` del storefront (ver
-`FRONTEND_INTEGRATION.md`): stock/reserva local restaurados de inmediato, cualquier pago de
-Mercado Pago pendiente/aprobado se reembolsa/cancela primero, y — a diferencia de
-`DELETE /v1/orders/{order_id}` del storefront — **esta ruta nunca hace soft-delete**: la orden
-sigue apareciendo en el historial del cliente, ahora como `CANCELLED` con su `reason`. `syncStatus`
-es `"QUEUED"` si la orden ya había sido aceptada (`POST .../accept`, así que Sicar X ya sabía de
-ella y hay que avisarle de forma asíncrona vía `sicar_sync_outbox`, igual que `/accept`) o
-`"NOT_NEEDED"` si nunca fue aceptada (Sicar X nunca se enteró de esta orden, no hay nada que
-sincronizar). `404` si el pedido no existe (o está soft-deleted). `409` si ya está `CANCELLED`, o
-si `dispatchStatus` ya es `DISPATCHED` (`COMPLETE` sigue siendo cancelable — también es el estado
-terminal de pedidos `PICKUP`, que nunca se "enviaron" a ningún lado).
-
-### `POST /v1/admin/orders/{orderUuid}/advance-status` — avanzar (o revertir) el estado de cumplimiento
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/advance-status
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "dispatchStatus": "PREPARING" }
-```
-
-Cubre las transiciones que `/accept` y `/shipping/generate` no cubren — el dashboard es la única
-fuente de verdad de `dispatchStatus`, así que este es el endpoint genérico para moverlo. Transiciones
-legales (`dispatchStatus` actual → objetivos permitidos en esta llamada):
-
-| Actual | Objetivos permitidos |
+| Actual | Objetivos |
 |---|---|
 | `PENDING` | `PREPARING` |
 | `PREPARING` | `PENDING` (revertir), `COMPLETE` |
-| `COMPLETE` | `PREPARING` (revertir), `DISPATCHED`* |
-| `DISPATCHED` | `COMPLETE` (revertir)** |
+| `COMPLETE` | `PREPARING` (revertir), `DISPATCHED` (solo `DELIVERYMAN`) |
+| `DISPATCHED` | `COMPLETE` (revertir; bloqueado si hay guía real, usa `shipping/cancel`) |
 
-\* Solo para pedidos `DELIVERYMAN` — un `PICKUP` no tiene paso de envío, `COMPLETE` ya es su estado
-terminal (el dashboard lo puede etiquetar "Listo para recoger", pero no hay una transición de
-backend distinta para eso).
-
-\*\* Bloqueado (`409`) si el pedido ya tiene `shippingLabel` real generado con envia.com — una guía
-ya generada (y cobrada) no es reversible desde aquí; solo un `DISPATCHED` alcanzado manualmente por
-este mismo endpoint puede revertirse.
-
-`PENDING_ACCEPTANCE` no aparece en la tabla — salir de ahí sigue siendo trabajo exclusivo de
-`/accept` (Sicar X nunca acepta `PENDING_ACCEPTANCE` como destino, así que no hay nada que revertir
-hacia ese estado).
-
-Respuesta `200`:
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "dispatchStatus": "PREPARING",
-  "syncStatus": "QUEUED",
-  "note": "El nuevo estado ya se aplicó localmente; se le avisa a Sicar X de forma asíncrona via sicar_sync_outbox."
-}
-```
-
-Igual que `/accept`, `dispatchStatus` ya queda aplicado en Postgres en esta misma respuesta — solo
-avisarle a Sicar X es asíncrono (`action: "SYNC_DISPATCH_STATUS"` en `sicar_sync_outbox`). Si el
-pedido ya tiene una fila `SYNC_DISPATCH_STATUS` pendiente (p. ej. el dashboard avanzó dos pasos
-seguidos antes de que el worker procesara el primero), esta llamada la actualiza al nuevo objetivo
-en vez de encolar una segunda — a Sicar X solo le importa el estado final, no cada paso intermedio.
-
-`404` si el pedido no existe (o está soft-deleted). `409` si `status == "CANCELLED"`, si la
-transición no está en la tabla de arriba, si se pide `DISPATCHED` sobre un `PICKUP`, o si se intenta
-revertir un `DISPATCHED` respaldado por una guía real de envia.com.
-
-Dispara una notificación al storefront (webhook `order-status-changed`, ver
-`FRONTEND_INTEGRATION.md`) solo en dos casos: llegar a `COMPLETE` en un pedido `PICKUP`
-("listo para recoger"), y llegar a `DISPATCHED` ("enviado"). No hay notificación al llegar a
-`PREPARING`, ni al llegar a `COMPLETE` en un pedido `DELIVERYMAN` (etapa interna, el cliente no
-tiene nada que hacer todavía), ni en ninguna reversión.
-
-### `POST /v1/admin/orders/{orderUuid}/assign-delivery` — asignar mensajería/paquetería
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/assign-delivery
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "deliveryCompany": "Estafeta" }
-```
-
-`deliveryCompany` es **texto libre obligatorio** (no valida contra ningún catálogo de
-paqueterías). Respuesta `200`:
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "deliveryCompany": "Estafeta",
-  "deliveryAssignedAt": "2026-07-29T16:40:12Z"
-}
-```
-
-**Esto es metadato puramente local** — no dispara ninguna llamada a una API de paquetería
-externa (no genera guía, no calcula tarifa, no notifica al repartidor). Es solo "quién quedó
-encargado de esta entrega", para que el dashboard lo muestre. `404` si el pedido no existe (o
-está soft-deleted). Se puede llamar varias veces sobre el mismo pedido (reasigna sin error) — a
-diferencia de `/accept`, no hay noción de "ya asignado, no se puede reasignar" (corregir el
-nombre de la mensajería es un caso de uso legítimo).
-
-**Nuevo (2026-08-13)**: sí se agregaron dos guardas de estado, mismo criterio que
-`/accept`/`/cancel`/`advance-status` para un estado genuinamente inválido (no para "ya
-asignado", que sigue permitido): `409` si el pedido ya está `CANCELLED`, y `409` si el
-pedido es `PICKUP` (recolección en tienda no tiene mensajería que asignar — mismo chequeo
-que el `409` de `DISPATCHED` en `advance-status` para pedidos `PICKUP`).
-
-### `POST /v1/admin/orders/{orderUuid}/refund` — reembolso parcial o total (solo `super_admin`)
-
-**Nuevo (2026-08-18).**
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/refund
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "amount": 150.00, "reason": "Un artículo llegó dañado" }
-```
-
-`amount` es el monto a reembolsar (no tiene que ser el total de la orden — soporta
-reembolsos parciales; Mercado Pago procesa el cargo real). `reason` es obligatorio. `409` si
-la orden no está `PAID` o no tiene un pago de Mercado Pago asociado. `400` si `amount` excede
-lo que queda por reembolsar (`total` de la orden menos la suma de reembolsos previos sobre
-esa misma orden). Respuesta `200`:
-
-```json
-{
-  "id": 5,
-  "orderId": 42,
-  "amount": 150.0,
-  "reason": "Un artículo llegó dañado",
-  "mpRefundId": "987654321",
-  "issuedByAdminId": 3,
-  "createdAt": "2026-08-18T12:00:00Z"
-}
-```
-
-**Deliberadamente no toca nada más**: `Order.status` se queda `PAID` (no hay un status
-"parcialmente reembolsado" en este contrato todavía), y no se restaura ningún inventario
-(`Product.stock`/`reserved`) — es un evento puramente monetario. Si el artículo dañado
-también necesita volver a inventario, es un ajuste manual aparte, no algo que esta ruta haga
-por ti.
-
-### `GET /v1/admin/orders/{orderUuid}/refunds` — historial de reembolsos de un pedido
-
-```http
-GET /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/refunds?limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Cualquier admin autenticado puede leer esto (solo `super_admin` puede emitir un reembolso
-nuevo, ver arriba). Incluye tanto reembolsos parciales explícitos como el reembolso
-**automático** que ya dispara `POST .../cancel` cuando la orden tenía un pago aprobado
-(`reason` en ese caso es `"Cancelación de orden"` o `"Cancelación de orden (admin)"`, y
-`issuedByAdminId` es `null` si fue el propio cliente quien canceló). Respuesta `200`: mismo
-shape que el objeto de arriba, dentro de `{"total": ..., "docs": [...]}`.
-
-### `GET /v1/admin/orders/{orderUuid}/chargebacks` — historial de contracargos de un pedido
-
-```http
-GET /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/chargebacks?limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Cualquier admin autenticado puede leer esto - a diferencia de `.../refunds`, no hay una ruta
-`POST` equivalente para emitir uno a mano: esta API detecta los contracargos sola vía el
-webhook de Mercado Pago (ver "Contracargos de Mercado Pago" en CLAUDE.md). Respuesta `200`:
-
-```json
-{
-  "total": 1,
-  "docs": [
-    {
-      "id": 7,
-      "orderId": 42,
-      "mpChargebackId": "234000062890459000",
-      "mpPaymentId": "86439942806",
-      "amount": 129.99,
-      "reason": "general",
-      "status": "IN_PROCESS",
-      "coverageEligible": true,
-      "documentationRequired": false,
-      "documentationDeadline": null,
-      "createdAt": "2026-08-31T14:22:03Z",
-      "resolvedAt": null
-    }
-  ]
-}
-```
-
-`status` es `"IN_PROCESS"` (en curso), `"WON"` (a favor - dinero devuelto) o `"LOST"` (en
-contra - dinero retirado). `mpChargebackId`/`coverageEligible`/`documentationRequired`/
-`documentationDeadline` quedan en `null` si el contracargo solo se detectó por el camino por
-defecto (topic "payment" de Mercado Pago) y el topic "Chargebacks" nunca se habilitó en su
-dashboard - ver CLAUDE.md para el detalle de ambos caminos.
+Notifica al storefront solo cuando un `PICKUP` llega a `COMPLETE` ("listo para recoger") y cuando cualquier pedido llega a `DISPATCHED`. No hay notificación en `PREPARING`, en `COMPLETE` de un `DELIVERYMAN` ni en las reversiones.
 
 ### Guía de envío con envia.com
 
-Pantalla "Guía de envío" del panel admin: cotizar + generar una guía real con envia.com una vez
-que un pedido `DELIVERYMAN` llega a `dispatchStatus: COMPLETE`.
+Solo para pedidos `DELIVERYMAN` con `dispatchStatus: "COMPLETE"`. El destino es
+`deliveryAddress` y el origen es la dirección de la tienda configurada en el servidor.
 
-**Cambio a `GET /v1/admin/orders/{orderUuid}`** — dos campos nuevos en la respuesta:
-- `deliveryAddress: Address | null` — la dirección de destino resuelta para pedidos
-  `DELIVERYMAN` (mismo shape que `ClientAddressPublic`: `uuid, label, street, extNumber,
-  intNumber, neighborhood, city, county, state, country, zipCode, references, latitude,
-  longitude, isDefault`), `null` para `PICKUP`.
-  **Es una foto fija**, no un join en vivo contra la libreta de direcciones del cliente:
-  `routes/orders.py` la captura (`Order.delivery_address_snapshot`) en el momento de crear el
-  pedido, justo después de resolver la dirección vía `address_service.get_owned_address` — el
-  cliente puede editar/borrar esa dirección después de ordenar, y generar una guía contra una
-  dirección ya cambiada sería un bug silencioso. Distinta de
-  `deliveryInfo.contactInfo.address` (la forma que exige Sicar X, sin `uuid`/`label`/coordenadas)
-  — ambas se snapshotean por separado en el mismo momento. `/shipping/quote` y
-  `/shipping/generate` usan `deliveryAddress` como destino internamente.
-- `shippingLabel: ShippingLabelInfo | null` — `null` hasta que `/shipping/generate` tenga éxito
-  una vez; ver shape abajo.
+**`POST .../{uuid}/shipping/quote`**: `{ weight, length, width, height, origin? }` (kg/cm, > 0). No guarda nada.
 
-#### `POST /v1/admin/orders/{orderUuid}/shipping/quote` — cotizar opciones de envío
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/quote
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "weight": 2.5, "length": 30, "width": 20, "height": 15 }
+```json
+{ "options": [ { "carrier": "dhl", "service": "1", "serviceDescription": "DHL Standard", "deliveryEstimate": "3-5 días", "totalPrice": 185.50, "currency": "MXN" } ] }
 ```
 
-El backend resuelve `destination` desde `deliveryAddress` del pedido y `origin` desde una
-constante propia (dirección de la tienda/almacén, configurada en este servicio, no en el
-frontend), arma `packages[]` (`weightUnit: "KG"`, `lengthUnit: "CM"`) y llama a
-`POST /ship/rate/` de envia.com (`Authorization: Bearer <token de envia, en el env de este
-servicio>`). No persiste nada — se puede llamar repetidamente mientras el admin ajusta peso/medidas.
+- `origin` (opcional; cualquier subconjunto de `name, company, phone, email, street, number, district, city, state, zipCode, reference`) reemplaza el origen campo por campo. `state` acepta el nombre completo.
+- `options: []` es válido: ningún carrier cubre esa ruta. Solo se devuelven opciones puerta a puerta.
+- `404`; `409` si no es `DELIVERYMAN` o no está `COMPLETE`; `422` si falta dirección o dimensiones; `502` si falla envia.com (con su mensaje).
 
-**Override opcional del origen** — el dashboard puede mandar un objeto `origin` con
-cualquier subconjunto de sus campos; cualquier campo omitido (o mandado vacío/`null`) cae
-de vuelta al valor fijo configurado en este servicio, campo por campo — no es "todo o
-nada". Útil para cotizar/enviar desde una sucursal o dirección distinta a la configurada
-por defecto, sin tocar las variables de entorno:
+**`POST .../{uuid}/shipping/generate`**: `{ weight, length, width, height, carrier, service, origin? }`. Genera una guía real (**con costo**), guarda `shippingLabel` y pasa a `DISPATCHED` en la misma transacción. Dispara `order-dispatched` al storefront con la guía. A Sicar X no se le avisa.
 
 ```json
 {
-  "weight": 2.5, "length": 30, "width": 20, "height": 15,
-  "origin": { "city": "Guadalajara", "state": "Jalisco" }
+  "orderUuid": "...", "dispatchStatus": "DISPATCHED",
+  "shippingLabel": { "carrier": "dhl", "service": "1", "shipmentId": 179044, "serviceDescription": "DHL Standard", "trackingNumber": "1234567890", "trackUrl": "https://...", "labelUrl": "https://.../label.pdf", "totalPrice": 185.50, "currency": "MXN", "weight": 2.5, "length": 30, "width": 20, "height": 15, "generatedAt": "..." }
 }
 ```
 
-Campos disponibles en `origin` (todos opcionales): `name, company, phone, email, street,
-number, district, city, state, zipCode, reference` — mismos nombres que
-`deliveryAddress`/`ClientAddressPublic` donde aplica. `state` pasa por la misma
-normalización que ya se le aplica al valor de `.env` (nombre completo → código corto de 3
-letras que envia.com exige) — no hace falta que el admin sepa el código, un nombre como
-`"Jalisco"` o `"Ciudad de México"` funciona igual. `country`/`phone_code` no son
-overrideables (el negocio solo envía dentro de México). El mismo objeto `origin` es
-aceptado por `/shipping/generate` más abajo, con el mismo comportamiento.
+- Con `shipmentId` puedes buscar el envío en el dashboard de envia.com.
+- Errores: `409` si ya tiene guía (no se regenera), si no es `DELIVERYMAN` o si no está `COMPLETE`; `422`; `502`.
+- **Riesgo conocido**: si el dashboard hace timeout mientras envia.com sí generó la guía, el admin ve un error aunque la guía ya existe (y ya se cobró). No reintentes a ciegas: revisa primero el pedido.
 
-Respuesta `200`:
-```json
-{
-  "options": [
-    {
-      "carrier": "dhl",
-      "service": "1",
-      "serviceDescription": "DHL Standard",
-      "deliveryEstimate": "3-5 días",
-      "totalPrice": 185.50,
-      "currency": "MXN"
-    }
-  ]
-}
+**`POST .../{uuid}/shipping/cancel`**: `{ reason }` (obligatorio, interno; el cliente no lo ve). Cancela ante envia.com, deja `shippingLabel` en `null`, vuelve a `COMPLETE` y guarda `shippingCancellationReason` y `shippingLabelCancelledAt`.
+
+- Respuesta: `{ orderUuid, dispatchStatus: "COMPLETE", shippingLabel: null, refund: { balanceReturned, balanceReturnDate } }` (`refund` es la respuesta cruda de envia.com y no se guarda).
+- `409` si no hay guía; `422` si falta `reason`; `502` si envia.com la rechaza (lo más común: el carrier ya la recogió).
+
+---
+
+## Webhooks salientes hacia el dashboard
+
+Esta API llama a `{ADMIN_DASHBOARD_BASE_URL}/api/webhooks/<ruta>` desde el servidor. Si
+`ADMIN_DASHBOARD_BASE_URL` o `ADMIN_WEBHOOK_SECRET` no están configurados, no se manda nada (en
+producción sí están).
+
+**Verificación (obligatoria):**
+
+```
+X-Webhook-Timestamp: 1783961178
+X-Webhook-Signature: <hex>
+signature = hex(HMAC_SHA256(ADMIN_WEBHOOK_SECRET, "{timestamp}." + rawBody))
 ```
 
-- `options: []` es una respuesta válida (`200`), no un error — significa que ningún carrier
-  cubre ese código postal con ese paquete.
-- Solo se devuelven opciones **puerta a puerta** (`dropOff: 0` del lado de envia.com).
-  Algunos carriers/servicios exigen que el origen o el destino sea una sucursal física
-  (p. ej. paquetexpress `ground_do`/`ground_od`) — envia.com pide un `branch_code`
-  específico para esos, que este backend no recolecta ni soporta hoy (`/shipping/generate`
-  fallaría con un `502` real de envia.com — `"Origin/Destination branch code is required"`
-  — si se intentara). Se filtran aquí para que el admin nunca vea una opción que después no
-  puede generarse.
-- `404` si el pedido no existe. `409` si `deliveryType !== "DELIVERYMAN"` o
-  `dispatchStatus !== "COMPLETE"` — el backend no confía en que el frontend ya lo validó. `422`
-  si `deliveryAddress` falta o está incompleta (sin `street`/`city`/`state`/`zipCode`), o si
-  `weight`/`length`/`width`/`height` faltan o no son positivos (validación de Pydantic vía
-  `Field(gt=0)`, no un `400` a mano). `502` si envia.com falla, responde con error o rechaza la
-  petición (token inválido, código postal no reconocido, etc.) — normalizado a
-  `{"detail": "..."}` (`app/core/upstream_errors.py`, mismo helper que ya usa Sicar X/Mercado
-  Pago), nunca el cuerpo crudo de envia.
-
-#### `POST /v1/admin/orders/{orderUuid}/shipping/generate` — generar la guía
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/generate
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "weight": 2.5, "length": 30, "width": 20, "height": 15, "carrier": "dhl", "service": "1" }
-```
-
-Re-resuelve origin/destination igual que `/quote` — incluyendo el mismo `origin` opcional
-descrito arriba, si se manda aquí (usa el que se haya usado para la cotización elegida, no
-necesariamente el mismo — este endpoint no recuerda nada de una llamada previa a `/quote`).
-Llama a `POST /ship/generate/` de envia.com con el `service` elegido. Si tiene éxito, en una
-sola transacción: persiste
-`carrier, service, shipmentId, serviceDescription, trackingNumber, trackUrl, labelUrl (el
-campo `label` de envia), totalPrice, currency, weight, length, width, height, generatedAt`
-en el pedido, y avanza `dispatchStatus` de `COMPLETE` a `DISPATCHED`.
-
-Respuesta `200`:
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "dispatchStatus": "DISPATCHED",
-  "shippingLabel": {
-    "carrier": "dhl",
-    "service": "1",
-    "shipmentId": 179044,
-    "serviceDescription": "DHL Standard",
-    "trackingNumber": "1234567890",
-    "trackUrl": "https://...",
-    "labelUrl": "https://.../label.pdf",
-    "totalPrice": 185.50,
-    "currency": "MXN",
-    "weight": 2.5,
-    "length": 30,
-    "width": 20,
-    "height": 15,
-    "generatedAt": "2026-07-29T18:10:00Z"
-  }
-}
-```
-
-`shipmentId` es el identificador que usa el dashboard de envia.com — es lo que hay que
-buscar ahí para confirmar que el envío existe del lado de envia.com.
-
-- `404` si el pedido no existe. `409` si `deliveryType !== "DELIVERYMAN"`,
-  `dispatchStatus !== "COMPLETE"`, o si el pedido ya tiene `shippingLabel` (no hay regeneración
-  por esta vía). `422` si `deliveryAddress` falta/está incompleta, o si las dimensiones no son
-  válidas (mismo `Field(gt=0)` que `/quote`). `502` si envia.com falla (auth, `service` inválido,
-  problema de cuenta con el carrier) — incluye el mensaje real de envia.com entre paréntesis.
-
-**Corrección (2026-08-11): a diferencia de lo que este párrafo afirmaba antes, este endpoint
-NO encola nada en `sicar_sync_outbox`.** Confirmado contra el código real: `admin_service.
-generate_shipping_label` no crea ninguna fila de outbox, y `sicar_sync_worker.py` solo tiene
-ramas para `action == "ACCEPT"`/`"CANCEL"` (ambas atadas al espejo de inventario, no a envío) —
-no existe ni ha existido un `action: "DISPATCH"`. `dispatchStatus` se pone en `"DISPATCHED"`
-**de inmediato** en Postgres, en la misma transacción que persiste `shippingLabel`, y ahí
-termina — Sicar X nunca se entera de que existe una guía de envío, ni de forma síncrona ni
-asíncrona (mismo espíritu "Sicar X es solo ERP de inventario" de `CLAUDE.md`, llevado un paso
-más allá aquí). Si se necesita reflejar el envío en Sicar X, es un proceso manual fuera de este
-backend. Sí dispara la misma notificación `order-dispatched` al storefront que `/advance-status`
-dispara para un `DISPATCHED` alcanzado manualmente (ver `FRONTEND_INTEGRATION.md`) — el cliente
-recibe el mismo mensaje sin importar cuál de los dos caminos se usó.
-
-**Actualización (2026-08-11)**: este mismo `shippingLabel` (el objeto de arriba, con
-`trackUrl` incluido) ahora también se expone directamente al cliente vía `OrderPublic` —
-`GET /v1/auth/me/orders/{orderUuid}` y el body del webhook `order-dispatched` que se acaba de
-mencionar, ambos reusan ese schema. No hubo que agregar un webhook nuevo ni una columna nueva:
-solo se agregó el campo a `OrderPublic` (antes solo vivía en `AdminOrderPublic`, admin-only) —
-la notificación ya se disparaba en el momento correcto, solo le faltaba el dato. Cuando el
-`DISPATCHED` se alcanzó manualmente (sin guía real de por medio), `shippingLabel` sigue siendo
-`null` tanto para el admin como para el cliente.
-
-**Advertencia de confiabilidad** (mismo espíritu que la nota de "no hay reintentos automáticos"
-más abajo): esta llamada tiene un efecto real con costo — un timeout del lado del dashboard que
-compite con un éxito del lado del servidor mostraría un error al admin mientras envia.com ya
-generó (y cobró) una guía. Documentar esto como riesgo conocido, no agregar reintento automático
-sobre timeout para "resolverlo".
-
-#### `POST /v1/admin/orders/{orderUuid}/shipping/cancel` — cancelar la guía
-
-```http
-POST /v1/admin/orders/f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6/shipping/cancel
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "reason": "Dirección incorrecta, se regenerará la guía" }
-```
-
-El backend reconstruye la petición a envia.com a partir del `shippingLabel` ya persistido —
-solo necesita `carrier`/`trackingNumber` (los únicos campos que envia.com exige para
-`POST /ship/cancel/`), el admin nunca los vuelve a capturar. Llama a envia.com y, si tiene
-éxito, en una sola transacción: `shippingLabel` vuelve a `null` y `dispatchStatus` revierte de
-`DISPATCHED` a `COMPLETE` — es la **única** forma de desbloquear ese camino, ya que
-`/advance-status` se niega explícitamente a revertir `DISPATCHED → COMPLETE` mientras
-`shippingLabel` siga poblado. Con la orden de vuelta en `COMPLETE`, `/shipping/quote` y
-`/shipping/generate` vuelven a estar disponibles normalmente sobre la misma orden.
-
-`reason` se persiste (`Order.shipping_cancellation_reason`/`shippingLabelCancelledAt`, visibles
-en `GET /admin/orders/{uuid}`) — mismo patrón que `AdminOrderCancelRequest.reason` en
-`POST /orders/{uuid}/cancel` — pero, a diferencia de ese, **no** se le notifica al cliente ni se
-manda en ningún webhook: es una corrección administrativa interna, no un evento de cara al
-cliente. Igual que `/shipping/generate`, esta cancelación es puramente local — no toca
-`sicar_sync_outbox` ni avisa nada a Sicar X.
-
-Respuesta `200`:
-```json
-{
-  "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
-  "dispatchStatus": "COMPLETE",
-  "shippingLabel": null,
-  "refund": { "balanceReturned": true, "balanceReturnDate": "2026-08-15T00:00:00Z" }
-}
-```
-
-`refund` es la respuesta cruda de envia.com al cancelar, pasada tal cual para que el admin sepa
-si hay devolución de saldo y cuándo — no se persiste en ningún lado (no hay dónde, una vez que
-`shippingLabel` queda en `null`).
-
-- `404` si el pedido no existe. `409` si el pedido no tiene `shippingLabel` (nada que cancelar) —
-  espejo del `409` inverso de `/shipping/generate`. `422` si `reason` falta o está vacío. `502` si
-  envia.com rechaza la cancelación — el caso real más probable según su documentación es que la
-  guía ya fue recogida por el carrier o entró a su red (`"the shipment must not have been picked
-  up or entered the carrier network"`) — incluye el mensaje real de envia.com entre paréntesis,
-  mismo tratamiento de `meta:"error"` que `/shipping/generate`.
-
-### Categorías (taxonomía)
-
-Endpoints para administrar el árbol propio de categorías (PIM, auto-referenciado vía
-`parentUuid`, ver `CLAUDE.md` sección "Taxonomía") y para asignarle productos — la
-única forma de poblar `product_categories`, que hasta ahora no tenía ningún endpoint
-que la llenara. Para **leer** el árbol completo (navegación/filtros del storefront)
-sigue usando `GET /v1/taxonomy` (público, solo necesita `x-api-key`) — estas rutas
-son exclusivamente de escritura/administración, gateadas por el token de admin como todo
-lo demás en este documento (`DELETE` requiere además rol `super_admin`, ver la sección de
-autenticación arriba).
-
-#### `POST /v1/admin/categories` — crear un nodo
-
-```http
-POST /v1/admin/categories
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "name": "Herramientas Eléctricas", "parentUuid": "6a4fd308da77fe7cd25d1dd9" }
-```
-
-`parentUuid` es opcional — se omite (o se manda `null`) para crear un nodo raíz. El
-`slug` **no se manda**, siempre se deriva automáticamente de `name` (minúsculas, sin
-acentos, guiones — con un sufijo `-2`, `-3`, ... si ya existe otra categoría con el
-mismo slug). `uuid` se genera localmente (`uuid4()`), igual que cualquier otro
-identificador creado por este backend (p. ej. `Order.uuid`).
-
-Respuesta `201`:
-```json
-{
-  "uuid": "3f9a1c2e-...",
-  "name": "Herramientas Eléctricas",
-  "slug": "herramientas-electricas",
-  "parentUuid": "6a4fd308da77fe7cd25d1dd9",
-  "updatedAt": "2026-08-01T12:00:00Z"
-}
-```
-
-`404` si `parentUuid` no existe.
-
-#### `PATCH /v1/admin/categories/{uuid}` — renombrar y/o mover un nodo
-
-```http
-PATCH /v1/admin/categories/3f9a1c2e-.../
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "name": "Herramienta Eléctrica", "parentUuid": null }
-```
-
-Actualización parcial: solo los campos incluidos en el body se tocan. `parentUuid`
-ausente del body deja el padre actual sin cambios; `parentUuid: null` explícito mueve
-el nodo a raíz. Renombrar recalcula el `slug` automáticamente (mismo criterio que en
-`POST`, no hay forma de fijar el slug a mano). Responde el mismo shape que `POST`.
-
-- `404` si el nodo o el `parentUuid` indicado no existen.
-- `409` si se intenta mover un nodo dentro de sí mismo o de su propio subárbol (un
-  padre no puede ser también su propio descendiente — se valida contra el árbol
-  completo, no solo contra el hijo directo).
-- `422` si `name` se manda vacío.
-
-#### `DELETE /v1/admin/categories/{uuid}` — eliminar un nodo
-
-```http
-DELETE /v1/admin/categories/3f9a1c2e-.../
-Authorization: Bearer <admin-token>
-```
-
-`204` sin cuerpo si tiene éxito. Es un borrado real (no soft-delete — a diferencia de
-`Order`, esta es una tabla chica administrada por humanos, no un registro financiero).
-
-- `404` si el nodo no existe.
-- `409` si todavía tiene subcategorías, o si todavía tiene productos asignados
-  (`GET .../products` de abajo para revisar cuáles) — hay que reasignar/eliminar los
-  hijos y quitar los productos primero. Deliberadamente no hay cascada ni reparenteo
-  automático.
-
-#### `PUT /v1/admin/categories/{uuid}/products` — reemplazar los productos asignados
-
-```http
-PUT /v1/admin/categories/3f9a1c2e-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
-```
-
-**Reemplazo completo, no incremental** — el conjunto de productos asignados a esta
-categoría queda exactamente igual al `productUuids` mandado (una lista vacía quita
-todos). No hay endpoints de agregar/quitar un producto a la vez. `productUuids` son
-`sicar_uuid` de `Product` (los mismos identificadores que ya usa todo lo demás en esta
-API, p. ej. `items[].uuid` de un pedido), no el `id` interno.
-
-Respuesta `200`:
-```json
-{
-  "categoryUuid": "3f9a1c2e-...",
-  "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"]
-}
-```
-
-- `404` si la categoría no existe, o si alguno de los `productUuids` no corresponde a
-  un producto real y no eliminado — el detalle nombra exactamente cuáles no se
-  encontraron, para que el dashboard pueda señalarlos sin adivinar.
-
-**Cuidado con categorías con más de 200 productos asignados**: `GET .../products` (abajo)
-está limitado a `limit ≤ 200`. Si el dashboard carga una sola página para poblar el picker
-y la categoría tiene más productos asignados que esa página, un `PUT` guardado desde esa
-UI **sobreescribe silenciosamente** el conjunto completo con solo lo que se cargó — los
-productos no cargados se pierden sin ningún error. Para ese caso, usar el `PATCH` de abajo
-en vez de este `PUT`.
-
-#### `PATCH /v1/admin/categories/{uuid}/products` — agregar/quitar productos de forma incremental
-
-```http
-PATCH /v1/admin/categories/3f9a1c2e-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
-```
-
-**Incremental** — a diferencia del `PUT` de arriba, no necesita conocer el conjunto
-completo asignado: solo agrega los `productUuids` de `add` y quita los de `remove`,
-dejando todo lo demás intacto. Seguro de usar aunque la categoría tenga más productos
-asignados que el límite de `GET .../products`. `add` de un producto ya asignado es un
-no-op (idempotente); `remove` de un producto no asignado o inexistente también se ignora
-(no-op tolerante) — solo se valida la existencia real de los `productUuids` de `add`.
-
-Respuesta `200`:
-```json
-{
-  "categoryUuid": "3f9a1c2e-...",
-  "added": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"],
-  "removed": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"],
-  "addedCount": 1,
-  "removedCount": 1
-}
-```
-`addedCount`/`removedCount` son los vínculos realmente afectados (no un eco de lo
-mandado) — p. ej. un `add` de un producto ya asignado no incrementa `addedCount`.
-
-- `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
-- `404` si la categoría no existe, o si algún `productUuid` de `add` no resuelve a un
-  producto real y no eliminado (nombra cuáles).
-
-#### `DELETE /v1/admin/categories/{uuid}/products` — desasignar todos los productos
-
-```http
-DELETE /v1/admin/categories/3f9a1c2e-.../products
-Authorization: Bearer <admin-token>
-```
-
-Vacía la categoría de un solo golpe — equivalente a un `PUT .../products` con
-`productUuids: []`, pero sin que el dashboard necesite conocer/traer primero el conjunto
-completo asignado (útil para categorías con más productos que el límite de
-`GET .../products`). Pensado para un botón tipo "quitar todos los productos de esta
-categoría".
-
-**Solo desasigna** — borra las filas de `product_categories` de esta categoría, nada más:
-los productos en sí no se tocan (siguen existiendo, siguen vendibles, solo dejan de estar
-bajo este nodo) y la categoría misma tampoco se elimina. Distinto de
-`DELETE /v1/admin/categories/{uuid}` (arriba), que sí borra el nodo — y que de hecho
-exige que ya no tenga productos asignados antes de dejarse borrar; este endpoint es una
-forma de cumplir esa condición sin ir quitando productos uno por uno.
-
-Respuesta `200`:
-```json
-{ "categoryUuid": "3f9a1c2e-...", "removedCount": 47 }
-```
-`removedCount` es cuántos vínculos categoría-producto se borraron realmente (0 si la
-categoría ya no tenía ninguno asignado — no es un error).
-
-No requiere rol `super_admin` (mismo nivel de acceso que el `PUT`/`PATCH` de arriba, a
-diferencia del `DELETE` del nodo).
-
-`404` si la categoría no existe.
-
-#### `GET /v1/admin/categories/{uuid}/products` — listar productos asignados directamente
-
-```http
-GET /v1/admin/categories/3f9a1c2e-.../products?limit=60&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Pensado para poblar la UI de edición antes de un `PUT` (arriba) — muestra solo lo
-asignado **directamente** a este nodo, sin incluir productos etiquetados en
-subcategorías (a diferencia del filtro `taxonomyUuid` de `/catalog`/`/search`, que sí
-incluye descendientes — ese es para navegación del storefront, este es para editar un
-nodo puntual). Paginado igual que `/catalog` (`limit` 1-200, default 60; `offset`).
-
-Cada producto trae **ambos** números de stock (a diferencia de `/catalog`/`/search`, que
-solo exponen `stock` = disponible para venta): `stock` es el físico crudo sincronizado
-desde Sicar X, `availableStock` es lo que realmente queda vendible ahora mismo (`stock`
-menos reservas de pedidos locales todavía no aceptados — ver el webhook
-`product-stock-drift` arriba para cuando `availableStock` cae a 0 por una razón ajena a
-esta API).
-
-Respuesta `200`:
-```json
-{
-  "total": 2,
-  "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "description": null, "imageUrl": "https://.../taladro.jpg", "price": 899.00, "stock": 12, "availableStock": 9, "salesCount": 34 }
-  ]
-}
-```
-
-`404` si la categoría no existe.
-
-#### `GET /v1/admin/categories/by-product/{productUuid}` — listar las categorías de un producto
-
-```http
-GET /v1/admin/categories/by-product/3Cny4OOxdX1GoSzL9rEsTZNL7un
-Authorization: Bearer <admin-token>
-```
-
-Dirección inversa de `GET .../{uuid}/products` de arriba: dado un producto, qué
-categorías tiene asignadas **directamente** (sin ancestros) — pensado para precargar
-la selección actual en una pantalla de "editar tags de este producto" antes de un
-`PUT .../{uuid}/products`. `productUuid` es el `sicarUuid` del producto, igual que en
-todos los demás endpoints de esta API.
-
-Respuesta `200` (lista simple, sin paginar — un producto no está tageado en cientos de
-categorías):
-```json
-[
-  { "uuid": "3f9a1c2e-...", "name": "Herramientas Eléctricas", "slug": "herramientas-electricas", "parentUuid": "6a4fd308da77fe7cd25d1dd9", "updatedAt": "2026-08-01T12:00:00Z" }
-]
-```
-`[]` si el producto existe pero no tiene ninguna categoría asignada. `404` si el
-`productUuid` no corresponde a un producto real y no eliminado.
-
-#### `GET /v1/admin/categories/export` — descargar CSV de categorías + productos
-
-```http
-GET /v1/admin/categories/export
-Authorization: Bearer <admin-token>
-```
-
-Opcionalmente `?taxonomyUuid=<uuid>` (antes `categoryUuid` — renombrado 2026-08-13 para no
-chocar con el `categoryUuid` de `/products`/`/search`, que filtra por un campo
-completamente distinto, `Product.category_uuid` sincronizado de Sicar X; este endpoint es
-admin-only y no forma parte del contrato con el frontend, así que el parámetro se pudo
-renombrar directo sin capa de compatibilidad) para acotar el export a ese nodo y sus
-descendientes (mismo criterio que `taxonomyUuid` en `/catalog`/`/search`); omitido exporta
-el árbol completo. Un botón "Exportar CSV" en el dashboard puede apuntar directo aquí.
-
-Respuesta `200`: el CSV en sí (`Content-Type: text/csv`, no JSON), codificado
-`utf-8-sig` (con BOM) para que los acentos se vean bien al abrirlo directo en Excel, con
-`Content-Disposition: attachment; filename=categorias_productos.csv`. Una fila por par
-(categoría, producto) — columnas `category_uuid, category_path, category_slug,
-product_sku, product_name, product_price, product_stock`:
-
-```csv
-category_uuid,category_path,category_slug,product_sku,product_name,product_price,product_stock
-3f9a1c2e-...,Herramientas > Electricas,herramientas-electricas,102959,"Compresor de aire, silencioso libre de aceite, 50 L, 2 HP",5250.00,1.000
-6a4fd308-...,Ferreteria General,ferreteria-general,,,,
-```
-
-- `category_path` es la cadena completa de ancestros (`Padre > Hijo`), no solo el nombre
-  del nodo — necesario porque dos categorías pueden compartir nombre bajo padres
-  distintos. Se resuelve para **todas** las categorías, no solo las exportadas, así un
-  export acotado con `taxonomyUuid` igual muestra los nombres reales de los ancestros
-  aunque esos ancestros mismos queden fuera del subárbol exportado.
-- Una categoría sin productos asignados (o cuyos productos asignados están todos
-  eliminados) igual aparece, con las cuatro columnas `product_*` en blanco — no se omite
-  del CSV.
-- `product_stock` es `availableStock` (vendible ahora mismo, no el físico crudo) — mismo
-  criterio que `ProductBasic.stock` en el storefront.
-- `404` si `taxonomyUuid` no corresponde a una categoría real.
-
-### Cupones (descuentos)
-
-Endpoints para administrar códigos de cupón/descuento. Un cupón es `PERCENTAGE` (con tope
-opcional `maxDiscountAmount`) o `FIXED_AMOUNT`, y su `scopeType` decide sobre qué parte del
-carrito aplica el descuento: `ORDER` (el carrito completo), `CATEGORY` (solo las líneas cuyo
-producto está en alguna de las categorías asignadas al cupón — vía `PUT .../categories`,
-descendiente-inclusivo igual que el filtro `taxonomyUuid` de `/catalog`/`/search`) o
-`PRODUCT` (solo las líneas de los productos asignados vía `PUT .../products`). Un cupón
-`CATEGORY`/`PRODUCT` sin nada asignado todavía no es un error — simplemente no descuenta
-nada hasta que se le asigne un alcance.
-
-Cuatro mecanismos de límite de uso, combinables entre sí en el mismo cupón:
-`maxTotalUses` (tope global), `maxUsesPerClient` (tope por cliente — usar `1` para "una vez
-por cliente"), `firstPurchaseOnly` (solo clientes sin ninguna orden `PAID` previa), y
-"código asignado" (vía `PUT .../clients`: si la lista de clientes elegibles no está vacía,
-solo esos clientes pueden redimirlo — vacía significa público). También soporta ventana de
-vigencia (`startsAt`/`endsAt`, ambos opcionales) y `minOrderAmount`.
-
-**Política anti-abuso deliberada**: una vez que una orden llega a `PAID`, el uso del cupón
-queda **consumido para siempre**, incluso si esa orden se cancela o reembolsa después — así
-un cliente no puede aplicar-pagar-cancelar-reaplicar el mismo código repetidamente. Solo un
-uso que nunca llegó a `PAID` (la orden se canceló/eliminó mientras seguía `TO_PAY`) libera el
-cupo de vuelta. `GET .../redemptions` (abajo) muestra el historial completo con su `status`
-(`PENDING`/`CONFIRMED`/`RELEASED`) para auditar esto.
-
-El storefront solo ve el código en dos puntos: `POST`/`DELETE /v1/cart/coupon` (preview en el
-carrito, no autoritativo) y `couponCode` en `POST /v1/orders` (donde se valida y bloquea de
-verdad) — ver `FRONTEND_INTEGRATION.md`.
-
-#### `POST /v1/admin/coupons` — crear un cupón
-
-```http
-POST /v1/admin/coupons
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "code": "WELCOME10",
-  "discountType": "PERCENTAGE",
-  "discountValue": 10,
-  "maxDiscountAmount": 200,
-  "scopeType": "ORDER",
-  "minOrderAmount": 300,
-  "maxUsesPerClient": 1,
-  "firstPurchaseOnly": true
-}
-```
-
-`code` se normaliza a mayúsculas/sin espacios al guardar y comparar — no importa cómo lo
-teclee el cliente en el carrito. `maxDiscountAmount` solo es válido con
-`discountType: "PERCENTAGE"` (`422` si se manda con `FIXED_AMOUNT`); `discountValue` no puede
-exceder `100` para `PERCENTAGE` (`422`). `409` si ya existe un cupón con ese código.
-
-Respuesta `201`: mismo shape que `GET /{uuid}` de abajo.
-
-#### `GET /v1/admin/coupons` — buscar/listar cupones
-
-```http
-GET /v1/admin/coupons?isActive=true&code=WELCOME&limit=60&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Paginado (`limit`/`offset`, mismo estilo que el resto de este documento). `code` es
-coincidencia parcial sin distinguir mayúsculas; `isActive` filtra exacto.
-
-```json
-{
-  "total": 1,
-  "docs": [
-    {
-      "uuid": "b2e4b3f0-...",
-      "code": "WELCOME10",
-      "discountType": "PERCENTAGE",
-      "discountValue": 10,
-      "maxDiscountAmount": 200,
-      "scopeType": "ORDER",
-      "minOrderAmount": 300,
-      "startsAt": null,
-      "endsAt": null,
-      "isActive": true,
-      "maxTotalUses": null,
-      "maxUsesPerClient": 1,
-      "firstPurchaseOnly": true,
-      "createdAt": "2026-08-10T12:00:00Z",
-      "updatedAt": null
-    }
-  ]
-}
-```
-
-#### `GET /v1/admin/coupons/{uuid}` — detalle de un cupón
-
-Mismo shape que un elemento de `docs` arriba. `404` si no existe.
-
-#### `PATCH /v1/admin/coupons/{uuid}` — actualización parcial
-
-Igual que categorías/vehículos: solo los campos incluidos en el body se tocan
-(`exclude_unset`). Reutiliza las mismas validaciones de `POST` (`422` si el nuevo shape de
-`discountType`/`maxDiscountAmount`/`discountValue`/fechas queda inconsistente; `409` si el
-nuevo `code` ya lo usa otro cupón).
-
-#### `DELETE /v1/admin/coupons/{uuid}` — eliminar un cupón
-
-`204` sin cuerpo. `409` si el cupón **ya tiene algún uso registrado** (cualquier
-`status` — `PENDING`, `CONFIRMED` o `RELEASED`) — preserva la integridad histórica de las
-órdenes que lo usaron. Para retirar un cupón que ya se usó, usa `PATCH {"isActive": false}`
-en vez de borrarlo.
-
-Borrar un cupón **sí elimina en cascada** sus propias filas de alcance/elegibilidad
-(`coupon_categories`/`coupon_products`/`coupon_assigned_clients`) — no hace falta vaciarlas
-a mano primero con los `PUT` de abajo. Esto es distinto de borrar una categoría/producto que
-un cupón todavía usa: eso sí se bloquea (`409`, ver `DELETE /v1/admin/categories/{uuid}`
-arriba) — quitarlo del alcance del cupón primero.
-
-#### `PUT`/`PATCH`/`GET /v1/admin/coupons/{uuid}/categories` — alcance de categorías
-
-```http
-PUT /v1/admin/coupons/b2e4b3f0-.../categories
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "categoryUuids": ["3f9a1c2e-..."] }
-```
-
-`PUT` — solo válido si el cupón tiene `scopeType: "CATEGORY"` (`409` si no). Reemplazo
-completo del conjunto, no incremental. `404` si algún `categoryUuid` no existe.
-
-**Nuevo (2026-08-13)**: `PATCH /v1/admin/coupons/{uuid}/categories` agrega/quita de forma
-incremental, mismo patrón que `PATCH /v1/admin/categories/{uuid}/products` — pensado para
-no arriesgar sobreescribir el alcance de un cupón con muchas categorías asignadas si el
-picker del dashboard nunca cargó el conjunto completo:
-
-```http
-PATCH /v1/admin/coupons/b2e4b3f0-.../categories
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "add": ["3f9a1c2e-..."], "remove": ["6a4fd308-..."] }
-```
-
-Respuesta `200`:
-```json
-{ "couponUuid": "b2e4b3f0-...", "added": ["3f9a1c2e-..."], "removed": ["6a4fd308-..."], "addedCount": 1, "removedCount": 1 }
-```
-
-Mismo `409` de `scopeType` que el `PUT`. `add` ya asignadas se ignoran (idempotente);
-`remove` no asignadas o inexistentes también se ignoran (no-op tolerante). `422` si una
-misma categoría aparece en `add` y `remove` a la vez. `404` si alguna de `add` no resuelve a
-una categoría real.
-
-`GET /v1/admin/coupons/{uuid}/categories` — lectura del alcance actual (sin paginar, acotada
-por naturaleza), para poblar la UI de edición antes de un `PUT`/`PATCH`:
-
-```json
-{ "docs": [ { "uuid": "3f9a1c2e-...", "name": "Herramientas Eléctricas", "slug": "herramientas-electricas", "parentUuid": null, "updatedAt": "2026-08-01T12:00:00Z" } ] }
-```
-
-#### `PUT`/`PATCH`/`GET /v1/admin/coupons/{uuid}/products` — alcance de productos
-
-Mismo comportamiento que el de categorías arriba, pero para `scopeType: "PRODUCT"` — el `PUT`
-recibe `productUuids` (resueltos por `sicar_uuid`, `404` si alguno no existe), y el nuevo
-`PATCH` (2026-08-13) recibe `add`/`remove` con el mismo shape/semántica que el de categorías
-(mismo `409` de `scopeType`). A diferencia del `GET` de categorías, `GET
-/v1/admin/coupons/{uuid}/products` **sí está paginado** (`limit`/`offset`, respuesta
-`{total, docs}`) — un cupón `PRODUCT` puede tener muchos productos asignados.
-
-#### `PUT`/`PATCH`/`GET /v1/admin/coupons/{uuid}/clients` — lista de clientes elegibles
-
-```http
-PUT /v1/admin/coupons/b2e4b3f0-.../clients
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "clientEmails": ["vip@example.com"] }
-```
-
-`PUT` — resuelto por **email**, no por `uuid` de cliente — es lo que un admin tiene a mano.
-Lista vacía = cupón público (cualquier cliente puede intentar redimirlo, sujeto a las demás
-reglas); no vacía = solo esos clientes. `404` si algún email no corresponde a una cuenta
-existente.
-
-**Nuevo (2026-08-13)**: `PATCH /v1/admin/coupons/{uuid}/clients` agrega/quita de forma
-incremental (`add`/`remove`, mismo shape que categorías/productos arriba, también resuelto
-por email) — a diferencia de esas dos, no tiene chequeo de `scopeType` (la elegibilidad por
-cliente es independiente del alcance de descuento). `add` sobre un cupón que todavía era
-público (sin nadie asignado) lo vuelve restringido a esos clientes, mismo efecto que el
-`PUT` — la diferencia es que no hace falta reenviar a nadie más ya asignado.
-
-`GET /v1/admin/coupons/{uuid}/clients` — lectura paginada de los clientes elegibles
-actuales (una campaña puede apuntar a muchos clientes):
-
-```json
-{ "total": 1, "docs": [ { "uuid": "a1b2c3-...", "email": "vip@example.com", "name": "Juan Pérez" } ] }
-```
-
-#### `GET /v1/admin/coupons/{uuid}/redemptions` — historial de usos
-
-```http
-GET /v1/admin/coupons/b2e4b3f0-.../redemptions?limit=60&offset=0
-Authorization: Bearer <admin-token>
-```
-
-```json
-{
-  "total": 2,
-  "docs": [
-    {
-      "id": 41,
-      "clientAccountId": 7,
-      "clientEmail": "juan@example.com",
-      "orderUuid": "f1a2b3c4-...",
-      "status": "CONFIRMED",
-      "createdAt": "2026-08-10T12:05:00Z",
-      "updatedAt": "2026-08-10T12:08:00Z"
-    }
-  ]
-}
-```
-
-`status`: `PENDING` (orden creada, esperando llegar a `PAID`), `CONFIRMED` (orden llegó a
-`PAID` — uso consumido para siempre), `RELEASED` (la orden se canceló/eliminó antes de
-pagarse — el cupo se liberó y el cliente puede volver a usar el código, sujeto a los demás
-límites).
+Usa el body crudo, compara en tiempo constante y rechaza timestamps de más de ~5 min.
+`ADMIN_WEBHOOK_SECRET` es distinto del login y se entrega por fuera del repo. **Sin
+reintentos**: responde `200` rápido.
+
+| Ruta | Cuándo | Body |
+|---|---|---|
+| `order-cancelled` | Un pedido pasa a `CANCELLED` (cualquier origen) | `OrderPublic` + `clientEmail` + `clientName`; `cancellationReason` trae texto si canceló un admin |
+| `order-sicar-sync-failed` | Una fila del outbox se agotó (`FAILED`) | `{ orderUuid, sicarOrderId, lastError }`; reconcilia a mano |
+| `product-stock-drift` | Al terminar un sync, hay productos con `reserved > stock` (se repite cada 5 min mientras no se resuelva) | `{ products: [{ sicarUuid, sku, name, stock, reserved }] }` |
+| `order-chargeback-received` | **Urgente**: contracargo ("Compra no reconocida") sobre un pedido pagado | `OrderPublic` + `clientEmail` + `clientName` (con `disputedAt`); `status` sigue `PAID` |
+| `order-chargeback-resolved` | El contracargo se resolvió | `{ orderUuid, sicarOrderId, chargebackStatus: "WON" \| "LOST", amount, resolvedAt }` |
+| `order-payment-in-mediation` | Mercado Pago abrió una mediación (aviso temprano) | Igual que `chargeback-received` |
+| `order-out-of-band-refund` | Reembolsaron directamente en el panel de Mercado Pago | `{ orderUuid, sicarOrderId, amount }`; la fila `Refund` ya existe |
+
+---
+
+## Catálogo PIM
+
+Todas las listas de productos del admin (`.../products`) usan `ProductAdminBasic`: `{ sicarUuid, sku, name, description, imageUrl, price, stock, availableStock, salesCount, averageRating, reviewsCount }`.
+Aquí `stock` es el stock físico (de Sicar X) y `availableStock` es lo vendible (stock menos reservas).
+
+**Patrón común de asignaciones** (categorías, vehículos, atributos, grupos de variantes, alcance de cupones):
+- `PUT` **reemplaza** el conjunto completo; con una lista vacía lo vacía. **Cuidado**: `GET .../products` devuelve como máximo 200 por página, así que un `PUT` hecho desde un picker que no cargó todo **borra en silencio** lo que no se cargó. Para ediciones parciales usa `PATCH`.
+- `PATCH { add, remove }` es incremental. Agregar algo que ya estaba o quitar algo que no estaba no hace nada. Responde `{ ..., added, removed, addedCount, removedCount }` (los conteos son los cambios reales). `422` si un uuid aparece en `add` y en `remove`; `404` (con la lista de cuáles) si algún uuid de `add` no existe.
+- El `slug` nunca se manda: se deriva de `name` (sin acentos, con guiones y sufijo `-2`, `-3`… si ya existe) y se recalcula al renombrar.
+
+### Categorías (árbol propio)
+
+Lectura pública del árbol: `GET /v1/taxonomy`. Nodo: `{ uuid, name, slug, parentUuid, updatedAt }`.
+
+| Ruta | Notas |
+|---|---|
+| `POST /v1/admin/categories` `{ name, parentUuid? }` | `201`. Sin `parentUuid` crea una raíz. `404` si el padre no existe |
+| `PATCH /v1/admin/categories/{uuid}` `{ name?, parentUuid? }` | `parentUuid: null` explícito lo mueve a la raíz. `409` si lo mueves dentro de su propio subárbol; `422` si `name` está vacío |
+| `DELETE /v1/admin/categories/{uuid}` | **super_admin**. `204`. `409` si tiene hijos, productos o cupones que la usan (sin cascada) |
+| `GET /v1/admin/categories/{uuid}/products` | Solo lo asignado directo a ese nodo (sin descendientes); paginado (default 60) |
+| `PUT .../{uuid}/products` `{ productUuids }` | Reemplaza → `{ categoryUuid, productUuids }` |
+| `PATCH .../{uuid}/products` `{ add, remove }` | Incremental |
+| `DELETE .../{uuid}/products` | Desasigna todos (no borra el nodo) → `{ categoryUuid, removedCount }`. Cualquier admin |
+| `GET /v1/admin/categories/by-product/{productUuid}` | Categorías asignadas directo al producto (lista simple); `[]` si no tiene; `404` si el producto no existe |
+| `GET /v1/admin/categories/export?taxonomyUuid=` | CSV `utf-8-sig`, adjunto `categorias_productos.csv`. Columnas: `category_uuid, category_path, category_slug, product_sku, product_name, product_price, product_stock`. Una fila por par categoría–producto; las categorías vacías aparecen con las columnas de producto en blanco. `category_path` = `Padre > Hijo`; `product_stock` es el disponible |
 
 ### Vehículos (compatibilidad)
 
-Endpoints para administrar `vehicles` — un catálogo plano de fitments
-make/model/year-range/engine (p. ej. "Chevrolet Aveo 2008-2016 L4 1.6L") — y para
-asignarle productos vía `product_vehicles`, el equivalente de "Categorías" arriba pero
-para "qué vehículos aplican a este producto" en vez de "en qué categoría está". A
-diferencia de categorías, **no hay tree/reparenteo** (una fila no tiene hijos). `GET
-/v1/admin/vehicles` de abajo (búsqueda libre por `make`/`model` con `ILIKE`) es la forma
-de buscar vehículos ya existentes desde este panel admin — el equivalente público a `GET
-/taxonomy` ya existe (`GET /v1/vehicles/makes`/`/models`/`/years`/`/engines`/``, ver
-`FRONTEND_INTEGRATION.md`), pero es un selector en cascada pensado para un shopper que ya
-sabe su vehículo, no una búsqueda libre como la de este panel.
-
-`vehicles` fue sembrada una vez (2026-08-01) desde el catálogo público de referencia de
-Gonher (`catalogo.grupogonher.com`), acotado a los tipos "Automotriz" y "Motocicletas"
-(sin "Camiones, Tractocamiones y Fuera de Carretera" — casi enteramente maquinaria
-industrial pesada sin relación con este catálogo) — **41,937 filas**, ninguna vinculada
-todavía a un producto real (`product_vehicles` sigue vacía, igual que
-`product_categories` al lanzar categorías). Es un catálogo de referencia genérico para
-el picker del admin, con un origen heurístico (parseo de texto libre de un tercero) —
-no asumas que cada fila es 100% exacta; ver `import_gonher_vehicles.py` en el repo para
-el detalle completo si hace falta re-sembrar o auditar el origen de una fila en
-particular.
-
-#### `POST /v1/admin/vehicles` — crear un fitment
-
-```http
-POST /v1/admin/vehicles
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "vehicleType": "AUTOMOTIVE", "make": "Chevrolet", "model": "Aveo", "yearStart": 2008, "yearEnd": 2016, "engine": "L4 1.6L" }
-```
-
-`vehicleType` es `"AUTOMOTIVE"` o `"MOTORCYCLE"` (constantes en inglés, no las etiquetas
-en español de Gonher). `yearEnd` es opcional — se omite (o se manda `null`) para un
-fitment todavía vigente ("sigue en producción"). `engine` es texto libre, opcional.
-
-Respuesta `201`:
-```json
-{
-  "uuid": "8f2c1a4e-...",
-  "vehicleType": "AUTOMOTIVE",
-  "make": "Chevrolet",
-  "model": "Aveo",
-  "yearStart": 2008,
-  "yearEnd": 2016,
-  "engine": "L4 1.6L",
-  "updatedAt": "2026-08-01T12:00:00Z"
-}
-```
-
-`422` si `yearEnd` es menor que `yearStart`.
-
-#### `GET /v1/admin/vehicles` — buscar/listar vehículos
-
-```http
-GET /v1/admin/vehicles?vehicleType=MOTORCYCLE&make=italika&model=FT&limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-`make`/`model` son coincidencia parcial sin distinguir mayúsculas (`ILIKE`), pensados
-para un cuadro de búsqueda tipo autocomplete — no coincidencia exacta como
-`clientEmail` en `GET /admin/orders`. `vehicleType` sí es igualdad exacta. Paginado
-igual que el resto (`limit` 1-200, default 50; `offset`).
-
-Respuesta `200` — mismo shape que `POST`, dentro de `docs`, ordenado por
-`make`/`model`/`yearStart`:
-```json
-{
-  "total": 23,
-  "docs": [ { "uuid": "...", "vehicleType": "MOTORCYCLE", "make": "ITALIKA", "model": "FT125", "yearStart": 2007, "yearEnd": 2007, "engine": "124cc", "updatedAt": "..." } ]
-}
-```
-
-#### `PATCH /v1/admin/vehicles/{uuid}` — actualización parcial
-
-```http
-PATCH /v1/admin/vehicles/8f2c1a4e-.../
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "yearEnd": null }
-```
-
-Solo los campos incluidos en el body se tocan (`yearEnd: null` explícito marca el
-fitment como "todavía vigente"; ausente del body lo deja sin cambios). `422` si el
-rango de años resultante (mezclando lo que trae el body con lo que ya tenía la fila)
-queda con `yearEnd < yearStart`. Responde el mismo shape que `POST`.
-
-#### `DELETE /v1/admin/vehicles/{uuid}` — eliminar un fitment
-
-```http
-DELETE /v1/admin/vehicles/8f2c1a4e-.../
-Authorization: Bearer <admin-token>
-```
-
-`204` sin cuerpo si tiene éxito. `409` si todavía tiene productos asignados
-(`GET .../products` de abajo para revisarlos) — hay que quitarlos primero. A
-diferencia de categorías no hay chequeo de "hijos" (no existen).
-
-#### `PUT /v1/admin/vehicles/{uuid}/products` — reemplazar los productos asignados
-
-```http
-PUT /v1/admin/vehicles/8f2c1a4e-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
-```
-
-Mismo comportamiento que el equivalente de categorías arriba: **reemplazo completo, no
-incremental** (una lista vacía quita todos), `productUuids` son `sicar_uuid` de
-`Product`, `404` si el vehículo no existe o si algún `productUuid` no resuelve a un
-producto real y no eliminado (nombrando cuáles).
-
-Respuesta `200`:
-```json
-{ "vehicleUuid": "8f2c1a4e-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"] }
-```
-
-**Cuidado con vehículos con más de 200 productos asignados**: mismo riesgo que en
-categorías (ver nota arriba) — `GET .../products` está limitado a `limit ≤ 200`, y un
-`PUT` guardado desde un picker que solo cargó una página sobreescribe silenciosamente el
-resto. Usar el `PATCH` de abajo para ediciones incrementales.
-
-#### `PATCH /v1/admin/vehicles/{uuid}/products` — agregar/quitar productos de forma incremental
-
-```http
-PATCH /v1/admin/vehicles/8f2c1a4e-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": [] }
-```
-
-Mismo comportamiento incremental que el equivalente de categorías arriba: agrega/quita
-sin tocar el resto del conjunto asignado. `add` de un producto ya asignado es un no-op;
-`remove` de uno no asignado o inexistente también se ignora.
-
-Respuesta `200`:
-```json
-{ "vehicleUuid": "8f2c1a4e-...", "added": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "removed": [], "addedCount": 1, "removedCount": 0 }
-```
-
-- `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
-- `404` si el vehículo no existe, o si algún `productUuid` de `add` no resuelve.
-
-#### `GET /v1/admin/vehicles/models-for-years` — modelos disponibles en varios años a la vez
-
-```http
-GET /v1/admin/vehicles/models-for-years?make=Honda&vehicleType=AUTOMOTIVE&years=2012&years=2013&years=2014
-Authorization: Bearer <admin-token>
-```
-
-Primer paso de la asignación masiva de abajo: dado `make` y una lista de `years`
-(repetir el parámetro por cada año), devuelve solo los modelos que existen en **todos**
-esos años a la vez (intersección, no unión) — así el admin no puede elegir un modelo
-que en realidad no cubre uno de los años que seleccionó. Compárese con el selector
-público en cascada (`GET /v1/vehicles/years`/`/models`), que resuelve un año a la vez;
-este endpoint es admin-only y existe específicamente para alimentar la asignación
-masiva de abajo.
-
-Respuesta `200`:
-```json
-{ "docs": ["Civic", "Accord", "Cr-V"] }
-```
-Lista vacía si ningún modelo de esa marca cubre todos los años dados.
-
-#### `POST /v1/admin/vehicles/assign-by-model` — asignar productos a un modelo a través de varios años
-
-```http
-POST /v1/admin/vehicles/assign-by-model
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "vehicleType": "AUTOMOTIVE",
-  "make": "Honda",
-  "model": "Civic",
-  "years": [2012, 2013, 2014],
-  "engine": null,
-  "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"]
-}
-```
-
-Resuelve **todos** los fitments de `make`/`model` (y `vehicleType` si se manda) cuyo
-rango `yearStart`–`yearEnd` toque **alguno** de los `years` dados, y les agrega los
-`productUuids` — pensado para "esta pastilla de freno le queda al Civic 2012-2014" sin
-que el admin tenga que buscar/elegir cada `uuid` de vehículo (motor por motor, año por
-año) uno por uno. `model` normalmente sale de `GET .../models-for-years` de arriba, ya
-filtrado a modelos que sí cubren todos esos años.
-
-**A diferencia de `PUT /admin/vehicles/{uuid}/products` (que reemplaza el conjunto
-completo de UN vehículo), esta asignación es aditiva**: agrega los productos a cada
-fitment que coincide sin tocar lo que ese fitment ya tuviera asignado de antes (de este
-u otro producto) — necesario porque esta operación toca muchos vehículos a la vez, y un
-reemplazo por-vehículo aquí borraría silenciosamente asignaciones de otros productos en
-esos mismos fitments. Repetir la misma llamada es seguro (idempotente) — pares
-vehículo-producto que ya existían de una asignación previa se ignoran, no se duplican
-ni cuentan como error.
-
-`engine` es opcional — si se omite, la asignación aplica a **todas** las variantes de
-motor de ese make/model/años (p. ej. las 4 variantes de motor que puede tener el Civic
-2012); si se manda, solo a los fitments con ese `engine` exacto.
-
-Respuesta `200`:
-```json
-{
-  "make": "Honda",
-  "model": "Civic",
-  "years": [2012, 2013, 2014],
-  "engine": null,
-  "vehicleUuids": ["...", "...", "..."],
-  "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"],
-  "assignedCount": 11
-}
-```
-`vehicleUuids` son todos los fitments que coincidieron (para que el dashboard pueda
-mostrar/confirmar cuáles). `assignedCount` es la cantidad de vínculos (vehículo,
-producto) realmente nuevos — puede ser menor a `vehicleUuids.length * productUuids.length`
-si alguna combinación ya existía de una asignación anterior.
-
-- `404` si algún `productUuid` no resuelve a un producto real y no eliminado (nombrando
-  cuáles), o si ningún fitment coincide con la combinación de marca/modelo/años(/motor)
-  dada.
-
-#### `GET /v1/admin/vehicles/{uuid}/products` — listar productos asignados
-
-```http
-GET /v1/admin/vehicles/8f2c1a4e-.../products?limit=60&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Mismo shape/paginación que el equivalente de categorías. `404` si el vehículo no
-existe.
-
-#### `GET /v1/admin/vehicles/by-product/{productUuid}` — listar los vehículos de un producto
-
-```http
-GET /v1/admin/vehicles/by-product/3Cny4OOxdX1GoSzL9rEsTZNL7un
-Authorization: Bearer <admin-token>
-```
-
-Dirección inversa de `GET .../{uuid}/products` de arriba, mismo propósito que el
-equivalente de categorías (precargar una pantalla de "editar tags de este producto").
-
-Respuesta `200` (lista simple, sin paginar):
-```json
-[
-  { "uuid": "8f2c1a4e-...", "vehicleType": "AUTOMOTIVE", "make": "Chevrolet", "model": "Aveo", "yearStart": 2008, "yearEnd": 2016, "engine": "L4 1.6L", "updatedAt": "2026-08-01T12:00:00Z" }
-]
-```
-`[]` si el producto existe pero no tiene ningún vehículo asignado. `404` si el
-`productUuid` no corresponde a un producto real y no eliminado.
-
-### Atributos de producto y grupos de variantes
-
-**Independiente de Categorías/Vehículos de arriba** — no hay ningún "tipo de producto" ni
-clasificación intermedia que gatee qué atributos aplican a qué producto (se evaluó y se
-descartó explícitamente, ver `CLAUDE.md`). Cualquier atributo del catálogo se puede asignar
-directo a cualquier producto. Dos ideas nuevas, con su propia forma en Postgres:
-
-- **Atributos** (`attributes`) — catálogo de *definiciones* (nombre, tipo de dato, unidad).
-  Los **valores** reales de cada producto viven en una sola columna JSONB
-  (`Product.attributes`, clave = `slug` del atributo) — no hay una tabla "un valor por fila".
-- **Presets de atributos** (`attribute-presets`) — bundles nombrados y reusables de atributos
-  (p. ej. "Llantas") puramente como atajo de captura para un lote de productos similares.
-  **Nunca son obligatorios ni se validan contra un producto** — aplicar un preset solo
-  pre-llena claves vacías, no impone ni exige nada después.
-- **Grupos de variantes** (`variant-groups`) — vincula explícitamente SKUs *distintos* de
-  Sicar X (cada uno con su propio precio/stock/documento) que son la misma pieza en
-  presentaciones distintas (p. ej. color) — ver `GET /v1/products/{uuid}` en
-  `FRONTEND_INTEGRATION.md` para cómo el storefront los consume.
-
-Todo empieza vacío hoy — ningún atributo/preset/grupo existe todavía, y ningún producto tiene
-`attributes`/`variantGroupUuid` asignado (89,763 productos activos sin clasificar al momento de
-construir esto). Es trabajo de contenido, no algo que este backend intente adivinar solo.
-
-#### `POST /v1/admin/attributes` — crear una definición de atributo
-
-```http
-POST /v1/admin/attributes
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "name": "Color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null }
-```
-
-`dataType` es `"TEXT"` / `"NUMBER"` / `"BOOLEAN"` / `"ENUM"`. `allowedValues` es **requerido
-(mínimo 2 valores) cuando `dataType` es `"ENUM"`**, ignorado en cualquier otro caso — `422` si
-falta o trae menos de 2. `unit` es opcional, texto libre de display (p. ej. `"V"`, `"mm"`,
-`"L"`). El `slug` **no se manda**, siempre se deriva de `name` (mismo criterio de
-categorías/vehículos: minúsculas, sin acentos, guiones, sufijo `-2`/`-3`... si ya existe).
-
-Respuesta `201`:
-```json
-{ "uuid": "8bdb99f9-9c96-4c37-a32c-1f000f38569b", "name": "Color", "slug": "color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null, "updatedAt": "2026-08-04T17:00:00Z" }
-```
-
-#### `GET /v1/admin/attributes` — buscar/listar atributos
-
-```http
-GET /v1/admin/attributes?search=color&dataType=ENUM&limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-`search` es `ILIKE` parcial contra `name`, `dataType` es igualdad exacta — ambos opcionales y
-combinables. Paginado igual que el resto (`limit` 1-200, default 50; `offset`).
-
-Respuesta `200` — mismo shape que `POST`, dentro de `docs`, ordenado por `name`:
-```json
-{ "total": 1, "docs": [ { "uuid": "8bdb99f9-...", "name": "Color", "slug": "color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null, "updatedAt": "2026-08-04T17:00:00Z" } ] }
-```
-
-#### `PATCH /v1/admin/attributes/{uuid}` — actualización parcial
-
-```http
-PATCH /v1/admin/attributes/8bdb99f9-.../
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "unit": "cm" }
-```
-
-Solo los campos incluidos en el body se tocan. Renombrar (`name`, recalcula `slug`) o cambiar
-`dataType` mientras el atributo **ya tiene valores guardados en algún producto** responde
-`409` — ambos cambios romperían esos valores existentes (la clave JSONB dejaría de coincidir,
-o el tipo guardado dejaría de tener sentido). Quita los valores existentes primero
-(`PUT /v1/admin/products/{uuid}/attributes` de abajo) o crea un atributo nuevo en su lugar.
-`422` si el `allowedValues`/`dataType` resultante (mezclando body + lo ya guardado) deja un
-`ENUM` con menos de 2 valores permitidos.
-
-#### `DELETE /v1/admin/attributes/{uuid}` — eliminar
-
-```http
-DELETE /v1/admin/attributes/8bdb99f9-.../
-Authorization: Bearer <admin-token>
-```
-
-`204` sin cuerpo si tiene éxito. Borrado real. `409` si algún producto todavía tiene esta clave
-en `attributes`, o si el atributo sigue asignado a algún preset — quítalo de ambos primero.
-
-#### `GET /v1/admin/attributes/{uuid}/products` — listar productos que tienen este atributo guardado
-
-```http
-GET /v1/admin/attributes/8bdb99f9-.../products?limit=60&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Dirección inversa de `GET /v1/admin/products/{uuid}/attributes` — dado un atributo, qué
-productos tienen esa clave guardada en `attributes` (contención JSONB, no una tabla pivote
-como categorías/vehículos, pero mismo propósito/shape que
-`GET /v1/admin/categories/{uuid}/products`/`GET /v1/admin/vehicles/{uuid}/products`).
-Paginado igual que el resto (`limit` 1-200, default 60; `offset`). **Nota**: a diferencia de
-esas dos rutas, no existe (ni se planea) un `GET /v1/admin/attributes/by-product/{productUuid}`
-— esa dirección ya la cubre `GET /v1/admin/products/{uuid}/attributes` de arriba.
-
-Respuesta `200` — mismo shape que el equivalente de categorías/vehículos, **más `value`** (el
-valor guardado de este atributo para cada producto — a diferencia de categorías/vehículos,
-que son solo membresía sin valor), pensado para precargar la UI de edición antes de un `PUT`
-de abajo:
-```json
-{
-  "total": 2,
-  "docs": [
-    { "sicarUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "PORTAROLLO ROJO", "description": null, "imageUrl": null, "price": 8.62, "stock": 2.0, "availableStock": 2.0, "salesCount": 15.0, "value": "Rojo" }
-  ]
-}
-```
-
-`404` si el atributo no existe.
-
-#### `PUT /v1/admin/attributes/{uuid}/products` — asignar este atributo a un lote de productos
-
-```http
-PUT /v1/admin/attributes/8bdb99f9-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "values": [
-    { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Rojo" },
-    { "productUuid": "7Bqz2PPydY2HpTaM0sFuUANM8vo", "value": "Azul" }
-  ]
-}
-```
-
-**Dirección atributo-primero** — asigna/actualiza este atributo en un lote de productos de
-una sola llamada, en vez de un `PUT /v1/admin/products/{uuid}/attributes` por producto.
-Complementa esa ruta (dirección producto-primero, reemplaza *todos* los atributos de un
-producto): esta ruta **solo toca la clave de este atributo** en cada producto — cualquier
-otro atributo que el producto ya tuviera guardado no se toca.
-
-**Reemplazo completo, no incremental** (mismo criterio que categorías/vehículos/grupos de
-variantes) — el conjunto de productos con este atributo asignado queda exactamente igual a
-`values`: un producto que ya lo tenía y no aparece aquí **pierde la clave** (sus demás
-atributos siguen intactos), y los que sí aparecen quedan con el `value` dado (nuevo o
-actualizado). Una lista vacía (`{ "values": [] }`) quita el atributo de todos los productos
-que lo tuvieran.
-
-Cada `value` se valida server-side contra el `dataType`/`allowedValues` de este atributo
-**antes de escribir nada** — igual que `PUT /v1/admin/products/{uuid}/attributes`:
-
-- `404` si algún `productUuid` no resuelve a un producto real y no eliminado (nombra cuáles).
-- `422` si algún `value` no coincide con el `dataType`, o (para `ENUM`) no está en
-  `allowedValues` (nombra el/los producto(s) y por qué).
-
-Respuesta `200`:
-```json
-{
-  "attributeUuid": "8bdb99f9-...",
-  "docs": [
-    { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Rojo" },
-    { "productUuid": "7Bqz2PPydY2HpTaM0sFuUANM8vo", "value": "Azul" }
-  ]
-}
-```
-`docs` es un eco minimalista de lo que quedó aplicado (sin datos de producto — usa `GET
-.../products` de arriba, que sí los trae, para la UI de listado/edición).
-
-**Cuidado con atributos con más de 200 productos asignados**: mismo riesgo que en
-categorías/vehículos (ver notas arriba) — `GET .../products` está limitado a `limit ≤
-200`, y un `PUT` guardado desde un picker que solo cargó una página le quita
-silenciosamente la clave a los productos no cargados. Usar el `PATCH` de abajo para
-ediciones incrementales.
-
-#### `PATCH /v1/admin/attributes/{uuid}/products` — asignar/actualizar o quitar el valor de este atributo, de forma incremental
-
-```http
-PATCH /v1/admin/attributes/8bdb99f9-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "upsert": [{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Verde" }],
-  "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"]
-}
-```
-
-**Incremental** — a diferencia del `PUT` de arriba, no necesita conocer el conjunto
-completo: `upsert` asigna/actualiza el `value` de este atributo en cada producto listado
-(sin tocar sus demás atributos guardados), `remove` le quita la clave a los productos
-listados (sin tocar el resto). `remove` de un producto que no tenga la clave, o que no
-exista, se ignora (no-op tolerante).
-
-Respuesta `200`:
-```json
-{
-  "attributeUuid": "8bdb99f9-...",
-  "upserted": [{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "value": "Verde" }],
-  "removed": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"],
-  "upsertedCount": 1,
-  "removedCount": 1
-}
-```
-
-- `422` si un mismo `productUuid` aparece en `upsert` y `remove` a la vez, o si algún
-  `value` no coincide con el `dataType`/`allowedValues` de este atributo (nombra
-  cuáles) — no escribe nada hasta que todos pasen.
-- `404` si el atributo no existe, o si algún `productUuid` de `upsert` no resuelve a un
-  producto real y no eliminado.
-
-#### `POST /v1/admin/attribute-presets` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
-
-Mismo patrón CRUD que atributos (`{ "name": "Llantas" }` al crear, `slug` derivado
-automáticamente, `search` en el listado). A diferencia de atributos/grupos de variantes,
-**`DELETE` nunca se bloquea** — un preset no gatea ni valida nada de un producto, borrarlo solo
-quita el atajo de captura, nunca afecta valores ya guardados.
-
-```json
-{ "uuid": "c1c2c3c4-...", "name": "Llantas", "slug": "llantas", "updatedAt": "2026-08-04T17:00:00Z" }
-```
-
-#### `PUT /v1/admin/attribute-presets/{uuid}/attributes` — reemplazar los atributos de un preset
-
-```http
-PUT /v1/admin/attribute-presets/c1c2c3c4-.../attributes
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "items": [
-    { "attributeUuid": "8bdb99f9-...", "isRequired": true, "displayOrder": 1 },
-    { "attributeUuid": "2380964d-...", "isRequired": false, "displayOrder": 2 }
-  ]
-}
-```
-
-**Reemplazo completo, no incremental** (mismo criterio que `PUT .../categories/{uuid}/products`)
-— una lista vacía quita todos. `isRequired` es **solo asesorio para la UI del preset**, nunca se
-valida contra lo que un producto realmente tenga guardado. `404` si algún `attributeUuid` no
-resuelve (nombra cuáles). Respuesta `200` con el conjunto ya aplicado:
-
-```json
-{ "presetUuid": "c1c2c3c4-...", "docs": [ { "attributeUuid": "8bdb99f9-...", "isRequired": true, "displayOrder": 1, "attribute": { "uuid": "8bdb99f9-...", "name": "Color", "slug": "color", "dataType": "ENUM", "allowedValues": ["Rojo", "Azul", "Verde"], "unit": null, "updatedAt": "..." } } ] }
-```
-
-`GET /v1/admin/attribute-presets/{uuid}/attributes` devuelve el mismo shape (sin cuerpo de
-request) — pensado para precargar la UI de edición antes de un `PUT`.
-
-#### `POST /v1/admin/attribute-presets/{uuid}/apply` — aplicar preset a un lote de productos
-
-```http
-POST /v1/admin/attribute-presets/c1c2c3c4-.../apply
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
-```
-
-**Esto es un scaffold, no una asignación de valores.** Agrega las claves de atributos del
-preset a cada producto con valor `null` — **solo para las claves que el producto todavía no
-tiene**, un valor ya guardado (de este preset o de cualquier otra vía) nunca se sobreescribe.
-Pensado para "estos productos van a necesitar `color`/`talla`" sin tener que abrir cada uno y
-elegir manualmente qué atributos aplican; llenar los valores reales es un paso aparte
-(`PUT /v1/admin/products/{uuid}/attributes` uno por uno, o la hoja `Atributos` del `.xlsx`
-más abajo). `404` si algún `productUuid` no resuelve, `422` si el preset no tiene ningún
-atributo asignado todavía.
-
-Respuesta `200`:
-```json
-{ "presetUuid": "c1c2c3c4-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"], "scaffoldedCount": 4 }
-```
-`scaffoldedCount` son pares (producto, atributo) realmente agregados — un producto que ya
-tenía alguna de las claves del preset cuenta menos que `productUuids.length × atributos del preset`.
-
-#### `GET /v1/admin/products/{productUuid}/attributes` — ver los atributos guardados de un producto
-
-```http
-GET /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/attributes
-Authorization: Bearer <admin-token>
-```
-
-Respuesta `200`:
-```json
-{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "docs": [ { "attributeUuid": "8bdb99f9-...", "name": "Color", "slug": "color", "dataType": "ENUM", "unit": null, "value": "Rojo" } ] }
-```
-`docs: []` si el producto existe pero no tiene ningún atributo guardado todavía (no es un
-error). `404` si `productUuid` no corresponde a un producto real y no eliminado. Mismo shape
-que expone `GET /v1/products/{uuid}` al storefront (ver `FRONTEND_INTEGRATION.md`), solo que
-sin filtrar por `isActive`.
-
-#### `PUT /v1/admin/products/{productUuid}/attributes` — reemplazar los atributos guardados de un producto
-
-```http
-PUT /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/attributes
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{
-  "values": [
-    { "attributeUuid": "8bdb99f9-...", "value": "Rojo" },
-    { "attributeUuid": "2380964d-...", "value": 12.5 }
-  ]
-}
-```
-
-**Reemplazo completo, no incremental** — el conjunto de atributos guardados del producto queda
-exactamente igual a `values` (una lista vacía borra todos). `value` es un solo campo
-polimórfico en el wire (`string`/`number`/`boolean`/`null`) — se valida server-side contra el
-`dataType`/`allowedValues` del `attributeUuid` referenciado **antes de escribir nada** (si
-cualquier valor falla, no se guarda ninguno):
-
-- `404` si algún `attributeUuid` no resuelve contra el catálogo (nombra cuáles).
-- `422` si algún `value` no coincide con el `dataType` del atributo (p. ej. texto para un
-  `NUMBER`), o si un `ENUM` recibe un valor fuera de `allowedValues` (nombra el atributo y,
-  para `ENUM`, la lista de valores válidos).
-
-Respuesta `200` — mismo shape que `GET` de arriba, con el conjunto ya aplicado.
-
-#### `PATCH /v1/admin/products/{productUuid}/variant-group` — asignar/quitar el grupo de variantes de un producto
-
-```http
-PATCH /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/variant-group
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "variantGroupUuid": "b52bf1c5-873a-45f6-b341-930106d669ed" }
-```
-
-Convenience de un solo producto — para asignar/reasignar varios a la vez de golpe, usa
-`PUT /v1/admin/variant-groups/{uuid}/products` de abajo. `variantGroupUuid: null` quita al
-producto de cualquier grupo. `404` si el producto o el `variantGroupUuid` dado no existen.
-
-Respuesta `200`:
-```json
-{ "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "variantGroupUuid": "b52bf1c5-873a-45f6-b341-930106d669ed" }
-```
-
-#### `POST /v1/admin/variant-groups` / `GET` / `PATCH /{uuid}` / `DELETE /{uuid}`
-
-Mismo patrón CRUD que atributos/presets:
-
-```http
-POST /v1/admin/variant-groups
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "name": "Portarollo acero inoxidable", "variantAttributeSlug": "color" }
-```
-
-`variantAttributeSlug` es **opcional y texto libre** (no se valida contra `attributes.slug`) —
-solo indica al storefront qué atributo distingue a los miembros del grupo para pintar el
-selector correcto (ver `GET /v1/products/{uuid}` en `FRONTEND_INTEGRATION.md`); se puede dejar
-`null` si el grupo no tiene un atributo distintivo claro. Respuesta `201`:
-
-```json
-{ "uuid": "b52bf1c5-...", "name": "Portarollo acero inoxidable", "variantAttributeSlug": "color", "updatedAt": "2026-08-04T17:00:00Z" }
-```
-
-`GET` acepta `search` (`ILIKE` parcial contra `name`) + paginación. `PATCH` es parcial
-(`exclude_unset`, mismo criterio que el resto). `DELETE` responde `409` si algún producto
-todavía apunta a este grupo (`GET .../products` de abajo para revisarlos) — quítalos primero.
-
-#### `PUT /v1/admin/variant-groups/{uuid}/products` — reemplazar los miembros de un grupo de variantes
-
-```http
-PUT /v1/admin/variant-groups/b52bf1c5-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
-```
-
-**Reemplazo completo, no incremental** — a diferencia de categorías/vehículos (N:M vía tabla
-pivote), `variantGroupUuid` es una columna directa en `Product`, así que "reemplazar" reasigna
-esa columna: limpia el grupo de cualquier producto que ya no esté en la lista y lo asigna a
-los que sí. `productUuids` son `sicarUuid`, igual que en todos los demás endpoints de esta
-API. `404` si el grupo no existe o si algún `productUuid` no resuelve (nombrando cuáles).
-
-Respuesta `200`:
-```json
-{ "variantGroupUuid": "b52bf1c5-...", "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
-```
-
-`GET /v1/admin/variant-groups/{uuid}/products` (paginado, mismo shape que el equivalente de
-categorías/vehículos) lista los miembros actuales — pensado para poblar la UI de edición antes
-de un `PUT`.
-
-**Cuidado con grupos con más de 200 productos asignados**: mismo riesgo que en
-categorías/vehículos/atributos (ver notas arriba) — un `PUT` guardado desde un picker que
-solo cargó una página de `GET .../products` expulsa silenciosamente del grupo a los
-productos no cargados. Usar el `PATCH` de abajo para ediciones incrementales.
-
-#### `PATCH /v1/admin/variant-groups/{uuid}/products` — agregar/quitar productos de forma incremental
-
-```http
-PATCH /v1/admin/variant-groups/b52bf1c5-.../products
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "add": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "remove": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"] }
-```
-
-**Incremental** — a diferencia del `PUT` de arriba, no necesita conocer el conjunto
-completo de miembros. `add` reasigna `variantGroupUuid` incondicionalmente (si un
-producto ya pertenecía a otro grupo, esta llamada gana). `remove` solo quita la
-pertenencia si el producto **sigue perteneciendo a este grupo** en el momento de la
-llamada — a diferencia de vaciar y reasignar todo el grupo como hace el `PUT`, esta
-guarda evita que un `remove` le quite por accidente la pertenencia a un producto que
-mientras tanto ya fue movido a otro grupo por una llamada distinta.
-
-Respuesta `200`:
-```json
-{ "variantGroupUuid": "b52bf1c5-...", "added": ["3Cny4OOxdX1GoSzL9rEsTZNL7un"], "removed": ["7Bqz2PPydY2HpTaM0sFuUANM8vo"], "addedCount": 1, "removedCount": 1 }
-```
-
-- `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez.
-- `404` si el grupo no existe, o si algún `productUuid` de `add` no resuelve.
-
-### Información propia de producto (descripción/marca/bullets/especificaciones/contenido)
-
-**Nuevo (2026-08-22), independiente de Atributos/Grupos de variantes de arriba** — no es EAV
-ni necesita un catálogo de definiciones previo: son cinco columnas directas y libres en
-`Product` (`description`, `brand`, `bulletPoints`, `technicalSpecs`, `contents`), pensadas
-para el contenido de un distribuidor (descripción larga, marca del fabricante, viñetas de
-puntos clave, ficha técnica en texto, qué incluye la caja) que hoy no tiene dónde vivir en
-el catálogo. Las cinco son `string | null`, totalmente independientes entre sí — se puede
-llenar cualquier subconjunto. Esta es la **única** superficie admin para editarlas uno a la
-vez; para un lote grande, ver la hoja `InfoProducto` en "Importación masiva por Excel" más
-abajo. No hay `GET` dedicado aquí — `GET /v1/products/{uuid}` (storefront, ver
-`FRONTEND_INTEGRATION.md`) ya expone los cinco campos y solo necesita `x-api-key`, no un
-token de admin.
-
-**`description` es distinto de las otras cuatro en dos sentidos (2026-08-22, mismo día,
-cambio separado):** antes se llamaba `descriptionDetails` y era la **única** de estas
-columnas realmente sincronizada desde Sicar X (vía el GraphQL lazy-refresh de
-`GET /v1/products/{uuid}`) — ese sync se eliminó por completo (Sicar X ya ni siquiera se
-consulta por este campo) y el valor de cada producto se **borró** al renombrarla (no fue una
-migración que preservara datos — confirmado con el negocio que empezar de cero era lo
-deseado, no arrastrar el texto que traía Sicar X). Y a diferencia de
-`brand`/`bulletPoints`/`technicalSpecs`/`contents` (detalle únicamente), `description` **sí
-sigue apareciendo en `POST /v1/products`/`POST /v1/search`** (`ProductBasic`) además del
-detalle — eso no cambió, solo cambió quién la escribe.
-
-#### `PATCH /v1/admin/products/{productUuid}/info` — actualizar descripción/marca/bullets/especificaciones/contenido
-
-```http
-PATCH /v1/admin/products/3Cny4OOxdX1GoSzL9rEsTZNL7un/info
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "description": "Taladro percutor de 1/2\" con motor de 800W.", "brand": "Surtek", "bulletPoints": "-Fabricado en acero.\n-Soporte fijo." }
-```
-
-**Actualización parcial** (`exclude_unset`, mismo criterio que `PATCH /v1/admin/attributes/{uuid}`)
-— un campo **omitido** del body no se toca; un campo enviado explícitamente como `null` **sí
-se borra**. `technicalSpecs`/`contents` no incluidos arriba quedan exactamente como estaban.
-`404` si `productUuid` no corresponde a un producto real y no eliminado.
-
-Respuesta `200` — los cinco campos ya con el estado final (no solo lo que venía en el body):
-```json
-{
-  "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
-  "description": "Taladro percutor de 1/2\" con motor de 800W.",
-  "brand": "Surtek",
-  "bulletPoints": "-Fabricado en acero.\n-Soporte fijo.",
-  "technicalSpecs": null,
-  "contents": null
-}
-```
-
-### Marcas (nuevo, 2026-09-23)
-
-`brand` (ver la sección anterior) es texto libre, así que se acumulan duplicados por casing
-(`"Surtek"`, `"SURTEK"`). Estas rutas administran las marcas **como grupo**. Todas comparan
-**sin distinguir mayúsculas/minúsculas** (`lower(brand)`, igual que el filtro `brand` de
-`POST /v1/products`), trabajan sobre productos no eliminados (activos o no) y **recortan** los
-valores que se mandan. `""` se trata como `null`. Esa misma normalización se aplica ahora
-también a `PATCH /v1/admin/products/{productUuid}/info`, y una migración de datos
-(`a7c3e1f9d2b4`) recortó una sola vez las marcas que ya estaban guardadas. Cualquier admin
-autenticado puede usarlas (no hace falta `super_admin`). Las tres rutas que escriben quedan
-en el audit log (`brand.rename`, `brand.delete`, `product.brand_bulk_set`).
-
-Para filtrar el catálogo a "Sin marca" usa `hasBrand: false` en `POST /v1/products` /
-`POST /v1/search` (ver `FRONTEND_INTEGRATION.md`).
-
-#### `GET /v1/admin/brands` — listar marcas
-
-```json
-{
-  "docs": [
-    { "name": "Surtek", "productCount": 42, "variants": ["SURTEK", "Surtek"] },
-    { "name": "Truper", "productCount": 310, "variants": ["Truper"] }
-  ],
-  "unbrandedCount": 118903
-}
-```
-
-Una entrada por marca, ordenadas por `name` sin distinguir mayúsculas. `name` es una de las
-grafías del grupo (siempre la misma, `MIN(brand)` según la collation de Postgres; no
-asumas cuál de ellas). `variants` son todas las grafías crudas
-agrupadas bajo `name`: **si hay más de una, es un duplicado a fusionar** con `rename`.
-`unbrandedCount` es el número de productos sin marca.
-
-#### `PATCH /v1/admin/products/brand` — asignar la marca de varios productos
-
-```json
-{ "productUuids": ["3Cny4OOxdX1GoSzL9rEsTZNL7un", "..."], "brand": "Surtek" }
-```
-
-`productUuids`: de 1 a 500 (`422` fuera de ese rango). `brand: null` o `""` **quita** la marca.
-Éxito parcial: los uuids que no corresponden a un producto no eliminado no hacen fallar la
-solicitud, vuelven en `notFound`. Respuesta `200`:
-```json
-{ "updated": 2, "notFound": ["uuid-que-no-existe"] }
-```
-
-#### `POST /v1/admin/brands/rename` — renombrar o fusionar
-
-```json
-{ "from": "SURTEK", "to": "Surtek" }
-```
-
-Todo producto cuya marca coincida con `from` (sin distinguir mayúsculas) pasa a `to`. Si `to` ya
-existe como marca, las dos quedan fusionadas. También sirve para corregir solo el casing, como en
-el ejemplo. Respuesta `200` `{ "updated": 42 }`. `404` si ningún producto tiene la marca `from`;
-`422` si `from` o `to` vienen vacíos (para quitar una marca usa el `DELETE` de abajo).
-
-#### `DELETE /v1/admin/brands?name=X` — quitar una marca de todos sus productos
-
-Pone `brand` en `null` en todo producto con esa marca (sin distinguir mayúsculas). Respuesta
-`200` `{ "updated": 17 }`. Es idempotente: si ningún producto tiene esa marca responde
-`{ "updated": 0 }`, **no** `404`. `422` si falta `name` o viene vacío.
-
-### Precio de oferta (nuevo, 2026-10-10)
-
-El precio con descuento sigue siendo el `price` que viene de Sicar X, y es lo único que se cobra. Aquí solo se captura el **precio anterior** (`compareAtPrice`, con IVA), que la tienda muestra tachado con su porcentaje. El flujo normal es:
-1. Bajar el precio en Sicar X.
-2. Capturar aquí el precio anterior, o usar `compareAtPercent`.
-
-La oferta se apaga sola al pasar `saleEndsAt`, o si Sicar X vuelve a subir `price` hasta igualar `compareAtPrice`. Mientras no está vigente, la tienda recibe `compareAtPrice: null`.
-
-Reglas comunes a estas rutas:
-- Cualquier admin autenticado puede usarlas.
-- Todas quedan en el audit log: `product.sale_set`, `product.sale_clear`, `product.sale_bulk_set` y `product.sale_bulk_clear`.
-- `saleEndsAt` es opcional (sin fecha de fin) y debe ser futura (`422`). Si no trae zona horaria, se interpreta como UTC.
-
-#### `PUT /v1/admin/products/{productUuid}/sale`: capturar la oferta de un producto
-
-```json
-{ "compareAtPrice": 150.0, "saleEndsAt": "2026-10-31T23:59:59-06:00" }
-```
-
-- `422` si `compareAtPrice` no es mayor que el `price` actual, o si `saleEndsAt` ya pasó.
-- `404` si el producto no existe.
-
-Respuesta `200`:
-
-```json
-{ "productUuid": "...", "price": 120.0, "compareAtPrice": 150.0, "saleEndsAt": "2026-11-01T05:59:59Z", "isOnSale": true }
-```
-
-#### `DELETE /v1/admin/products/{productUuid}/sale`: quitar la oferta
-
-Responde `204` y es idempotente.
-
-#### `PUT /v1/admin/products/sale`: oferta masiva
-
-```json
-{ "productUuids": ["...", "..."], "compareAtPercent": 20, "saleEndsAt": null }
-```
-
-Reglas del body:
-- **Objetivo:** manda exactamente uno de `productUuids` (de 1 a 500) o `categoryUuid` (un nodo de `GET /v1/taxonomy`, incluye sus descendientes).
-- **Precio:** manda exactamente uno de `compareAtPrice` (el mismo para todos) o `compareAtPercent` (entre 0 y 100, sin incluirlos).
-- `compareAtPercent` calcula el precio por producto como `price / (1 - pct/100)`: con `price` 80 y 20 %, el resultado es 100.
-- Si mandas ambos, o ninguno, la respuesta es `422`.
-
-Respuesta `200`, con éxito parcial:
-
-```json
-{ "updated": 12, "notFound": ["uuid-que-no-existe"], "skipped": ["uuid-con-precio-mayor-o-igual"] }
-```
-
-`skipped` lista los productos cuyo precio anterior no quedaba mayor que su `price`, o que tienen `price` en 0.
-
-#### `DELETE /v1/admin/products/sale`: quitar la oferta de varios
-
-Recibe un body con `productUuids` o `categoryUuid`, igual que el `PUT` masivo. Responde `{ "updated": n, "notFound": [...] }`.
-
-### Sinónimos del buscador (nuevo, 2026-09-26)
-
-El buscador de la tienda (`POST /v1/search`, `GET /v1/search/suggest`) usa un motor de búsqueda
-(Typesense) que ya tolera errores de tipeo, plurales, acentos y unidades escritas juntas o
-separadas (`10mm` / `10 mm`). Lo que **no** puede adivinar es que dos palabras distintas
-significan lo mismo, por ejemplo que un cliente escriba "entrada 1/2" cuando el catálogo dice
-"cuadro 1/2". Para eso son estos sinónimos, que se aplican a las búsquedas **de inmediato**,
-sin reindexar nada.
-
-Hay dos tipos:
-- **Multi-dirección** (sin `root`): cada palabra encuentra a las demás. Ej.: `allen` ↔
-  `hexagonal`. Buscar "llave allen" encuentra las "Llave hexagonal…", y al revés.
-- **Una dirección** (con `root`): buscar `root` también encuentra las palabras de `synonyms`,
-  pero **no al revés**. Úsalo cuando la dirección contraria metería ruido. Ej.: `root:
-  "inalambrico"` → `["bateria", "20v"]`. Así, "taladro inalámbrico" encuentra los taladros de
-  20 V, pero buscar "20v" no devuelve todo lo que diga "inalámbrico".
-
-Las palabras se **normalizan** igual que las búsquedas: minúsculas, sin acentos, en singular y
-con número y unidad juntos. `"Baterías"` se guarda como `bateria`, `"20 V"` como `20v`. La
-respuesta siempre devuelve la forma guardada, para que el dashboard muestre lo que de verdad
-quedó. Se permiten frases de varias palabras (`"llave allen"`).
-
-Crear y editar lo puede hacer cualquier admin; **borrar solo `super_admin`** (mismo reparto que
-cupones). Las tres escrituras quedan en el audit log (`search_synonym.create`,
-`search_synonym.update` con antes/después, `search_synonym.delete`).
-
-Ya existen 4 entradas iniciales: `cuadro`/`entrada`/`mando`, `allen`/`hexagonal`,
-`inalambrico` → `bateria`/`20v`/`12v` (una dirección) y `desarmador`/`destornillador`.
-
-**`syncedToSearch`** (en las respuestas de `POST`/`PATCH`): `true` si el cambio ya está activo
-en el buscador. `false` si el motor no respondió en ese momento: **el cambio sí quedó
-guardado** y se aplica solo en unos minutos (máximo 5). El dashboard debería mostrar algo como
-"Guardado; se aplicará al buscador en unos minutos", no un error.
-
-Objeto de respuesta (`SearchSynonymPublic`):
-```json
-{
-  "uuid": "6a301937-2f0e-4c3a-9d1b-0f5a6c1e2b77",
-  "root": "inalambrico",
-  "synonyms": ["bateria", "20v", "12v"],
-  "kind": "ONE_WAY",
-  "createdAt": "2026-09-26T21:40:11.203Z",
-  "updatedAt": "2026-09-26T21:40:11.203Z"
-}
-```
-`kind` es `MULTI_WAY` si `root` es `null`, `ONE_WAY` si no.
-
-#### `GET /v1/admin/search/synonyms` — listar
-
-Query params opcionales: `q` (coincidencia parcial contra la raíz o cualquier palabra, sin
-distinguir acentos ni mayúsculas), `limit` (1-200, default 60) y `offset`. Los más recientes
-primero. Respuesta `200`: `{ "total": 5, "docs": [SearchSynonymPublic, ...] }`.
-
-#### `POST /v1/admin/search/synonyms` — crear
-
-```json
-{ "synonyms": ["Mecha", "Broca"] }
-```
-```json
-{ "root": "Inalámbrico", "synonyms": ["Baterías", "20 V"] }
-```
-Respuesta `201`: `SearchSynonymPublic` + `syncedToSearch`.
-- **`422`**:
-  - un multi-dirección con menos de 2 palabras distintas **después** de normalizar (`["martillo", "Martillos"]` son la misma palabra);
-  - una raíz que se repite en su propia lista;
-  - una lista vacía;
-  - más de 20 palabras;
-  - una palabra de más de 50 caracteres.
-- **`409`** si ya existe una entrada idéntica (misma raíz y mismo conjunto de palabras, sin importar el orden).
-
-#### `PATCH /v1/admin/search/synonyms/{uuid}` — editar
-
-Parcial: solo los campos que mandes. `{"root": null}` **explícito** convierte una entrada de una
-dirección en multi-dirección. Las mismas reglas de `422`/`409` que al crear; `404` si no
-existe. Respuesta `200`: `SearchSynonymPublic` + `syncedToSearch`.
-
-#### `DELETE /v1/admin/search/synonyms/{uuid}` — borrar (solo `super_admin`)
-
-Respuesta `204`. `403` para un admin `staff`; `404` si no existe. Deja de aplicarse en el
-buscador de inmediato si el motor responde; si no, en la siguiente reconciliación (≤ 5 minutos).
-
-### Clientes: historial de consentimiento de correos de marketing (nuevo, 2026-10-13)
-
-Úsalo para atender una solicitud ARCO o una queja ante Profeco o la autoridad de datos personales. Muestra cuándo, cómo y con qué versión del aviso de privacidad un cliente aceptó o rechazó los correos de marketing. El historial solo crece: nadie, ni este endpoint ni la base de datos, puede editarlo o borrarlo.
-
-#### `GET /v1/admin/clients/{clientUuid}/consents`
-
-Lo puede usar cualquier admin autenticado (`staff` o `super_admin`). Devuelve `404` si la cuenta no existe. `clientUuid` es el `uuid` de la cuenta del cliente. Lo trae el detalle y el listado de pedidos (`clientUuid`, nuevo y aditivo; `null` en pedidos de invitado, que no tienen cuenta).
-
-```http
-GET /v1/admin/clients/7f3c…/consents
-Authorization: Bearer <token de admin>
-```
-
-Respuesta `200`:
-
-```json
-{
-  "clientUuid": "7f3c…",
-  "email": "ana@example.com",
-  "name": "Ana López",
-  "marketingEmails": false,
-  "marketingConsentAt": "2026-11-02T09:14:55.120331Z",
-  "events": [
-    {
-      "value": false,
-      "source": "one_click_unsubscribe",
-      "privacyNoticeVersion": null,
-      "ipAddress": "189.203.11.40",
-      "userAgent": "Mozilla/5.0 (iPhone; …)",
-      "changedAt": "2026-11-02T09:14:55.120331Z"
-    },
-    {
-      "value": true,
-      "source": "register_checkbox",
-      "privacyNoticeVersion": "2026-10-12",
-      "ipAddress": "189.203.11.40",
-      "userAgent": "Mozilla/5.0 (iPhone; …)",
-      "changedAt": "2026-10-13T17:02:11.482190Z"
-    }
-  ]
-}
-```
-
-- `events` es el historial completo, del más reciente al más antiguo, sin paginar. `marketingEmails` siempre coincide con el `value` del primero.
-- `changedAt` es la hora del servidor, en UTC.
-- `source` puede ser:
-  - `register_checkbox`: casilla del registro;
-  - `google_signup`: alta con Google;
-  - `account_toggle`: cambio en "Mi cuenta";
-  - `email_unsubscribe`: enlace de baja del correo;
-  - `one_click_unsubscribe`: baja de un clic del cliente de correo;
-  - `admin`: reservado, hoy no hay ruta admin que lo cambie;
-  - `migrated`: el estado que la cuenta ya tenía antes de que existiera este historial, sin versión, IP ni user agent.
-- `privacyNoticeVersion`, `ipAddress` y `userAgent` pueden ser `null` si el frontend no los mandó.
+Tabla plana de fitments `{ uuid, vehicleType: "AUTOMOTIVE" | "MOTORCYCLE", make, model, yearStart, yearEnd, engine, updatedAt }`
+(`yearEnd: null` = sigue en producción). Se sembró a partir del catálogo de referencia de
+Gonher, así que algunas filas pueden no ser exactas. El selector público está en `FRONTEND_INTEGRATION.md`.
+
+| Ruta | Notas |
+|---|---|
+| `POST /v1/admin/vehicles` | `201`. `422` si `yearEnd < yearStart` |
+| `GET /v1/admin/vehicles?vehicleType=&make=&model=` | `make` y `model` con `ILIKE` parcial; orden por make/model/yearStart |
+| `PATCH /v1/admin/vehicles/{uuid}` | Parcial; `yearEnd: null` la marca como vigente |
+| `DELETE /v1/admin/vehicles/{uuid}` | **super_admin**. `409` si tiene productos |
+| `GET` / `PUT` / `PATCH /v1/admin/vehicles/{uuid}/products` | Patrón común; el `PUT` responde `{ vehicleUuid, productUuids }` |
+| `GET /v1/admin/vehicles/by-product/{productUuid}` | Lista simple |
+| `GET /v1/admin/vehicles/models-for-years?make=&vehicleType=&years=2012&years=2013` | Modelos que existen en **todos** esos años → `{ docs: [...] }` |
+| `POST /v1/admin/vehicles/assign-by-model` `{ vehicleType?, make, model, years, engine?, productUuids }` | **Aditivo** e idempotente: asigna los productos a cada fitment del modelo cuyo rango toque alguno de los años (sin `engine`, a todos los motores). Responde `{ make, model, years, engine, vehicleUuids, productUuids, assignedCount }` (vínculos nuevos). `404` si ningún fitment coincide o algún producto no existe |
+
+### Atributos, presets y grupos de variantes
+
+No dependen de categorías: cualquier atributo se puede poner en cualquier producto. Los valores
+se guardan en `Product.attributes` (JSONB, con el slug como clave). Solo el detalle del producto
+del storefront los expone.
+
+**Atributo**: `{ uuid, name, slug, dataType: "TEXT" | "NUMBER" | "BOOLEAN" | "ENUM", allowedValues, unit, updatedAt }`.
+
+| Ruta | Notas |
+|---|---|
+| `POST /v1/admin/attributes` | `allowedValues` es obligatorio (≥ 2) si es `ENUM`; se ignora en otro caso (`422`). `unit` es texto libre |
+| `GET /v1/admin/attributes?search=&dataType=` | Orden por `name` |
+| `PATCH /v1/admin/attributes/{uuid}` | `409` si renombras o cambias `dataType` y ya hay productos con valores; `422` si un `ENUM` queda con menos de 2 valores |
+| `DELETE /v1/admin/attributes/{uuid}` | `409` si algún producto o preset lo usa |
+| `GET /v1/admin/attributes/{uuid}/products` | `ProductAdminBasic` + `value` |
+| `PUT /v1/admin/attributes/{uuid}/products` `{ values: [{ productUuid, value }] }` | Reemplaza **solo esta clave** en el conjunto (a los que no vengan se les quita); valida todo antes de escribir → `{ attributeUuid, docs }` |
+| `PATCH /v1/admin/attributes/{uuid}/products` `{ upsert: [{ productUuid, value }], remove: [productUuid] }` | Incremental → `{ attributeUuid, upserted, removed, upsertedCount, removedCount }` |
+| `GET /v1/admin/products/{productUuid}/attributes` | `{ productUuid, docs: [{ attributeUuid, name, slug, dataType, unit, value }] }` |
+| `PUT /v1/admin/products/{productUuid}/attributes` `{ values: [{ attributeUuid, value }] }` | Reemplaza todos los atributos del producto |
+
+Validación de `value`: `404` si el atributo no existe; `422` si el tipo no coincide o si un `ENUM`
+recibe un valor fuera de `allowedValues`. Nada se escribe si falla una sola fila.
+
+**Presets** (`/v1/admin/attribute-presets`, objeto `{ uuid, name, slug, updatedAt }`): son atajos de captura y nunca validan nada.
+- CRUD con `search`. El `DELETE` nunca se bloquea.
+- `PUT` / `GET .../{uuid}/attributes` `{ items: [{ attributeUuid, isRequired, displayOrder }] }`: reemplaza los atributos del preset. `isRequired` es solo una pista para la UI.
+- `POST .../{uuid}/apply` `{ productUuids }`: agrega con valor `null` las claves que le falten a cada producto (nunca sobrescribe) → `{ presetUuid, productUuids, scaffoldedCount }`. `422` si el preset no tiene atributos.
+
+**Grupos de variantes** (`/v1/admin/variant-groups`, objeto `{ uuid, name, variantAttributeSlug, updatedAt }`) unen SKUs distintos que son la misma pieza en otra presentación.
+- `variantAttributeSlug` es texto libre opcional: le indica al storefront qué atributo usar para pintar el selector.
+- CRUD con `search`. `DELETE` da `409` si el grupo tiene productos.
+- `GET` / `PUT` / `PATCH .../{uuid}/products`: patrón común. El `PATCH` con `add` mueve el producto aunque ya estuviera en otro grupo; con `remove` solo lo quita si sigue en este grupo.
+- `PATCH /v1/admin/products/{productUuid}/variant-group` `{ variantGroupUuid | null }` → `{ productUuid, variantGroupUuid }`.
+
+### Información propia del producto
+
+`PATCH /v1/admin/products/{productUuid}/info` `{ description?, brand?, bulletPoints?, technicalSpecs?, contents? }`.
+Es parcial: un campo omitido no se toca y uno mandado como `null` se borra. Responde los cinco campos
+con su valor final. Todos son texto libre (`\n` para listas). `brand` se recorta y `""` cuenta como
+`null`. `description` también aparece en los listados del storefront; los otros cuatro solo en el
+detalle. `404` si el producto no existe.
+
+### Peso y medidas de empaque
+
+Para cotizar envíos con datos reales del producto. Son las del **empaque de una pieza** (unidad de venta).
+
+- `PUT /v1/admin/products/{productUuid}/package-dimensions` `{ weightKg, lengthCm, widthCm, heightCm }`: las cuatro son obligatorias (una cotización no sirve con medidas parciales) y reemplazan las anteriores. Cada una `> 0`; tope 1500 kg y 600 cm por lado. Se redondean a 3 decimales (kg) y 2 (cm); un valor positivo más chico sube al mínimo (0.001 kg / 0.01 cm). Responde `{ productUuid, packageDimensions: { weightKg, lengthCm, widthCm, heightCm } }`. `422` si alguna falta o está fuera de rango, `404` si el producto no existe.
+- `DELETE /v1/admin/products/{productUuid}/package-dimensions` → `204`, idempotente.
+- Para leerlas: `packageDimensions` en `GET /v1/products/{uuid}` (`null` si no tiene).
+- Carga masiva: hoja `Medidas` de la importación por Excel (abajo).
+
+### Marcas
+
+Todas comparan sin distinguir mayúsculas y trabajan sobre productos no eliminados. Para filtrar
+"Sin marca" en el storefront existe `hasBrand: false`.
+
+| Ruta | Notas |
+|---|---|
+| `GET /v1/admin/brands` | `{ docs: [{ name, productCount, variants }], unbrandedCount }`. Si `variants` trae más de una grafía, es un duplicado que conviene fusionar |
+| `PATCH /v1/admin/products/brand` `{ productUuids (1-500), brand \| null }` | → `{ updated, notFound }` |
+| `POST /v1/admin/brands/rename` `{ from, to }` | Renombra o fusiona (también sirve para corregir mayúsculas) → `{ updated }`. `404` si `from` no existe; `422` si alguno viene vacío |
+| `DELETE /v1/admin/brands?name=X` | Quita la marca a todos sus productos → `{ updated }`. Idempotente; `422` si falta `name` |
+
+### Precio de oferta
+
+`compareAtPrice` es el precio **anterior** con IVA (el tachado). El precio de venta sigue siendo
+el `price` de Sicar X; lo normal es bajarlo allá y capturar aquí el anterior. La oferta se apaga
+sola al pasar `saleEndsAt` o si `price` sube hasta igualar `compareAtPrice`. Cualquier admin
+puede usar estas rutas. `saleEndsAt` es opcional, debe ser futura y, sin zona horaria, se toma
+como UTC.
+
+- `PUT /v1/admin/products/{productUuid}/sale` `{ compareAtPrice, saleEndsAt? }` → `{ productUuid, price, compareAtPrice, saleEndsAt, isOnSale }`. `422` si `compareAtPrice ≤ price` o la fecha ya pasó.
+- `DELETE /v1/admin/products/{productUuid}/sale`: `204`, idempotente.
+- `PUT /v1/admin/products/sale`: exactamente uno de `productUuids` (1-500) o `categoryUuid` (incluye descendientes), **y** exactamente uno de `compareAtPrice` o `compareAtPercent` (0 < p < 100; precio anterior = `price / (1 - p/100)`) → `{ updated, notFound, skipped }`. `skipped` son productos donde no quedaría mayor que `price`, o con `price` en 0.
+- `DELETE /v1/admin/products/sale` `{ productUuids | categoryUuid }` → `{ updated, notFound }`.
+
+### Sinónimos del buscador
+
+El motor ya tolera typos, plurales, acentos y unidades. Los sinónimos son para palabras
+distintas con el mismo significado y se aplican sin reindexar.
+
+- **Multidirección** (sin `root`): todas las palabras se encuentran entre sí (`allen` ↔ `hexagonal`).
+- **Una dirección** (con `root`): buscar `root` también trae las palabras de `synonyms`, pero no al revés (`inalambrico` → `bateria`, `20v`).
+- Las palabras se normalizan como las búsquedas (`"Baterías"` → `bateria`, `"20 V"` → `20v`) y la respuesta devuelve la forma guardada. Se permiten frases.
+
+Objeto: `{ uuid, root, synonyms, kind: "MULTI_WAY" | "ONE_WAY", createdAt, updatedAt }`.
+
+| Ruta | Notas |
+|---|---|
+| `GET /v1/admin/search/synonyms?q=&limit=&offset=` | `q` busca en la raíz y en las palabras; los más recientes primero |
+| `POST /v1/admin/search/synonyms` `{ root?, synonyms }` | `201` + `syncedToSearch` |
+| `PATCH /v1/admin/search/synonyms/{uuid}` | Parcial; `root: null` explícito la vuelve multidirección |
+| `DELETE /v1/admin/search/synonyms/{uuid}` | **super_admin**, `204` |
+
+- `422`: multidirección con menos de 2 palabras distintas ya normalizadas, raíz repetida en su propia lista, lista vacía, más de 20 palabras o alguna de más de 50 caracteres.
+- `409` si ya existe una entrada idéntica.
+- `syncedToSearch: false` no es un error: se guardó y se aplica en ≤ 5 min. Muestra "Guardado; se aplicará en unos minutos".
 
 ### Importación masiva por Excel
 
-#### `GET /v1/admin/bulk-import/template` — descargar una plantilla de ejemplo
+- `GET /v1/admin/bulk-import/template`: descarga `plantilla_importacion_masiva.xlsx` con las mismas hojas y columnas que espera la carga, comentarios y filas de ejemplo ficticias (bórralas antes de subir).
+- `POST /v1/admin/bulk-import/products` (`multipart/form-data`, campo `file`): cualquier subconjunto de estas hojas:
 
-```http
-GET /v1/admin/bulk-import/template
-Authorization: Bearer <admin-token>
-```
+| Hoja | Columnas | Semántica al re-subir |
+|---|---|---|
+| `Categorias` | `sku`, `categorySlug` (uno o varios separados por `,` o `;`) | Aditiva |
+| `Vehiculos` | `sku`, `make`, `model`, `year` (un año), `vehicleType?`, `engine?` | Aditiva; sin `engine` aplica a todos los motores |
+| `Atributos` | `sku`, `attributeSlug`, `value` | Merge (un valor corregido sí se aplica) |
+| `Variantes` | `sku`, `variantGroupSlug` (slug del `name` del grupo) | Reemplaza (gana la última fila) |
+| `InfoProducto` | `sku` + cualquiera de `description`, `brand`, `bulletPoints`, `technicalSpecs`, `contents` | Merge por campo. Una celda vacía no toca nada; el texto `NULL` borra el campo. Alt+Enter para saltos de línea |
+| `Medidas` | `sku`, `weightKg`, `lengthCm`, `widthCm`, `heightCm` (las cuatro obligatorias) | Reemplaza (gana la última fila). Acepta `16 cm` o coma decimal (`4,29`). Fila inválida → `INVALID_DIMENSIONS`. Para borrar, usa el `DELETE` de arriba |
 
-Respuesta `200`: el archivo `.xlsx` en sí (`Content-Type:
-application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, no JSON), con
-`Content-Disposition: attachment; filename=plantilla_importacion_masiva.xlsx` — un botón
-"Descargar plantilla" en el dashboard puede apuntar directo aquí. Trae las mismas cinco
-hojas/columnas que `POST .../products` espera (nunca puede desalinearse: ambos lados
-comparten las mismas constantes en `bulk_import_service.py`), con encabezados en negritas,
-comentarios de celda explicando las columnas menos obvias (`categorySlug`, `make`/`model`
-insensibles a mayúsculas, `year` como año único no rango, `engine`/`vehicleType`
-opcionales, formato de `value` según `dataType`, `variantGroupSlug` derivado del `name` del
-grupo, columnas de `InfoProducto` todas opcionales), y una o dos filas de ejemplo con datos
-**claramente ficticios** (`sku` `"SKU-EJEMPLO-1"`, marca `"Marca-Ejemplo"`, etc.) — hay que
-reemplazarlas o borrarlas antes de subir datos reales; si se sube tal cual sin editar, cada
-fila de ejemplo simplemente sale como un error por fila (nada coincide con datos ficticios),
-no un fallo del archivo completo.
+- `sku` se busca en `Product.sku` y luego en `additionalSkus`, sin distinguir mayúsculas (igual que `make`, `model` y `engine`). `categorySlug` sí distingue mayúsculas.
+- En `BOOLEAN` se aceptan `TRUE`/`FALSE`, `si`/`no` y `1`/`0`.
+- Subir el mismo archivo dos veces es seguro.
+- **Éxito parcial**: las filas inválidas se reportan y no detienen las demás.
 
-`POST /v1/admin/bulk-import/products` — asigna categorías, compatibilidad de vehículos,
-valores de atributos, grupos de variantes y/o información propia de producto a muchos
-productos de una sola vez desde un archivo `.xlsx`, en vez de una asignación a la vez vía
-los endpoints de arriba. Pensado para poblar `product_categories`/`product_vehicles`/
-`Product.attributes`/`Product.variantGroupUuid`/`Product.brand`/`Product.bulletPoints`/
-`Product.technicalSpecs`/`Product.contents` sobre el catálogo real (hoy todas siguen
-vacías/sin clasificar — ver CLAUDE.md).
-
-```http
-POST /v1/admin/bulk-import/products
-Authorization: Bearer <admin-token>
-Content-Type: multipart/form-data
-
-file: <archivo .xlsx>
-```
-
-El archivo puede traer cualquier subconjunto de estas cinco hojas (por nombre exacto, sin
-importar en qué orden estén dentro del archivo); si falta alguna, se trata como "0 filas"
-para esa hoja, no como error:
-
-- **`Categorias`** — columnas `sku`, `categorySlug`.
-- **`Vehiculos`** — columnas `sku`, `make`, `model`, `year`, y opcionalmente `vehicleType`
-  (`AUTOMOTIVE`/`MOTORCYCLE`) y `engine`.
-- **`Atributos`** — columnas `sku`, `attributeSlug`, `value`. `value` según el `dataType` del
-  atributo: `TEXT`/`ENUM` texto tal cual (`ENUM` debe ser uno de sus `allowedValues`),
-  `NUMBER` numérico, `BOOLEAN` acepta `TRUE`/`FALSE` (también `si`/`no`, `1`/`0`).
-- **`Variantes`** — columnas `sku`, `variantGroupSlug`. `variantGroupSlug` se deriva del
-  `name` del grupo (mismo slugify que categorías/atributos — `VariantGroup` no tiene una
-  columna `slug` propia, ver `GET /v1/admin/variant-groups` arriba para los nombres
-  existentes).
-- **`InfoProducto`** (nuevo, 2026-08-22) — columna `sku` requerida, más `description`,
-  `brand`, `bulletPoints`, `technicalSpecs` y `contents`, **todas opcionales** — una fila
-  puede llenar cualquier subconjunto de las cinco (una fila con solo `brand` no toca las
-  otras cuatro). Al menos una de las cinco debe traer algo, si no la fila entera se reporta
-  como `MISSING_FIELDS`. Mismo destino que `PATCH /v1/admin/products/{uuid}/info` de arriba
-  — útil para cargar el contenido de un distribuidor (descripción, marca, viñetas, ficha
-  técnica, qué incluye) de golpe en vez de producto por producto. Para texto multilínea en
-  `description`/`bulletPoints`/`technicalSpecs`, usa Alt+Enter dentro de la celda de Excel —
-  el salto de línea se preserva tal cual en el valor guardado. **Celda vacía vs. borrar un
-  campo (nuevo, 2026-08-23)**: una celda vacía nunca toca el campo (ver la semántica de
-  re-subida abajo); para borrar explícitamente un campo ya guardado, escribe el texto
-  literal `NULL` en la celda (sin comillas, insensible a mayúsculas — `null`/`Null`/`NULL`
-  funcionan igual) — ese campo queda `null` en `Product`, igual que enviarlo así en
-  `PATCH .../info`. `description` (agregada el mismo día, ver la nota arriba) es la única de
-  las cinco que reemplaza una fuente previa (Sicar X) en vez de ser puramente nueva — ya no
-  hay ningún otro lugar que la escriba.
-
-Cada fila de `Vehiculos`/`Atributos`/`Variantes` es una sola asignación (formato largo). En `Categorias`, la
-celda `categorySlug` puede traer **un solo slug o varios separados por coma o punto y
-coma** (p. ej. `"herramientas, jardineria"`) para asignar varias categorías al mismo
-producto sin repetir la fila — cada slug de la lista se resuelve por separado, así que
-si uno no existe los demás de esa misma fila igual se asignan (se reporta un error solo
-por el slug que falló, no por toda la fila). `sku` se busca primero contra `Product.sku`
-y, si no aparece ahí, contra
-`Product.additionalSkus` — nunca contra el `sicarUuid` interno. La comparación de `sku`,
-`make`, `model` y `engine` **no distingue mayúsculas/minúsculas** (el catálogo de
-`vehicles` tiene casing inconsistente entre filas, p. ej. `"ITALIKA"` vs. `"Chevrolet"`,
-y no tendría sentido que un admin fallara por escribir "honda" en vez de "Honda").
-`categorySlug` sí distingue mayúsculas/minúsculas (los slugs ya salen siempre en
-minúscula del slugify existente, así que no hay nada realista que pueda desalinearse ahí).
-
-En la hoja `Vehiculos`, `year` es **un solo año** (no un rango `yearStart`/`yearEnd`) —
-se resuelve contra los fitments ya existentes cuyo rango contenga ese año, exactamente
-igual que `POST /admin/vehicles/assign-by-model` de arriba. Si `engine` se omite, la fila
-aplica a **todas** las variantes de motor de esa marca/modelo/año.
-
-**Semántica de re-subida distinta por hoja — no asumas que las cinco se comportan igual:**
-
-- **`Categorias`/`Vehiculos` son ADITIVAS** (igual que `assign-by-model`): los vínculos ya
-  existentes de un producto (de esta u otra carga) nunca se eliminan, solo se agregan los
-  nuevos. Subir el mismo archivo dos veces es seguro — la segunda vez `assignedCount` da `0`
-  en ambas hojas sin duplicar nada ni fallar (`ON CONFLICT DO NOTHING` sobre las mismas PKs
-  compuestas que usa `assign-by-model`).
-- **`Atributos`/`InfoProducto` hacen MERGE** — a diferencia de las dos de arriba, un valor
-  **corregido** en una corrida posterior SÍ se aplica (no se ignora como un vínculo ya
-  existente); solo se preservan los campos que esta hoja no menciona, de una carga anterior
-  o de `PUT /v1/admin/products/{uuid}/attributes`/`PATCH .../info`. Subir el mismo archivo
-  dos veces sigue siendo seguro (mismo valor → sin cambio real), pero no es "ignorar si ya
-  existe" como `Categorias`/`Vehiculos`. En `InfoProducto` esto es por **campo individual**,
-  no por fila entera: una fila que solo trae `brand` corrige solo `brand` y deja
-  `description`/`bulletPoints`/`technicalSpecs`/`contents` exactamente como estaban (de esta
-  hoja en otra carga, o de un `PATCH .../info` anterior) — una celda vacía nunca borra un
-  valor ya guardado. Para borrar un campo explícitamente sí hay una forma dentro de esta misma
-  hoja (no hace falta usar `PATCH .../info` aparte): escribe el texto literal `NULL` en la
-  celda — ese campo se guarda como `null`, distinto de dejarlo vacío.
-- **`Variantes` REEMPLAZA** — `variantGroupUuid` es un solo valor por producto (columna
-  directa, no un tag vía tabla pivote), así que no existe "aditivo" aquí: la fila más
-  reciente para un `sku` dado gana, y esa carga sobreescribe lo que el producto ya tuviera.
-
-**Éxito parcial, no todo-o-nada** — una fila inválida (SKU inexistente, slug de categoría/
-atributo/grupo inexistente, valor con tipo incorrecto, ningún vehículo coincide) no bloquea
-el resto del archivo: se omite esa fila (o, en `Categorias` con varios slugs en una celda,
-solo el slug que falló) y se reporta en `errors`, el resto se aplica igual. Solo un problema
-a nivel de archivo completo (no es un `.xlsx` real, falta cualquiera de las cinco hojas, o
-una hoja presente le falta una columna requerida) rechaza la solicitud entera.
-
-Respuesta `200`:
 ```json
 {
-  "categories": {
-    "found": true,
-    "processedRows": 120,
-    "assignedCount": 118,
-    "errors": [
-      { "sheet": "Categorias", "row": 47, "reasonCode": "SKU_NOT_FOUND", "reason": "SKU no encontrado: ABC-999.", "sku": "ABC-999" }
-    ]
-  },
-  "vehicles": {
-    "found": true,
-    "processedRows": 340,
-    "assignedCount": 336,
-    "errors": [
-      { "sheet": "Vehiculos", "row": 12, "reasonCode": "VEHICLE_NOT_FOUND", "reason": "No se encontro ningun vehiculo para Honda Civic 1990.", "sku": "PR2057" }
-    ]
-  },
-  "attributes": {
-    "found": true,
-    "processedRows": 80,
-    "assignedCount": 78,
-    "errors": [
-      { "sheet": "Atributos", "row": 9, "reasonCode": "VALUE_TYPE_MISMATCH", "reason": "'voltaje' espera un numero (NUMBER).", "sku": "PR2057" }
-    ]
-  },
-  "variants": {
-    "found": false,
-    "processedRows": 0,
-    "assignedCount": 0,
-    "errors": []
-  },
-  "productInfo": {
-    "found": true,
-    "processedRows": 45,
-    "assignedCount": 52,
-    "errors": [
-      { "sheet": "InfoProducto", "row": 6, "reasonCode": "MISSING_FIELDS", "reason": "Fila incompleta: no trae ningun valor en description/brand/bulletPoints/technicalSpecs/contents.", "sku": "PR2057" }
-    ]
-  }
-}
-```
-`found: false` en cualquiera de las cinco (en vez de `errors: []`) significa que esa hoja no
-venía en el archivo, distinto de "venía pero con 0 filas de datos". `assignedCount` significa
-algo ligeramente distinto por hoja: en `categories`/`vehicles` son vínculos **nuevos**
-realmente insertados (no cuenta pares que ya existían); en `attributes`/`productInfo` son
-pares (producto, campo) **escritos** en total (incluye valores corregidos sobre un campo que
-ya existía, no solo campos nuevos — en `productInfo` puede superar `processedRows`, como en
-el ejemplo de arriba, porque una sola fila con los cinco campos llenos cuenta 5); en
-`variants` es la cantidad de **productos** cuyo `variantGroupUuid` se aplicó. En cualquier
-caso puede ser menor a `processedRows` incluso sin ningún error (fila válida mandada dos
-veces, incluye la fila de ejemplo de la plantilla, etc.).
-
-Errores de fila (`errors[].reasonCode`): `MISSING_FIELDS` (celda requerida vacía, o en
-`InfoProducto` una fila con `sku` pero ningún valor en las cinco columnas de info),
-`SKU_NOT_FOUND`, `CATEGORY_SLUG_NOT_FOUND`, `INVALID_YEAR` (`year` no es un entero),
-`VEHICLE_NOT_FOUND` (ningún fitment coincide con marca/modelo/año/motor — también cubre
-un `vehicleType` mal escrito, que da el mismo resultado observable que no coincidir),
-`ATTRIBUTE_SLUG_NOT_FOUND`, `VALUE_TYPE_MISMATCH` (`value` no coincide con el `dataType` del
-atributo, o no está entre sus `allowedValues` si es `ENUM`), `VARIANT_GROUP_SLUG_NOT_FOUND`.
-
-Errores de archivo completo (rechazan toda la solicitud, no generan `errors` por fila):
-- `400` si el archivo no es un `.xlsx` válido, o pesa más de 4 MB.
-- `400` si no contiene ninguna hoja `Categorias`, `Vehiculos`, `Atributos`, `Variantes` ni
-  `InfoProducto`.
-- `400` si alguna hoja excede 20,000 filas de datos.
-- `422` si una hoja presente no tiene todas sus columnas requeridas (nombra la hoja y las
-  columnas que faltan) — en `InfoProducto` la única columna requerida es `sku`.
-
-### Dashboard de ventas
-
-Tres endpoints de solo lectura para alimentar un dashboard de ventas: KPIs/serie diaria,
-productos más vendidos y ventas por categoría — todos filtrables por rango de fechas.
-Ninguno persiste nada; todos agregan en vivo sobre `orders` (y, para categorías, también
-`products`/`product_categories`/`categories`) en cada llamada.
-
-**Rango de fechas, común a los tres**: `startDate`/`endDate` (`YYYY-MM-DD`), ambos
-opcionales. Si se omiten, por defecto cubre los **últimos 30 días** (`endDate` = hoy UTC,
-`startDate` = `endDate - 29 días`). El rango es inclusivo de ambos extremos (incluye todo
-`endDate` completo, no solo hasta medianoche). Los tres solo consideran pedidos
-`status: "PAID"` y no eliminados (`deletedAt: null`) — pedidos `TO_PAY`/`CANCELLED` nunca
-cuentan como venta.
-
-#### `GET /v1/admin/dashboard/summary` — KPIs y serie diaria
-
-```http
-GET /v1/admin/dashboard/summary?startDate=2026-07-01&endDate=2026-08-05
-Authorization: Bearer <admin-token>
-```
-
-Respuesta `200`:
-```json
-{
-  "startDate": "2026-07-01",
-  "endDate": "2026-08-05",
-  "totalRevenue": 458320.50,
-  "orderCount": 612,
-  "averageOrderValue": 748.89,
-  "totalUnitsSold": 2140,
-  "daily": [
-    { "date": "2026-07-01", "revenue": 12500.00, "orderCount": 18, "unitsSold": 64 }
-  ]
+  "categories":  { "found": true,  "processedRows": 120, "assignedCount": 118, "errors": [ { "sheet": "Categorias", "row": 47, "reasonCode": "SKU_NOT_FOUND", "reason": "SKU no encontrado: ABC-999.", "sku": "ABC-999" } ] },
+  "vehicles":    { "found": true,  "processedRows": 340, "assignedCount": 336, "errors": [] },
+  "attributes":  { "found": true,  "processedRows": 80,  "assignedCount": 78,  "errors": [] },
+  "variants":    { "found": false, "processedRows": 0,   "assignedCount": 0,   "errors": [] },
+  "productInfo": { "found": true,  "processedRows": 45,  "assignedCount": 52,  "errors": [] }
 }
 ```
 
-`averageOrderValue` es `0` (no un error) si `orderCount` es `0` en el rango pedido.
-`daily` viene ordenado por fecha ascendente y solo incluye días con al menos un pedido
-`PAID` — un día sin ventas simplemente no aparece en el arreglo (el dashboard debe rellenar
-huecos con `0` si necesita un eje continuo para graficar).
+- `found: false` = la hoja no venía.
+- `assignedCount` significa: vínculos nuevos en categorías y vehículos; pares producto–campo escritos en atributos e info (puede superar el número de filas); productos asignados en variantes.
+- `reasonCode`: `MISSING_FIELDS`, `SKU_NOT_FOUND`, `CATEGORY_SLUG_NOT_FOUND`, `INVALID_YEAR`, `VEHICLE_NOT_FOUND`, `ATTRIBUTE_SLUG_NOT_FOUND`, `VALUE_TYPE_MISMATCH`, `VARIANT_GROUP_SLUG_NOT_FOUND`.
+- Rechazan el archivo completo: `400` si no es un `.xlsx` válido, pesa más de 4 MB, no trae ninguna de las hojas o alguna hoja pasa de 20,000 filas; `422` si a una hoja le falta una columna requerida.
 
-#### `GET /v1/admin/dashboard/top-products` — productos más vendidos
+---
 
-```http
-GET /v1/admin/dashboard/top-products?startDate=2026-07-01&endDate=2026-08-05&sortBy=revenue&limit=20&offset=0
-Authorization: Bearer <admin-token>
-```
+## Cupones
 
-- `sortBy` — `"revenue"` (default) o `"quantity"`.
-- `limit` (1-100, default 20), `offset` (≥0, default 0).
+- `discountType`: `PERCENTAGE` (con tope opcional `maxDiscountAmount`) o `FIXED_AMOUNT`.
+- `scopeType`: `ORDER`, `CATEGORY` (incluye descendientes) o `PRODUCT`. Un cupón `CATEGORY`/`PRODUCT` sin alcance asignado no descuenta nada.
+- Límites combinables: `maxTotalUses`, `maxUsesPerClient`, `firstPurchaseOnly` y una lista de clientes elegibles (vacía = público). También `startsAt`, `endsAt` y `minOrderAmount`.
+- **Anti-abuso**: cuando un pedido llega a `PAID`, el uso queda consumido para siempre, aunque después se cancele o se reembolse. Solo un pedido cancelado mientras estaba `TO_PAY` libera el uso.
 
-Respuesta `200`:
+Objeto: `{ uuid, code, discountType, discountValue, maxDiscountAmount, scopeType, minOrderAmount, startsAt, endsAt, isActive, maxTotalUses, maxUsesPerClient, firstPurchaseOnly, createdAt, updatedAt }`.
+
+| Ruta | Notas |
+|---|---|
+| `POST /v1/admin/coupons` | `201`. `code` se guarda en mayúsculas y sin espacios. `422` si mandas `maxDiscountAmount` con `FIXED_AMOUNT` o un `PERCENTAGE` > 100; `409` si el código está duplicado |
+| `GET /v1/admin/coupons?code=&isActive=` | `code` es parcial, sin distinguir mayúsculas |
+| `GET` / `PATCH /v1/admin/coupons/{uuid}` | `PATCH` parcial, con las mismas validaciones |
+| `DELETE /v1/admin/coupons/{uuid}` | **super_admin**, `204`. `409` si tiene algún uso registrado (para retirarlo usa `PATCH {isActive: false}`). Borra en cascada su alcance y sus clientes |
+| `PUT` / `PATCH` / `GET .../{uuid}/categories` | `{ categoryUuids }`. `409` si `scopeType` no es `CATEGORY`. `GET` sin paginar |
+| `PUT` / `PATCH` / `GET .../{uuid}/products` | `{ productUuids }`. `409` si no es `PRODUCT`. `GET` paginado |
+| `PUT` / `PATCH` / `GET .../{uuid}/clients` | Por **email** (`clientEmails`). `404` si un email no existe. `GET` paginado `{ uuid, email, name }` |
+| `GET .../{uuid}/redemptions` | `{ id, clientAccountId, clientEmail, orderUuid, status, createdAt, updatedAt }`. `status`: `PENDING` (en espera de pago), `CONFIRMED` (consumido), `RELEASED` (cancelado antes de pagar) |
+
+## Dashboard de ventas
+
+`startDate` y `endDate` (`YYYY-MM-DD`, inclusivos; por defecto los últimos 30 días). Solo cuenta pedidos `PAID` no borrados.
+
+- `GET /v1/admin/dashboard/summary` → `{ startDate, endDate, totalRevenue, orderCount, averageOrderValue, totalUnitsSold, daily: [{ date, revenue, orderCount, unitsSold }] }`. `daily` solo trae días con ventas (rellena los huecos con 0).
+- `GET /v1/admin/dashboard/top-products?sortBy=revenue|quantity&limit=20&offset=0` (`limit` 1-100) → `{ total, docs: [{ productUuid, sku, name, imageUrl, unitsSold, revenue }] }`. `total` = productos distintos. Nombre, SKU e imagen son los del momento de la venta.
+- `GET /v1/admin/dashboard/top-categories` (mismos parámetros) → `{ total, docs: [{ categoryUuid, categoryName, unitsSold, revenue }] }`. Usa el árbol propio. Un producto en varias categorías suma completo en cada una, así que **no sumes las filas** para obtener un total (usa `summary`). Los productos sin categoría no aparecen.
+
+## Reseñas (moderación)
+
+Objeto: `{ uuid, productUuid, clientUuid, clientEmail, clientName, rating, comment, isVerifiedPurchase, isHidden, hiddenReason, helpfulCount, adminReply, adminReplyAt, createdAt, updatedAt }`.
+
+| Ruta | Notas |
+|---|---|
+| `GET /v1/admin/reviews` | Filtros: `productUuid`, `productSku` (exacto, sin distinguir mayúsculas), `clientEmail`, `clientUuid`, `rating`, `isHidden`, `hasReply`. Incluye las ocultas |
+| `PATCH /v1/admin/reviews/{uuid}` `{ isHidden?, hiddenReason? }` | Ocultar la saca de la vista pública y del promedio (se recalcula al momento). Es reversible; el autor la sigue viendo |
+| `DELETE /v1/admin/reviews/{uuid}` | Borrado permanente (`204`), para contenido abusivo |
+| `PUT` / `DELETE /v1/admin/reviews/{uuid}/reply` `{ comment }` | Una sola respuesta oficial por reseña (el `PUT` la reemplaza) |
+
+## Clientes: historial de consentimiento de marketing
+
+`GET /v1/admin/clients/{clientUuid}/consents` (cualquier admin; `404` si la cuenta no existe). Sirve para solicitudes ARCO o quejas. El `clientUuid` viene en los pedidos.
+
 ```json
 {
-  "total": 314,
-  "docs": [
-    { "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un", "sku": "PR2057", "name": "Taladro 1/2\"", "imageUrl": "https://.../taladro.jpg", "unitsSold": 42, "revenue": 37758.00 }
-  ]
+  "clientUuid": "7f3c…", "email": "ana@example.com", "name": "Ana López",
+  "marketingEmails": false, "marketingConsentAt": "2026-11-02T09:14:55Z",
+  "events": [ { "value": false, "source": "one_click_unsubscribe", "privacyNoticeVersion": null, "ipAddress": "189.203.11.40", "userAgent": "Mozilla/5.0 …", "changedAt": "2026-11-02T09:14:55Z" } ]
 }
 ```
 
-`total` es la cantidad de productos **distintos** vendidos en el rango (para paginar), no
-la cantidad de unidades. `name`/`sku`/`imageUrl` vienen de la foto fija guardada en cada
-pedido al momento de venderse (`Order.items`), **no** del catálogo actual — un producto
-renombrado, re-precificado o marcado como eliminado después de venderse sigue apareciendo
-aquí con los datos vigentes al momento de cada venta.
-
-#### `GET /v1/admin/dashboard/top-categories` — ventas por categoría
-
-```http
-GET /v1/admin/dashboard/top-categories?startDate=2026-07-01&endDate=2026-08-05&sortBy=revenue&limit=20&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Mismos parámetros que `top-products` (`sortBy`/`limit`/`offset`). Agrupa por el árbol de
-categorías propio (`GET/POST/PATCH /v1/admin/categories`), no por el `departmentUuid`/
-`categoryUuid` sincronizado de Sicar X.
-
-Respuesta `200`:
-```json
-{
-  "total": 18,
-  "docs": [
-    { "categoryUuid": "3f9a1c2e-...", "categoryName": "Herramientas Eléctricas", "unitsSold": 310, "revenue": 89250.00 }
-  ]
-}
-```
-
-Dos comportamientos a tener en cuenta al construir la UI:
-- **Un producto asignado a varias categorías suma su revenue/unidades completas a cada
-  una** — esto es un desglose por faceta (como los filtros del storefront), no una
-  partición del total. Sumar `revenue` de todas las filas de `docs` **no** debe usarse
-  como "revenue total" (para eso está `GET .../summary`).
-- **Productos sin ninguna categoría asignada quedan fuera de este reporte por completo**
-  — no hay una fila "Sin categoría". Revenue de esos productos solo aparece en
-  `/top-products` y `/summary`.
-
-### Reseñas (moderación)
-
-Cualquier cliente autenticado puede reseñar cualquier producto (no se exige compra —
-`isVerifiedPurchase` es un badge informativo, no un requisito). Estas rutas son la
-única forma de moderar ese contenido: ocultar/mostrar, responder oficialmente, o
-eliminar de forma permanente. Ver `FRONTEND_INTEGRATION.md` para las rutas
-storefront-facing (listar, crear, editar, marcar útil).
-
-#### `GET /v1/admin/reviews` — buscar/listar reseñas (todos los productos)
-
-```http
-GET /v1/admin/reviews?productSku=HV-3617&isHidden=false&limit=50&offset=0
-Authorization: Bearer <admin-token>
-```
-
-Filtros, todos opcionales y combinables: `productUuid`, `productSku` (coincidencia
-exacta contra `Product.sku`, sin distinguir mayúsculas/minúsculas — útil cuando el
-admin tiene el código del producto a la mano pero no su `uuid`), `clientEmail`,
-`clientUuid`, `rating` (1-5), `isHidden`, `hasReply`. Sin filtros, devuelve todas las
-reseñas de todos los productos (incluidas las ocultas), más recientes primero.
-
-Respuesta `200`:
-```json
-{
-  "total": 1,
-  "docs": [
-    {
-      "uuid": "c2a8ff9a-63c4-43d2-9ce3-57aebc0e8be6",
-      "productUuid": "3Cny4OOxdX1GoSzL9rEsTZNL7un",
-      "clientUuid": "3e0b5f17-f658-4090-a6e5-269ad4d5cb75",
-      "clientEmail": "juan@example.com",
-      "clientName": "Juan Pérez",
-      "rating": 4,
-      "comment": "Buen producto, cumple lo esperado.",
-      "isVerifiedPurchase": true,
-      "isHidden": false,
-      "hiddenReason": null,
-      "helpfulCount": 3,
-      "adminReply": null,
-      "adminReplyAt": null,
-      "createdAt": "2026-08-10T14:58:23.190116Z",
-      "updatedAt": null
-    }
-  ]
-}
-```
-
-#### `PATCH /v1/admin/reviews/{reviewUuid}` — ocultar/mostrar una reseña
-
-```http
-PATCH /v1/admin/reviews/c2a8ff9a-.../
-Authorization: Bearer <admin-token>
-Content-Type: application/json
-
-{ "isHidden": true, "hiddenReason": "Lenguaje inapropiado" }
-```
-
-Actualización parcial (`isHidden`/`hiddenReason`, ambos opcionales — solo se toca lo
-enviado). Ocultarla la excluye de inmediato de la vista pública del producto **y** de
-`averageRating`/`reviewsCount`/`ratingBreakdown` (se recalculan en la misma llamada) —
-el propio autor la sigue viendo en su propio historial (`GET /v1/auth/me/reviews`).
-Reversible: volver a mandar `isHidden: false` la restaura.
-
-#### `DELETE /v1/admin/reviews/{reviewUuid}` — eliminar permanentemente
-
-`204` sin cuerpo. A diferencia de `PATCH .../isHidden`, esto es un borrado real, no
-reversible — para contenido genuinamente abusivo o ilegal, no para moderación
-cotidiana (para eso usa ocultar).
-
-#### `PUT` / `DELETE /v1/admin/reviews/{reviewUuid}/reply` — respuesta oficial
-
-Una sola respuesta por reseña (no un hilo de comentarios) — `PUT` con `{"comment": "..."}`
-crea o **reemplaza** la respuesta existente si ya había una; `DELETE` la quita. Ambos
-responden el mismo shape que `GET`/`PATCH` de arriba.
-
-- **El dashboard admin es la única fuente de verdad de `dispatchStatus`** — Sicar X ya nunca lo
-  sobreescribe. Todas las mutaciones (`/accept`, `/advance-status`, `/shipping/generate`) aplican
-  el nuevo valor en Postgres de inmediato, en la misma respuesta; avisarle a Sicar X siempre queda
-  como un paso asíncrono/best-effort vía `sicar_sync_outbox`, nunca al revés. El storefront
-  (`GET /v1/auth/me/orders/{orderUuid}`) tampoco consulta a Sicar X en vivo — sirve exactamente lo
-  que este panel haya dejado en Postgres.
-- **No hay reintentos automáticos si tu backend falla al llamar estas rutas** — a diferencia del
-  worker interno (que sí reintenta `ACCEPT`/`CANCEL`/`DISPATCH`/`SYNC_DISPATCH_STATUS` contra
-  Sicar X), un error de red o un `5xx` al llamar `/v1/admin/*` desde el dashboard no se reintenta
-  solo; implementa tu propio reintento si lo necesitas.
-- **Si `sicar_sync_outbox` acumula filas `FAILED`** para un pedido, revisa
-  `GET /v1/admin/sync/outbox?status=FAILED` — probablemente el pedido ya está cancelado en Sicar X
-  (un `409 "Document is canceled"` es la causa más común) o hay un problema de token/red con Sicar
-  X. El estado local ya es correcto en cualquier caso; esto solo afecta si Sicar X se enteró.
-- **`GET /v1/admin/orders` no tiene `sortBy`** — siempre ordena por `createdAt` descendente, sin
-  opción de cambiarlo hoy.
-- **`includeDeleted` existe para reconciliación, no para uso normal del dashboard** — un pedido
-  soft-deleted (`DELETE /v1/orders/{id}` desde el storefront) ya no es accionable por el cliente,
-  pero la fila persiste para que el worker siga pudiendo avisarle a Sicar X. Úsalo solo si
-  necesitas ver/auditar algo que el cliente ya "borró" de su propio historial.
-- **Ningún endpoint de este documento acepta ni necesita `x-api-key`, `Authorization` o
-  `X-Client-Token`** — esas son cabeceras del storefront (ver `FRONTEND_INTEGRATION.md`), no
-  tienen ningún efecto aquí.
-- **Este es un panel interno, no el contrato del storefront** — si algo de aquí parece
-  relacionarse con un endpoint de `FRONTEND_INTEGRATION.md` (p. ej. el shape de un pedido), son
-  API's distintas con su propio ciclo de cambios; no asumas que un cambio en una se refleja
-  automáticamente en la otra.
-- **Atributos/presets/grupos de variantes son PIM propio, independiente de Categorías y
-  Vehículos** — no hay ninguna clasificación intermedia ("tipo de producto") que gatee qué
-  atributos aplican a qué producto; cualquier atributo se puede asignar a cualquier producto
-  directamente. Los tres catálogos (`attributes`, `attribute-presets`, `variant-groups`) están
-  vacíos hoy — clasificar el catálogo real es trabajo de contenido del dashboard, no algo que
-  este backend intente adivinar. `GET /v1/products/{uuid}` en `FRONTEND_INTEGRATION.md` es la
-  única ruta del storefront donde `attributes`/`variantGroup` aparecen — ni `POST /v1/products`
-  ni `POST /v1/search` los exponen.
+- `events`: historial completo, del más reciente al más antiguo, sin paginar y sin posibilidad de editarse. `marketingEmails` siempre coincide con el primer evento; `changedAt` está en UTC.
+- `source`: `register_checkbox`, `google_signup`, `account_toggle`, `email_unsubscribe`, `one_click_unsubscribe`, `admin` (reservado, hoy sin uso) y `migrated` (estado previo al historial, sin versión, IP ni user agent).
+- `privacyNoticeVersion`, `ipAddress` y `userAgent` pueden venir en `null`.

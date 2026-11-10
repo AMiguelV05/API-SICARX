@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Depends, Body, status
+from fastapi import APIRouter, Depends, Body, HTTPException, status
 from app.core.database import DbDep
 from app.core.security import get_current_admin
 from app.schemas.attribute import (
@@ -9,11 +9,17 @@ from app.schemas.attribute import (
     SetProductVariantGroupRequest,
     SetProductVariantGroupResponse,
 )
-from app.schemas.products import ProductInfoUpdateRequest, ProductInfoPublic
+from app.schemas.products import (
+    PackageDimensionsSetRequest,
+    ProductInfoPublic,
+    ProductInfoUpdateRequest,
+    ProductPackageDimensionsPublic,
+    package_dimensions_public,
+)
 from app.schemas.brand import BulkSetBrandRequest, BulkSetBrandResponse
 from app.schemas.sale import BulkSaleClearRequest, BulkSaleResponse, BulkSaleSetRequest, ProductSalePublic, ProductSaleSetRequest
 from app.core.security import CurrentAdminDep
-from app.services import attribute_service, brand_service, audit_service, sale_service
+from app.services import attribute_service, brand_service, audit_service, package_dimensions_service, sale_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependencies=[Depends(get_current_admin)])
@@ -21,7 +27,7 @@ router = APIRouter(prefix="/admin/products", tags=["Admin - Products"], dependen
 # La mayoria de los campos propios del producto (name/price/stock/...) siguen siendo
 # propiedad de Sicar X, sincronizados por el worker - no editables aqui. Este router cubre
 # lo que este PIM administra localmente: atributos EAV, agrupacion de variantes, y (abajo)
-# descripcion/marca/bullets/especificaciones/contenido.
+# descripcion/marca/bullets/especificaciones/contenido y peso/medidas de empaque.
 
 
 # Declarado antes de las rutas /{product_uuid}/... por claridad - no chocan de todos modos
@@ -150,3 +156,25 @@ async def admin_update_product_info(product_uuid: str, db: DbDep, data: ProductI
         technical_specs=product.technical_specs,
         contents=product.contents,
     )
+
+
+# Peso y medidas de empaque (para cotizar envios) - ver package_dimensions_service. Recurso
+# propio en vez de campos sueltos en /info: las cuatro medidas solo sirven juntas.
+@router.put("/{product_uuid}/package-dimensions", response_model=ProductPackageDimensionsPublic, summary="Capturar el peso y las medidas de empaque de un producto")
+async def admin_set_product_package_dimensions(product_uuid: str, db: DbDep, data: PackageDimensionsSetRequest = Body()):
+    """Reemplaza las cuatro medidas (todas obligatorias). `404` si el producto no existe o
+    esta eliminado; `422` si alguna no es > 0 o pasa el tope."""
+    try:
+        dims = package_dimensions_service.validate_dimensions(data.weight_kg, data.length_cm, data.width_cm, data.height_cm)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
+    product = await package_dimensions_service.set_dimensions(db, product_uuid, dims)
+    await db.commit()
+    return ProductPackageDimensionsPublic(product_uuid=product_uuid, package_dimensions=package_dimensions_public(product))
+
+
+@router.delete("/{product_uuid}/package-dimensions", status_code=status.HTTP_204_NO_CONTENT, summary="Borrar el peso y las medidas de empaque de un producto")
+async def admin_clear_product_package_dimensions(product_uuid: str, db: DbDep):
+    """Idempotente: borrarlas de un producto sin medidas tambien es `204`."""
+    await package_dimensions_service.clear_dimensions(db, product_uuid)
+    await db.commit()

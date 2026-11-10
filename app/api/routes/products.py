@@ -8,7 +8,7 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse, RelatedProductsResponse
+from app.schemas.products import package_dimensions_public, LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse, RelatedProductsResponse
 from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products, get_distinct_brands
 from app.services import attribute_service, related_service
 
@@ -180,6 +180,7 @@ async def get_product_details(uuid: str, db: DbDep):
         bullet_points=product.bullet_points,
         technical_specs=product.technical_specs,
         contents=product.contents,
+        package_dimensions=package_dimensions_public(product),
     )
     return detail
 

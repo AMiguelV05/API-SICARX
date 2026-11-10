@@ -1,1142 +1,225 @@
 ## Overview
 
-API SICARX is a FastAPI middleware between an e-commerce frontend (Ferretería Charly) and the SICAR X POS/ERP platform. It exposes a small REST API, secured with a static API key, that orchestrates calls to SICAR X's REST and GraphQL endpoints while maintaining a local PostgreSQL cache of the product catalog for fast reads.
+API SICARX is a FastAPI middleware between the Ferretería Charly e-commerce frontend (Next.js, separate repo) and the SICAR X POS/ERP. Postgres is the source of truth for catalog, orders, accounts and PIM data; SICAR X is only contacted for catalog sync, lazy product-detail refresh, and inventory deltas when an admin accepts/cancels an order. Frontend contract: `FRONTEND_INTEGRATION.md`. Admin contract: `ADMIN_INTEGRATION.md`. All routes live under `/v1` (`app/api/v1_router.py`).
 
 ## Commands
 
-- Run dev server: `uvicorn app.main:app --reload`
-- Run the catalog sync worker (separate long-running process, not started by the FastAPI app): `python -m app.worker.sync_task`
-- Migrations: `alembic revision --autogenerate -m "description"`, `alembic upgrade head`, `alembic downgrade -1`
-- Install deps: `pip install -r requirements.txt`
-- Tests: `pytest` (needs a local Postgres; see "Test suite + CI" below). The Typesense integration tests run only with `TYPESENSE_URL`/`TYPESENSE_API_KEY` set, e.g. `TYPESENSE_URL=http://localhost:8108 TYPESENSE_API_KEY=dev-key pytest` with `docker compose up -d typesense`; without them they're skipped.
-- Search relevance check (Postgres vs Typesense on real queries, exit 1 on failure): `python search_eval.py` with the Typesense vars set. See "Búsqueda con Typesense".
+- Dev server: `uvicorn app.main:app --reload`
+- Worker (separate long-running process): `python -m app.worker.sync_task`
+- Migrations: `alembic revision --autogenerate -m "..."`, `alembic upgrade head`, `alembic downgrade -1`
+- Deps: `pip install -r requirements.txt`
+- Tests: `pytest` (needs local Postgres; uses `TEST_DATABASE_URL`, or `DATABASE_URL` with the db renamed to `sicarx_test` — never the dev/prod db). Typesense integration tests need `TYPESENSE_URL=http://localhost:8108 TYPESENSE_API_KEY=dev-key` and `docker compose up -d typesense`; skipped otherwise.
+- Search relevance check (Postgres vs Typesense, exit 1 on failure): `python search_eval.py` with the Typesense vars set.
+- Standalone one-off scripts at repo root (not imported by the app): `secret.py`, `create_admin_user.py`, `create_backup_role.py`, `prune_r2_backups.py`, `import_gonher_vehicles.py`, `import_package_dimensions.py`, `search_eval.py`.
 
 ### Docker Compose
 
-`docker-compose.yml` runs the whole stack: `db` (Postgres 16), a one-off `migrate` service (`alembic upgrade head`, runs once and exits), `typesense` (search engine, `typesense/typesense:28.0`), `api` (uvicorn), and `worker` (`sync_task`) — `api`/`worker` both wait on `migrate` completing successfully and on `typesense` being healthy before starting, so migrations never race. The Typesense API key comes from `TYPESENSE_API_KEY` in `.env` (default `dev-key`); its `typesense_data` volume is disposable, since the worker rebuilds the index from Postgres on startup when it's missing. The image has no `curl`/`wget`, so its healthcheck uses bash `/dev/tcp`. **Gotcha on Windows/Git Bash**: `docker run ... --data-dir /data` gets its path rewritten to `C:/Program Files/Git/data`. Prefix it with `MSYS_NO_PATHCONV=1`.
+Services: `db` (Postgres 16, its own empty `db_data` volume — not your dev/prod db), `migrate` (one-off `alembic upgrade head`), `typesense` (`typesense/typesense:28.0`, disposable volume; the worker rebuilds the index), `api`, `worker`. `api`/`worker` wait for `migrate` to complete and `typesense` to be healthy. `DATABASE_URL` is overridden in `docker-compose.yml` to point at `db`; to use an existing Postgres instead, remove `db` and set `DATABASE_URL` in `.env` (`host.docker.internal` instead of `localhost`). `docker compose down -v` wipes the containerized db.
 
-- `docker compose up --build` — build images and start everything
-- `docker compose logs -f api` / `worker` — tail a service's stdout (app-level logs still also land in `app.log`/`sync.log` on the host via bind mounts)
-- `docker compose run --rm migrate alembic revision --autogenerate -m "description"` — generate a new migration without starting the rest of the stack
-- `docker compose down` — stop everything; add `-v` to also drop the `db_data` volume (destructive — wipes the containerized Postgres)
+**Windows/Git Bash gotcha**: `docker run ... --data-dir /data` gets rewritten to `C:/Program Files/Git/data`; prefix with `MSYS_NO_PATHCONV=1`.
 
-**Important**: the `db` service creates a **new, empty** Postgres instance (its own `db_data` volume) — it is not connected to whatever Postgres you already use for local development or production. `DATABASE_URL` for `api`/`worker`/`migrate` is overridden in `docker-compose.yml` to point at this containerized `db` (not the `DATABASE_URL` in your `.env`, which is only used for the other vars). To point this stack at your existing Postgres instead, remove the `db` service and its `depends_on` entries, and set `DATABASE_URL` in `.env` to that instance's address (use `host.docker.internal` in place of `localhost` if it runs on the host machine, since `localhost` inside a container refers to the container itself).
+### Railway
 
-### Deploying to Railway
+Project **api-sicarx**. Services: `api` (public `api-production-cf7a.up.railway.app`), `worker` (private), `typesense` (private), `frontend` (Next.js, own repo), Postgres plugin **`Postgres-O4xA`** (mind the suffix).
 
-Live at project **api-sicarx** (workspace: Angel Villalvazo's Projects), three services: `api` (public domain `api-production-cf7a.up.railway.app`), `worker` (no public networking), and a Postgres plugin named **`Postgres-O4xA`** (mind the suffix — an earlier duplicate `Postgres` plugin from a setup mistake has been deleted).
+- `api`/`worker` build from this repo's `Dockerfile`, connected to GitHub `AMiguelV05/API-SICARX` `main`. Each service's *Config-as-code file path* must stay set (`api` → `railway.api.json`, `worker` → `railway.worker.json`); without it Railway falls back to the Dockerfile `CMD` and both services break. **Never commit a root `railway.json`.** Manual deploy: `cp railway.api.json railway.json && railway up --service api`, then same for worker, deleting the root file after each.
+- Auto-deploy on push has been unreliable. Verify with `railway deployment list --service <name> --json` (recent `"reason": "deploy"` with matching `commitHash`). Stuck deploy: `railway redeploy --service <name> --from-source --yes`. Persistent trigger failure: disconnect/reconnect the source (`railway service source disconnect|connect --repo AMiguelV05/API-SICARX --branch main --service <name>`), then check the GitHub app installation for a pending permission banner.
+- Only `api` runs migrations (`preDeployCommand`). When a deploy includes a migration, deploy `api` before `worker`.
+- `startCommand` isn't run through a shell: `railway.api.json` must use `sh -c "uvicorn app.main:app --host 0.0.0.0 --port $PORT"`.
+- `DATABASE_URL` on `api`/`worker` must be the asyncpg reference: `postgresql+asyncpg://${{Postgres-O4xA.PGUSER}}:${{Postgres-O4xA.PGPASSWORD}}@${{Postgres-O4xA.PGHOST}}:${{Postgres-O4xA.PGPORT}}/${{Postgres-O4xA.PGDATABASE}}` (the plugin's own `DATABASE_URL` uses the wrong scheme).
+- Every required setting must be set on **both** `api` and `worker` (pydantic-settings fails at import otherwise), even if only one uses it.
+- The worker logs only to `sync.log` inside the container; `railway logs --service worker` shows nothing useful. Check `GET /admin/sync/catalog-status` instead.
+- **Typesense service**: image `typesense/typesense:28.0`, volume at `/data`, configured only by variables: `TYPESENSE_DATA_DIR=/data`, `TYPESENSE_API_KEY`, `TYPESENSE_API_ADDRESS=::`, `TYPESENSE_THREAD_POOL_SIZE=4` (lowered from 8 on 2026-10-29; without it, it sizes to 384 host CPUs and crash-loops), `TYPESENSE_NUM_COLLECTIONS_PARALLEL_LOAD=2`, `TYPESENSE_NUM_DOCUMENTS_PARALLEL_LOAD=1000`. On `api`/`worker` set references, never pasted values: `TYPESENSE_URL=http://${{typesense.RAILWAY_PRIVATE_DOMAIN}}:8108`, `TYPESENSE_API_KEY=${{typesense.TYPESENSE_API_KEY}}`. Unsetting them on `api` rolls search back to Postgres.
+- Setting secrets: piping from PowerShell into `railway variables --set-from-stdin` prepends a BOM — pipe from Bash. `railway add --variables KEY=VALUE` echoes the value; rotate any secret set that way.
+- `frontend` has `RAILPACK_NODE_VERSION=24.22.1` pinned; bump it on each Node 24 security release, or delete it once Railpack resolves `24.x` to the latest (check the `mise node@` line in the build log).
+- `frontend` start command (service setting, not in its repo): `node --max-old-space-size=256 node_modules/next/dist/bin/next start` (was 384 until 2026-10-29; its RAM plateaus at that heap cap, mostly from crawler renders). If it restarts with heap OOM, raise it back. Its `app/robots.ts` blocks MJ12bot, DotBot, PetalBot, Amazonbot, AhrefsBot and SemrushBot.
+- One-off scripts in a service (`railway ssh --service worker -- python -u search_eval.py`) need a key registered with `railway ssh keys add`, `ssh.railway.com` in `~/.ssh/known_hosts` (`ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts`), and `python -u`.
+- `MALLOC_ARENA_MAX=2` on `api`/`worker`; worker uses `DB_POOL_SIZE=2`/`DB_MAX_OVERFLOW=6`.
 
-Two Railway services run from this same repo/`Dockerfile`: `railway.api.json` (uvicorn, plus `alembic upgrade head` as a `preDeployCommand`) and `railway.worker.json` (`sync_task`, no pre-deploy command — see below on why only one service runs migrations). Railway's managed Postgres plugin replaces the `db`/`migrate` services from Docker Compose — there is no dedicated one-off migration service on Railway, so `preDeployCommand` on the `api` service is what runs migrations instead.
+**Cost rules** (bill is ~90% RAM; workspace limit soft $20 / **hard $25**, services stop at hard). Watch with `railway metrics --all --since 7d` and `railway usage`.
+- No scheduled Typesense full rebuild: each rebuild permanently steps up the service's RAM until a `typesense` restart. `drain_dirty` keeps the index current. To repair suspected drift: `UPDATE products SET search_dirty_at = now();` (via `railway connect Postgres-O4xA`). Never run `full_rebuild` from a second process — its lock is per-process.
+- The catalog sync must keep writing only changed rows (WAL/RAM). The full SICAR `hidden` check runs at most hourly (egress).
 
-Both services are now connected to the `AMiguelV05/API-SICARX` GitHub repo (`main` branch) via `railway service source connect`, for auto-deploy-on-push. Each service's Settings → *Config-as-code file path* is set (`api` → `railway.api.json`, `worker` → `railway.worker.json`) — confirmed working: a later GitHub-triggered deploy picked up both files correctly (`configFile: /railway.api.json` / `/railway.worker.json` in the deployment record).
+### Backups and disaster recovery
 
-Without that per-service path set, Railway can't find a matching `railway.json`/`railway.toml` at the repo root (there isn't one committed — see below) and silently falls back to the bare `Dockerfile`'s default `CMD`. **This was confirmed to actually break both services** the moment GitHub was first connected, before the path was set: `api` crash-looped on the hardcoded port 8000 instead of Railway's `$PORT` with no migration ever running, and `worker` came up running `uvicorn` (the API's own default command) instead of `sync_task` — i.e. two copies of the API server, no sync worker at all. Fixed by a manual `railway up` redeploy with the correct config, then permanently by setting the Config-as-code path per service.
+Details: `docs/superpowers/specs/2026-09-09-disaster-recovery-design.md` (may have been deleted). Railway PITR is disabled (Hobby plan); offsite `pg_dump` is the only mechanism.
 
-There's deliberately no root `railway.json` committed — with only one root config file, both services would resolve to whichever one happens to be there (see the incident above). Manual deploys instead stage the right file temporarily: `cp railway.api.json railway.json && railway up --service api`, then `cp railway.worker.json railway.json && railway up --service worker`, deleting the root file afterward each time.
-
-**Auto-deploy-on-push has not been reliable in practice** — a real push to `main` (the search-endpoint commit) sat for a while without triggering a build on either service; nothing in `railway deployment list`/`railway status` showed it queued or building. Per [Railway's GitHub auto-deploy docs](https://docs.railway.com/deployments/github-autodeploys.md), this symptom (branch/watch-paths correct, commit genuinely pushed, still nothing triggers) points at a GitHub App permission/access issue — a pending permission approval on the app installation, or the connected account lacking contributor access — neither of which is inspectable from the Railway CLI. Applied the docs' own recommended fix: `railway service source disconnect --service <name>` then `railway service source connect --repo AMiguelV05/API-SICARX --branch main --service <name>` for **both** `api` and `worker`. Reconnecting itself immediately triggered a fresh build on the current latest commit for both services (confirmed via `commitHash` in the deployment record matching `git log -1`), and both came back healthy.
-
-If a push doesn't seem to be deploying, check `railway deployment list --service <name> --json` for a recent entry with `"reason": "deploy"` and a matching `commitHash` before assuming it worked — don't rely on the push alone. Immediate workaround for any single stuck deploy: `railway redeploy --service <name> --from-source --yes`, which pulls and deploys the latest commit on the connected branch right away, without needing a new push or webhook. The disconnect/reconnect cycle above is the fix for the underlying trigger itself; **still unverified whether it fixes the recurrence** — the next real push is the real test, since a manually-triggered reconnect deploy doesn't prove the webhook itself is now healthy. If the next push doesn't auto-deploy either, check GitHub's installed-app settings (Settings → Integrations → GitHub, or the `AMiguelV05` org's installed-apps page) for a pending permission banner before troubleshooting further on the Railway side.
-
-**Typesense service (search engine), deployed 2026-09-26**: a fourth service, `typesense`, from the `typesense/typesense:28.0` image, with volume `typesense-volume` at `/data`, **configured only through variables** (no start command):
-- `TYPESENSE_DATA_DIR=/data` and `TYPESENSE_API_KEY` (random, `secrets.token_urlsafe(32)`);
-- `TYPESENSE_API_ADDRESS=::` (listen on IPv6 too, for Railway's private network);
-- `TYPESENSE_THREAD_POOL_SIZE=8`, `TYPESENSE_NUM_COLLECTIONS_PARALLEL_LOAD=2`, `TYPESENSE_NUM_DOCUMENTS_PARALLEL_LOAD=1000`.
-
-It has no public domain; `api`/`worker` reach it privately. Set their variables as **references**, never pasted values: `TYPESENSE_URL=http://${{typesense.RAILWAY_PRIVATE_DOMAIN}}:8108`, `TYPESENSE_API_KEY=${{typesense.TYPESENSE_API_KEY}}`. Budget ~400 MB RAM (one full index is ~170-260 MB; a rebuild briefly holds two). No backups needed: the index is rebuilt from Postgres. First production rebuild: 84,158 products in ~15 s. `search_eval.py` run inside the worker container: 39/39.
-
-Gotchas hit during that deploy:
-- **Thread pool.** Without `TYPESENSE_THREAD_POOL_SIZE`, Typesense sizes its pool from the host's CPUs (384 on Railway), then crash-loops with `std::system_error: Resource temporarily unavailable`.
-- **BOM in the key.** Piping a value from **PowerShell** into `railway variables --set-from-stdin` prepends a UTF-8 BOM (`﻿`) to it. The worker then failed with `UnicodeEncodeError` building the HTTP header. Pipe from Bash instead (`python -c "...sys.stdout.write(...)" | railway variables ... --set-from-stdin KEY`).
-- **Echoed secrets.** `railway add --variables KEY=VALUE` echoes the value in its interactive transcript; rotate any secret set that way.
-
-**Cutover done 2026-09-26 22:29 UTC**: the two variables are now set on `api` too, so production `/search`/`/search/suggest` run on Typesense. Verified live: suggest returns brands (only possible via Typesense) and searches take ~0.25-0.36 s, with 0 fallback/breaker lines in the `api` logs. Rollback: unset `TYPESENSE_URL`/`TYPESENSE_API_KEY` on `api`; search falls back to Postgres on the redeploy, with no code change.
-
-**Frontend Node version is pinned (2026-10-22)**: the `frontend` service has `RAILPACK_NODE_VERSION=24.22.1`. Railpack resolved `engines: "24.x"` to 24.21.0 even after the 24.22.1 security release (CVE-2026-111497, Brotli RCE), and the env var takes precedence over `engines`. It freezes Node: bump it on every Node 24 security release, or delete it once Railpack resolves `24.x` to the latest (check the `mise node@` line in the build log).
-
-**Running a one-off script inside a service** (e.g. `railway ssh --service worker -- python -u search_eval.py`) needs:
-- an SSH key registered with `railway ssh keys add`;
-- `ssh.railway.com` in `~/.ssh/known_hosts` (`ssh-keyscan -t ed25519 ssh.railway.com >> ~/.ssh/known_hosts`), since the non-interactive shell can't answer the host-key prompt;
-- `python -u`, otherwise the output only shows up at the end.
-
-**Gotchas specific to Railway** (neither applies to the Docker Compose setup):
-- Railway does **not** run `startCommand` through a shell — `--port $PORT` gets passed to uvicorn as the literal 5-character string `$PORT`, not the actual port number, and it crash-loops with `Error: Invalid value for '--port': '$PORT' is not a valid integer.` (hit and fixed live during initial deploy). `railway.api.json`'s `startCommand` must wrap the whole thing in a shell explicitly: `sh -c \"uvicorn app.main:app --host 0.0.0.0 --port $PORT\"`. The worker's command has no env var references so it doesn't need this.
-- Railway's Postgres plugin exposes `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` (and a `DATABASE_URL` using the plain `postgresql://` scheme) — but `app/core/database.py` needs the `asyncpg` driver. Don't use the plugin's own `DATABASE_URL` as-is; set `DATABASE_URL` on both `api` and `worker` manually as a variable reference: `postgresql+asyncpg://${{Postgres-O4xA.PGUSER}}:${{Postgres-O4xA.PGPASSWORD}}@${{Postgres-O4xA.PGHOST}}:${{Postgres-O4xA.PGPORT}}/${{Postgres-O4xA.PGDATABASE}}`.
-- Both services import `app.core.config.settings`, and pydantic-settings fails at import time if any required var is missing — so all 7 vars (`X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`, plus the `DATABASE_URL` override above) must be set on **both** `api` and `worker`, even the ones only one of them actually uses.
-- Only `api` runs `alembic upgrade head` (as its `preDeployCommand`) — Railway has no `depends_on`/completion-order primitive across services like Compose's `service_completed_successfully`, so avoid a migration race by not running it from both. On the very first deploy, deploy `api` first and let it finish before deploying `worker`, so the schema exists before the worker's first sync tries to write to it (this was the actual order used). On later deploys that include a new migration, redeploy `api` before `worker` for the same reason.
-- The worker logs to `sync.log` via `RotatingFileHandler` inside the container's ephemeral filesystem, same as locally — Railway has no bind-mount equivalent, so `railway logs --service worker` only ever shows `Starting Container` and nothing else. To confirm the worker is actually syncing, check `POST /catalog`'s `total` count over time instead (both services share the same Postgres).
-
-### Costos de Railway (2026-09-29)
-
-Before this, the bill was ~80% RAM (`railway usage --json`, per service: `railway usage projects --project api-sicarx --json`), and two services held far more than they needed:
-- **Postgres-O4xA: ~1.1 GB RAM for a 195 MB database.** The catalog sync rewrote all ~87k products every 5 minutes, changed or not. `last_sync_id` is indexed, so none of those updates were HOT (0.06% of 495M) and each rewrote every index, including the trigram GINs: **~400 MB of WAL per pass** (visible in the Postgres `checkpoint complete ... distance=` log lines). Fixed by only writing changed rows and detecting deletions by the set of uuids seen (see "Local catalog vs. live SICAR X data"). Measured on a full copy of the catalog: 0 of 87,142 rows changed and 0.0 MB of WAL per pass in steady state. The diff is done in Python, not with a `WHERE` on the `ON CONFLICT`: Postgres locks the conflicting row before evaluating that `WHERE`, and the lock itself writes WAL.
-- **Typesense: RAM stepped up at every nightly full rebuild and never came back** (0.72 → 1.13 GB in 3 nights), while Typesense itself reported ~259 MB resident. Moving it to weekly wasn't enough: the first weekly rebuild (2026-10-04) still left a permanent +0.15 GB step (0.765 → ~0.91 GB, ≈ +$1.50/month per rebuild, accumulating), and only a restart of the `typesense` service releases it (a worker restart doesn't). So since 2026-10-06 there's **no scheduled rebuild at all**: `drain_dirty` already keeps the index current, and the startup check still rebuilds when the alias is missing or `SCHEMA_VERSION` changed. To repair suspected drift by hand, flag every product and let the drain push them into the live collection (~3 min, no second collection, one burst of WAL): `UPDATE products SET search_dirty_at = now();` (via `railway connect Postgres-O4xA`). Don't run `full_rebuild` from a second process (e.g. `railway ssh`): its lock is per-process, so the live worker's drain could push to the old collection mid-rebuild and lose those changes.
-- **Worker egress: ~1 GB/day just asking SICAR X which products are hidden** (estimated, not measured on Railway). Railway bills outbound traffic, and every 5-minute pass sent one GraphQL `hidden` query per page with the page's 300 uuids in the body (~11.7 KB × ~290 pages × 288 passes/day). Since 2026-10-10 the full check runs at most hourly (`HIDDEN_REFRESH_INTERVAL`), ≈80 MB/day; see "Local catalog vs. live SICAR X data" for the behavior.
-
-Result, measured 2026-10-06 (≈4.7 days after the Postgres fix): Postgres 0.97 → 0.30 GB RAM and 0.044 → 0.004 vCPU; spend ~$0.58/day (~$17.50/30 days) vs ~$26.60/month before the fixes.
-
-Watch it with `railway metrics --all --since 7d` and `railway usage`. The workspace has a usage limit: soft $20, **hard $25** (services stop at the hard limit).
-
-**Review 2026-10-21** (billing period from 2026-10-14): ~$0.69/day ≈ $21/month, 92% RAM.
-- The `frontend` service (Next.js, its own repo) now lives in this project and is the biggest line: ~$7.40/month, 0.4–1.4 GB.
-- Then `typesense` (~$6.40, steady 0.63 GB; the schema has no unused fields), Postgres (~$3.30, 0.29 GB), `worker` (~$2.10) and `api` (~$1.80).
-- Measured WAL: 0.86 MB per sync pass. Changes made:
-  - migration `c1f4a8e2d6b9` drops `ix_products_id` (duplicate of the PK), `ix_products_last_sync_id`, `ix_products_department_uuid` and `ix_products_category_uuid` (1-3 scans since 2026-09-09; the storefront filters by `taxonomyUuid`), all with `DROP INDEX CONCURRENTLY`;
-  - the sync commits right after reading each page, so it no longer stays `idle in transaction` across the SICAR X HTTP calls;
-  - pool size is configurable (`DB_POOL_SIZE`/`DB_MAX_OVERFLOW`, default 5/5); the `worker` uses 2/6 on Railway;
-  - `MALLOC_ARENA_MAX=2` is set on `api` and `worker`.
-
-### Disaster recovery and backups (2026-09-09)
-
-Full design/rationale: `docs/superpowers/specs/2026-09-09-disaster-recovery-design.md`. Confirmed live via `railway postgres pitr status` that `Postgres-O4xA` had **zero backup coverage** before this — not even Railway's own snapshots.
-
-- **Railway PITR — enabled 2026-09-09, disabled the same day, not used**: initially enabled (continuous WAL archiving via pgBackRest) as what was meant to be the near-zero-RPO layer. Turned out the Railway dashboard's Backups tab is explicit that "Backups and point-in-time recovery (PITR) are only available for customers on the Pro plan" — this account is on Hobby and Pro isn't an option, so this layer could be limited or revoked without notice regardless of the CLI reporting it as working. Its restore-to-near-now path also needed replaying WAL that could approach Hobby's 5,000 MB volume cap (`sync_task.py`'s every-5-minute full-catalog `on_conflict_do_update` over all ~124k `Product` rows generated unusually heavy WAL for this app's actual write volume — since fixed, see "Costos de Railway" below) — a second, independent reason not to depend on it even if the Pro-plan question ever resolves. Rather than leave a feature enabled that isn't actually depended on, it was disabled outright (`railway postgres pitr disable --service Postgres-O4xA`, confirmed via `railway postgres pitr status` showing `disabled`/bucket unwired) — this app's disaster recovery is entirely the offsite `pg_dump` pipeline below, not a mix of "real" and "best-effort-if-it-keeps-working" layers.
-- **Offsite `pg_dump` is the primary recovery mechanism (revised 2026-09-09)**: `.github/workflows/backup.yml`, two tiers — losing the ability to rely on PITR meant this layer now has to cover the RPO target for every threat scenario, not just total Railway account loss, but dumping the **entire** database every 5 minutes would re-back-up the ~124k-row `products` table 288 times a day even though it's fully reconstructable from SICAR X (see "Local catalog vs. live SICAR X data" above) — a real, non-hypothetical storage cost, not just a hygiene concern (see below). So:
-  - **`frequent`** job: every 5 minutes, `pg_dump --exclude-table=public.products --exclude-table=public.vehicles --exclude-table=public.product_categories` — everything else: orders, clients, payments, reviews, coupons, admin, the category tree. This is what gives minutes-level RPO for the genuinely irreplaceable data. Uploaded to R2 under `frequent/`, 7-day retention. **`vehicles` and `product_categories` excluded (2026-10-21)**: measured live, they were ~95% of each frequent dump (5.0 MB + 3.5 MB of ~8.9 MB of table data, which is also what each run pulls over the wire as Postgres egress): `vehicles` is the one-off Gonher seed (41,937 rows, untouched since 2026-08-01) and `product_categories` is ~46k assignments made almost entirely through the bulk-import spreadsheet. Both change rarely, so like `products`' admin-curated columns they're covered by `daily` only — worst case, up to a day of category tagging or vehicle edits is lost and the spreadsheet gets re-uploaded. Everything left is ~0.4 MB.
-  - **`daily`** job: once a day (09:00 UTC), a full dump **including** `products` — captures the admin-authored columns SICAR X doesn't have (`brand`/`bulletPoints`/`technicalSpecs`/`contents`/`description`). Uploaded to R2 under `daily/`, 35-day retention.
-  - Both jobs live in the same workflow file, gated by `if: github.event.schedule == '...'` matching one of the two `on.schedule` cron entries (`workflow_dispatch` also takes a `tier` input to run either manually).
-  - **Restore order matters**: restore the latest `daily` dump first (self-consistent, includes everything) into a fresh instance, then apply the latest `frequent` dump on top (`pg_restore --data-only --disable-triggers`) to bring the fast-moving tables up to within 5 minutes. **Known, accepted edge case**: a product created after the last `daily` dump but before the disaster, whose `product_vehicles`/`product_reviews`/wishlist rows already landed in a `frequent` dump, can hit an FK violation restoring that overlay (the referenced `products` row doesn't exist yet from the `daily` baseline) — these are PIM/social tables, not money, so a rare manual reconciliation here is an accepted trade against the real complexity of an automated merge across two dump generations.
-  - Both jobs use a dedicated read-only Postgres role (`backup_reader` — `SELECT` on tables and sequences, created/rotated via the standalone `create_backup_role.py` at the repo root, same "one-off script, not part of Alembic" convention as `create_admin_user.py`/`secret.py`/`import_gonher_vehicles.py`). Its credentials and execution live entirely outside Railway (GitHub Actions), and it's a separate credential from the app's own `DATABASE_URL`, so a leak of either one doesn't compromise the other.
-  - `pg_dump` runs inside a `postgres:18-alpine` Docker container (Docker is preinstalled on GitHub-hosted runners) rather than apt-installing `postgresql-client` each run — apt plus adding the PGDG repo (needed because `Postgres-O4xA` runs Postgres **18**, not the 16 `docker-compose.yml` assumes for local dev — pg_dump's client version must be ≥ the server's) took ~60-90s per run, too slow once running every 5 minutes; the container image already has a matching `pg_dump`, cutting a run to ~15-20s.
-  - Running the `frequent` job this often costs nothing in GitHub Actions minutes — **API-SICARX is a public repo, so Actions minutes are free/unlimited regardless of schedule frequency**. The real cost that scales with frequency is R2 storage — Cloudflare's free tier is 10 GB, and past that it's $0.015/GB-month with no egress fees (i.e. hitting the free tier means a small bill, not a broken pipeline). Actual dump sizes weren't measured before choosing the 7-day/35-day retention windows above — treat those as a starting point, not a precisely-computed budget.
-  - **The actual, enforced guarantee against ever paying for this is `prune_r2_backups.py`** (repo root, same "standalone script" convention as the others), run as the last step of both jobs: lists every object in the bucket, and if total size exceeds a 9 GB soft budget (1 GB headroom under R2's 10 GB free tier), deletes the oldest objects — `frequent/` first, `daily/` only as a last resort (and logs a loud warning if it ever has to, since that means this design's size assumptions were wrong) — until back under budget. The 7-day/35-day lifecycle rules are the passive backstop; this script is the active one that makes "never spend more money" actually true regardless of whether the lifecycle windows were sized correctly. If it still can't get under budget after deleting everything it's allowed to (most likely because a lock is still active on the oldest objects), it exits non-zero specifically so GitHub Actions' built-in failure notification fires.
-- **New GitHub Actions secrets required** (not Railway env vars — deliberately a separate surface from every "New required var alert" in the Configuration section below, which covers `api`/`worker` runtime config, not this offsite job): `BACKUP_DATABASE_URL` (the `backup_reader` connection string printed by `create_backup_role.py` — copy it immediately, the script doesn't persist it anywhere), `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`. Live on the `API-SICARX` repo itself (an earlier attempt mistakenly set these on the separate `Ferreteria-Charly-Ecommerce` frontend repo, where no workflow references them — cleaned up).
-- **Manual setup still needed** (no Cloudflare/R2 CLI access was available to automate this): create the R2 bucket, then **two** bucket lock rules and **two** lifecycle rules (not one of each) — lifecycle: one rule scoped to prefix `frequent/` expiring at 7 days, one scoped to prefix `daily/` expiring at 35 days. **Bucket lock durations must be deliberately shorter than those lifecycle windows** — e.g. 1 day on `frequent/`, 2 days on `daily/` — not matched to them: a lock blocks deletion (even by us) until it elapses, so a lock equal to the full retention window would block `prune_r2_backups.py` from ever pruning early just as effectively as it blocks an attacker, defeating the size-budget guarantee above. The short lock still does its real job — stopping an *instant* post-compromise wipe — while leaving the prune script free to delete anything past that short window once the size budget demands it.
-- **Revised (2026-09-09, same day)**: "never spend more money on this" turned out to be a hard requirement, not a preference, so the size-triggered prune (`prune_r2_backups.py` above) got built after all rather than left as "considered and rejected" — R2 has no native size-triggered lifecycle rule (only age-based), hence the custom script. Considered and rejected instead: periodically syncing R2 backups down to a local/physical machine as a cost-avoidance tier — rejected in favor of the prune script specifically because it depends on that machine's own uptime/reachability (a GitHub-hosted runner can't push to an arbitrary home machine; it would need to be a pull-based sync from a machine that's on and reachable whenever growth happens to spike), a materially weaker guarantee than an active, fully-cloud-side size cap that runs every 5 minutes.
-- Quarterly restore drill recommended (`pg_restore` a recent `daily` dump, then the latest `frequent` dump on top, into a throwaway instance, sanity-check row counts) — a backup never restored isn't a proven backup. Not automated, given the low frequency.
-- Deliberately deferred: narrowing the app's own `DATABASE_URL` role to drop `DROP`/`TRUNCATE` privileges it likely doesn't need — real hardening value, but a separate, riskier change to the live app's DB grants; planned as a follow-up once this backup foundation is confirmed working. Also deferred (confirmed with the user): a self-hosted continuous WAL-streaming setup or a live streaming replica on separate infra, for closer-to-zero RPO without Railway Pro — judged disproportionate operational complexity (replication lag monitoring, replica promotion, keeping schema in sync across migrations) for a database this size given 5-minute offsite dumps already meet the RPO target.
+- `.github/workflows/backup.yml`, run in a `postgres:18-alpine` container (prod is Postgres 18):
+  - `frequent` (every 5 min): excludes `products`, `vehicles`, `product_categories` → R2 `frequent/`, 7-day retention.
+  - `daily` (09:00 UTC): full dump → R2 `daily/`, 35-day retention.
+  - `workflow_dispatch` takes a `tier` input.
+- Restore: latest `daily` into a fresh instance, then latest `frequent` with `pg_restore --data-only --disable-triggers`. Rare FK violations on PIM/social tables for products created after the last daily are an accepted manual fix.
+- Uses the read-only `backup_reader` role (`create_backup_role.py`, prints the URL once). GitHub secrets on this repo: `BACKUP_DATABASE_URL`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`.
+- `prune_r2_backups.py` (last step of both jobs) keeps the bucket under 9 GB, deleting oldest `frequent/` first, `daily/` only as a last resort; exits non-zero if it can't.
+- R2 setup (manual): lifecycle rules per prefix (7 d / 35 d) and bucket-lock rules **shorter** than those (e.g. 1 d / 2 d) so pruning still works.
+- Deferred: narrowing the app role's `DROP`/`TRUNCATE` privileges.
 
 ## Configuration
 
-- Settings load via pydantic-settings from a project-root `.env` (`app/core/config.py`, `Settings`). Required vars: `DATABASE_URL`, `X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`, `CLIENT_JWT_SECRET`, `GOOGLE_CLIENT_ID` (optional: `CLIENT_JWT_EXPIRE_MINUTES`, defaults to 10080 / 7 days; `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET`, see below).
-- `DATABASE_URL` must use an async driver (`postgresql+asyncpg://...`) — `app/core/database.py` uses `create_async_engine`.
-- `secret.py` is a standalone one-off script (`secrets.token_urlsafe(60)`) for generating a new `X_API_KEY`; it isn't imported by the app. `CLIENT_JWT_SECRET` needs the same kind of random value (e.g. `secrets.token_urlsafe(48)`) — it signs client-account JWTs, so it must stay a real secret, never a hardcoded default.
-- **Not a "New required var alert"**: `CLIENT_JWT_SECRET_PREVIOUS` (optional) holds the old `CLIENT_JWT_SECRET` after a rotation. `decode_unsubscribe_token` accepts it, and nothing else does: unsubscribe links in already-sent emails have no `exp` and would otherwise break. A leaked old secret can only unsubscribe people, never log in. Added for the Railway incident of 2026-10-21; the rotation runbook and scripts are in `ops/2026-10-railway-incident/`.
-- **New required var alert**: `CLIENT_JWT_SECRET` was added for the client-accounts feature below. Per the Railway gotchas further down, pydantic-settings fails at import time if it's missing — this must be set on **both** `api` and `worker` on Railway before the next deploy of either, same as every other required var, even though only `api` actually issues/needs it.
-- **New required var alert**: `MP_ACCESS_TOKEN`, `MP_WEBHOOK_SECRET`, `FRONTEND_BASE_URL`, and `API_BASE_URL` were added for the Mercado Pago payment integration below (`app/services/payment_service.py`). Same deal as `CLIENT_JWT_SECRET` — must be set on **both** `api` and `worker` on Railway even though only `api` uses them, or pydantic-settings fails at import for both services. `MP_ACCESS_TOKEN` is the private/secret token from the Mercado Pago dashboard (never the public key — that one belongs in the frontend's own env, not here). `FRONTEND_BASE_URL` is the frontend's real domain (base of every outbound webhook to the frontend). **`API_BASE_URL` was removed (2026-10-25)**: it only built the Payments API `notification_url`; Orders API webhooks are configured on the Mercado Pago app instead. Delete it from Railway too.
-- **New required var alert**: `FRONTEND_WEBHOOK_SECRET` was added for the outgoing order-confirmation webhook to the frontend (`app/services/order_notification_service.py`, see "Payments with Mercado Pago" below). Same deal as every other required var — must be set on **both** `api` and `worker` on Railway even though only `api` sends it, or pydantic-settings fails at import for both services. The exact same value must also be given to the frontend team out-of-band (not via this repo) so they can verify the HMAC signature — see `FRONTEND_INTEGRATION.md` for the full contract. (An earlier version of this feature had the backend call Resend directly and required `RESEND_API_KEY`/`RESEND_FROM_EMAIL` instead — retired, no longer used or set anywhere.)
-- **New required var alert**: `GOOGLE_CLIENT_ID` was added for Google login (`app/services/google_auth_service.py`, see "Google login and email verification" below). Same deal as every other required var — must be set on **both** `api` and `worker` on Railway even though only `api` uses it, or pydantic-settings fails at import for both services. Unlike the others in this list, it's **not a secret** (it's embedded in the frontend's own client-side JS for Google Identity Services), so no out-of-band secure exchange is needed — just the same value both sides already have from the Google Cloud Console. No `GOOGLE_CLIENT_SECRET` exists or is needed — this backend only verifies ID tokens the frontend already obtained from Google, it never talks to Google's token endpoint itself.
-- **Not a "New required var alert" — deliberately optional, but now configured in production**: `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET` back the admin-dashboard notification webhook (`app/services/admin_notification_service.py`, see "Local-first order cancellation" below). Unlike every other var in this list, both default to `None` and pydantic-settings does **not** fail at import if they're missing — `notify_admin_order_cancelled`/`notify_admin_sicar_sync_failed` just log at `INFO` and no-op if either is unset, so a local/test environment without them still starts cleanly. As of 2026-07-29, both are set on **both** `api` and `worker` in production: `ADMIN_DASHBOARD_BASE_URL=https://ferreteriacharly.com/` — the admin panel lives inside the same Next.js app as the storefront, not a separate service, so this is the same domain as `FRONTEND_BASE_URL` — and a freshly generated `ADMIN_WEBHOOK_SECRET` (`secrets.token_urlsafe(48)`, same generation pattern as `FRONTEND_WEBHOOK_SECRET`). That secret still needs to be handed to whoever implements the receiving webhook route(s) out-of-band (not via this repo), same requirement as `FRONTEND_WEBHOOK_SECRET` — confirm those admin-facing receivers actually exist on the frontend before relying on these notifications arriving; a missing receiver just 404s silently (logged, non-fatal, no retry).
-- **Not a "New required var alert"**: `ENVIRONMENT` (`app/core/config.py`, default `"production"`) is not set in `.env.example`'s committed defaults for Railway, but a fresh local `.env` should set `ENVIRONMENT=development` — it now has two effects: it enables cookies over plain local HTTP (its original purpose), and it's what `app/main.py` checks to decide whether `/docs`, `/redoc`, and `/openapi.json` are served at all. Since the var is unset on Railway today, both services already run on the implicit `"production"` default there, which is exactly the environment where the interactive docs should stay off — no Railway change was needed for this. Locally, without `ENVIRONMENT=development` in `.env`, `/docs` now 404s too — this is why `.env.example` sets it explicitly rather than leaving it blank like most other vars.
-- **Not a "New required var alert"**: `SENTRY_DSN` (`app/core/config.py`) backs real error reporting in `app/core/error_tracking.py` — same optional/no-import-failure treatment as `ADMIN_DASHBOARD_BASE_URL` above. `capture_exception`/`capture_message` always log locally (unchanged); they additionally report to Sentry only if `init_error_tracking(service_name)` found a DSN at startup — called once at import time in both `app/main.py` (`service="api"`) and `app/worker/sync_task.py` (`service="worker"`), tagging every event with which process it came from. No Sentry project has been created for this app yet — set `SENTRY_DSN` on **both** `api` and `worker` on Railway once one exists; until then this is a no-op everywhere, same as today.
-- **Superseded (2026-08-18)**: `/v1/admin/*` used to be gated by a single shared `ADMIN_API_KEY`/`X-Admin-Key` (`validate_admin_key`). That's been replaced entirely by per-staff `AdminUser` login/roles — see "Admin RBAC, audit log, and partial refunds" below. `ADMIN_API_KEY` no longer exists as a setting; the new required var is `ADMIN_JWT_SECRET` (its own signing domain, separate from `CLIENT_JWT_SECRET` and from `ADMIN_WEBHOOK_SECRET` — same "distinct value per purpose, a leak of one shouldn't compromise the others" reasoning the old key/secret pair already followed). Same "New required var alert" pattern as everything else in this list — required on **both** `api` and `worker` even though only `api` issues/verifies admin tokens.
-- **New required var alert**: `ENVIA_API_TOKEN` and `ENVIA_ORIGIN_NAME`/`ENVIA_ORIGIN_COMPANY`/`ENVIA_ORIGIN_PHONE`/`ENVIA_ORIGIN_EMAIL`/`ENVIA_ORIGIN_STREET`/`ENVIA_ORIGIN_NUMBER`/`ENVIA_ORIGIN_DISTRICT`/`ENVIA_ORIGIN_CITY`/`ENVIA_ORIGIN_STATE`/`ENVIA_ORIGIN_ZIP_CODE` were added for the envia.com shipping-label integration (`app/services/shipping_service.py`, see "Admin API" below). Same deal as every other required var — must be set on **both** `api` and `worker` on Railway even though only `api`'s admin routes call envia.com, or pydantic-settings fails at import for both services. `ENVIA_API_TOKEN` is the Bearer token from envia.com's dashboard for their Shipping API — distinct from their Geocodes API (which the frontend calls directly for address autocomplete, needs no key, and this backend never touches). The `ENVIA_ORIGIN_*` vars are the store/warehouse address envia.com quotes/ships from — a constant of this service, never sent by the frontend. `ENVIA_ORIGIN_COMPANY` (razón social) fills the `company` field envia.com's address object accepts alongside `name` — only sent for the origin (the store); `shipping_service._destination_address` always sends `company: null` for the customer side, since `ClientAddressPublic` has no such field. `ENVIA_ORIGIN_REFERENCE` is the one field in this group that's genuinely optional (`Optional[str] = None`, no import failure if unset) — envia.com's own schema doesn't require `reference` either.
-- **Not a "New required var alert"**: `ENVIA_COUNTRY` (default `"MX"`) and `ENVIA_PHONE_CODE` (default `"+52"`) back the `country`/`phone_code` fields envia.com's origin/destination address object also accepts (confirmed against envia.com's own API reference) — deliberately **not** prefixed `ENVIA_ORIGIN_` since `shipping_service.py` reuses the same value for both `_origin_address` and `_destination_address` (this business ships within Mexico only, on both ends). Unlike the rest of the `ENVIA_*` group, these have sensible defaults already known to be correct, so they don't need a real value supplied before deploy — only override if the business ever ships internationally. Note `ENVIA_COUNTRY` is deliberately **alpha-2** (`"MX"`) — distinct from SICAR X's own delivery-address builder in `routes/orders.py`, which hardcodes alpha-3 (`"MEX"`) for a different external API with a different expected format; don't conflate the two.
-- **Not a "New required var alert"**: `TYPESENSE_URL`/`TYPESENSE_API_KEY` (`app/core/config.py`) enable the Typesense search engine — same optional/no-import-failure treatment as `SENTRY_DSN`. With either unset, `POST /search`/`GET /search/suggest` use the Postgres search and the index worker does nothing. In production they go on **both** `api` (queries) and `worker` (indexing); the key is whatever the `typesense` service was started with. Setting them on `api` is the actual cutover switch; unsetting them is the rollback.
-- `app/core/database.py`'s async engine sets `pool_pre_ping=True` (discards stale connections instead of surfacing a confusing error — relevant given Postgres-O4xA has restarted unexpectedly more than once, see the incident below) and explicit `pool_size=5`/`max_overflow=5` — deliberately conservative since `api` and `worker` are two independent processes, each with their own pool, against a Postgres plan that's already been resource-constrained once.
+Settings via pydantic-settings from `.env` (`app/core/config.py`). Remember: on Railway, every required var goes on both `api` and `worker`.
+
+- **Required**: `DATABASE_URL` (must be `postgresql+asyncpg://`), `X_API_KEY`, `SICAR_ADMIN_EMAIL`, `SICAR_ADMIN_PASSWORD`, `SICAR_TOKEN`, `SICAR_PRICE_LIST_ID`, `CASH_REGISTER_UUID`, `CLIENT_JWT_SECRET`, `ADMIN_JWT_SECRET`, `GOOGLE_CLIENT_ID` (not a secret; no client secret needed), `MP_ACCESS_TOKEN` (private token, never the public key), `MP_WEBHOOK_SECRET`, `FRONTEND_BASE_URL`, `FRONTEND_WEBHOOK_SECRET` (shared out-of-band with the frontend), `ENVIA_API_TOKEN`, `ENVIA_ORIGIN_NAME/COMPANY/PHONE/EMAIL/STREET/NUMBER/DISTRICT/CITY/STATE/ZIP_CODE`.
+- **Optional**: `CLIENT_JWT_EXPIRE_MINUTES` (10080); `CLIENT_JWT_SECRET_PREVIOUS` (accepted only by `decode_unsubscribe_token`, after a rotation — runbook in `ops/2026-10-railway-incident/`); `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET` (admin webhooks no-op if unset; set in prod, the admin lives in the storefront app); `SENTRY_DSN` (no project yet); `TYPESENSE_URL`/`TYPESENSE_API_KEY`; `ENVIA_ORIGIN_REFERENCE`; `ENVIA_COUNTRY` (`"MX"`, alpha-2 — unlike SICAR's `"MEX"`), `ENVIA_PHONE_CODE` (`"+52"`); `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` (5/5); `ENVIRONMENT` (default `production`).
+- Local `.env` should set `ENVIRONMENT=development`: enables cookies over plain HTTP and serves `/docs`/`/redoc`/`/openapi.json` (404 in production).
+- `API_BASE_URL` and `ADMIN_API_KEY` no longer exist; delete them if found.
+- Generate secrets with `secrets.token_urlsafe(48)` (`secret.py` for `X_API_KEY`). Keep a distinct secret per purpose.
+- Engine uses `pool_pre_ping=True`.
 
 ## Architecture
 
-Two separate processes share the same Postgres database and `Product` model:
-
-1. **FastAPI app** (`app/main.py`) — serves the HTTP API consumed by the e-commerce frontend.
-2. **Background worker** (`app/worker/sync_task.py`) — a standalone script with its own logging setup and its own `AsyncIOScheduler` that polls SICAR X every 5 minutes and upserts the full catalog into `products`. Must be run as a second process alongside uvicorn. The same scheduler also runs a second job every 1 minute (`app/worker/sicar_sync_worker.py`) that drains `sicar_sync_outbox` — see "Local-first order cancellation" below — and the Typesense index jobs (`app/worker/search_index_worker.py`: every 30 s, every 5 min, plus a startup check) — see "Búsqueda con Typesense" below. It also runs the notification jobs (`webhook_outbox_worker` every 1 min, `stock_alert_worker` every 5 min, `wishlist_price_drop_worker` hourly, `abandoned_cart_worker` every 30 min) — see "Ofertas, relacionados, avisos y correos de marketing" below.
-
-### SICAR X auth: a single admin/B2B token, no per-shopper token anymore
-
-- **Admin/B2B token** (`app/services/sicar_auth.py`, the `sicar_auth` singleton): one shared token for server-to-server calls (catalog sync, product-detail scraping, admin-accept stock adjustment). Seeded from `SICAR_TOKEN`, held in memory, refreshed via `SicarAuthManager.refresh_token()` (hits two AWS Lambda endpoints with `SICAR_ADMIN_EMAIL`/`SICAR_ADMIN_PASSWORD`) whenever SICAR X returns 401. Every caller follows the same pattern: try with the current token, on 401 call `refresh_token()`, retry once (see `sicar_stock_service.apply_order_stock_delta`, `product_service.fetch_full_details_from_sicar`, `sync_task.py`'s catalog sync). `apply_order_stock_delta` is called **only** from `app/worker/sicar_sync_worker.py`, never from a request handler — see "Local-first order cancellation" below; the worker process gets its own independent `sicar_auth` instance (separate process, same import-time singleton pattern), so this reuse is mechanically identical to every other admin-token caller.
-- **There is no customer/session token anymore.** A per-shopper JWT (`app/services/session_service.py`, bootstrapped by scraping the `tmpStore` cookie off the SICAR X storefront HTML) used to exist solely to authenticate a live checkout-time GraphQL call — that call and the whole session-bootstrap module, plus the `POST /session/init` route, were deleted once checkout stopped needing anything from SICAR X in real time (see "Request flow: placing an order" below). If you see `session_service.py`, `routes/sessions.py`, `schemas/session.py`, or a customer `Authorization` header on `/orders` referenced anywhere (old branches, stale docs), that's leftover from before this removal — none of it exists in the current code.
-
-### Request flow: placing an order (`app/api/routes/orders.py`)
-
-The `/orders` request body is intentionally minimal — the frontend sends only `products:
-[{uuid, quantity}]` and `deliveryInfo`; everything else (pricing, sku, description, unit,
-totals) is computed server-side, entirely from the local Postgres catalog — **no live
-SICAR X call happens anywhere in this request.** This contract and the exact field
-semantics below were originally reverse-engineered by capturing one real accepted order
-from the actual storefront checkout — see `app/services/order_service.py:build_order_payload`.
-
-1. Client sends `X-Client-Token` (the local `ClientAccount` JWT) — no other token is required. `X-Client-Token` is now optional: omitting it entirely routes to the guest-checkout path instead (see "Guest checkout" below); an invalid/expired token still `401`s rather than silently falling back. `validate_cart_items` (`order_service.py`) queries local `Product` (`sicar_uuid IN (...)`, `is_deleted == False`, `is_active == True`) for every requested uuid and rejects (`409`, same shape as before) if any product is missing, out of stock, or has `price <= 0` — the last check guards a confirmed-live failure mode where the catalog sync can leave a product's `price` at `0.00` (see "Local catalog vs. live SICAR X data" below) — a synced-but-priceless product must never be purchasable for free.
-2. `build_order_payload` (pure function, no network/DB calls) assembles the local order snapshot from the `Product` rows `validate_cart_items` already resolved: `sku`/`description`/`priceBaseTax`/`priceTax` come straight from `Product.sku`/`.name`/`.price` (the tax-inclusive retail price — `Product.price` is synced from the same SICAR field, `prices[N<id>]`, that used to be cross-checked live against `priceList.netPrice1` at checkout; confirmed at parity on a fresh sync, see below). `amountTax` is **not** the unit price — it's the line **total** (`price * quantity`), confirmed by capturing a real order from the storefront (`agent-browser` against `ferreteriacharly.sicarx.shop`) for a `quantity > 1` line, back when this document was still sent to SICAR X. **Incident (2026-07-21)**: this codebase previously sent `amountTax = netPrice1` (the unit price) for every line regardless of quantity — invisible for `quantity == 1` (unit price and line total coincide), but any cart with a `quantity > 1` line got a `409` from SICAR X's `POST /api/cart/order` with `{"code": 0, "message": "precio alterado|<uuid>"}` ("price altered"), silently blocking checkout for bulk quantities — this is the reason `amountTax` is still computed as `price * quantity`, even though nothing is sent to SICAR X anymore, since it's still the correct line-total semantics for the local order record and the Mercado Pago charge. `unit` comes from `Product.unit_short_name` (falls back to `"PZA"`) — resolved and persisted the first time `GET /products/{uuid}` refreshes a product's details (`fetch_full_details_from_sicar` now also queries `content { units { uuid shortName } }` alongside the product lookup, resolving `salesUnitUuid` → shortName once and storing it, instead of re-resolving it live on every checkout). `type`/`taxesIds` (SICAR's product-type code and tax-ID list) were **removed from the order line entirely** — they only ever existed because SICAR X's now-deleted order-document endpoint required them; nothing computes with them (tax is already folded into `price`) and `FRONTEND_INTEGRATION.md`'s documented item shape never included them. `serie` is hardcoded `"TL"` and there's no shipping line item for either delivery type — legacy of the real requests this was originally captured from. `deliveryType` is a Pydantic `Literal["PICKUP", "DELIVERYMAN"]` so an unsupported value is a clean `422`.
-
-**Home delivery (`DELIVERYMAN`) is implemented**, on top of the real payload shape captured live (`agent-browser` against the storefront, same session as the pricing-bug investigation above) by placing a real order with "Enviar a domicilio" selected instead of "Recoger en tienda". The frontend does **not** send an inline address — `deliveryInfo.addressUuid` references one of the client's saved `ClientAddress` rows (`GET /auth/me/addresses`), resolved server-side in `routes/orders.py` via `address_service.get_owned_address` (404 if it doesn't exist or belongs to another client, same pattern as every other ownership check in this codebase) before `build_order_payload` ever runs — `build_order_payload` itself needed zero changes, it just forwards whatever `delivery_info` dict it's handed. A `model_validator` on `DeliveryInfo` (`schemas/orders.py`) makes the pairing unambiguous: `addressUuid` is required for `DELIVERYMAN` and forbidden for `PICKUP` (`422` either way if violated). The resolved `ClientAddress` is translated into the exact SICAR shape — `{street, extNumber, intNumber, district, city, county, state, zipCode, country, reference}` — with `district` sourced from `neighborhood`, `reference` from `references`, and `country` **hardcoded to `"MEX"`** regardless of what's stored in `ClientAddress.country` (this business is Mexico-only; SICAR wants the ISO3 code, not a display name like "México"). Since `ClientAddress`'s fields are all optional at the address-book level but SICAR needs a complete address to actually deliver, `routes/orders.py` checks `street`/`city`/`county`/`state`/`zipCode`/`extNumber`/`neighborhood` are all populated on the resolved address and returns a `400` naming whichever are missing, rather than sending a null-heavy address to SICAR and surfacing an opaque rejection. `ClientAddress` gained a `county` column (migration `6702e8cd3eba`) — SICAR needs both `city` and a separate `county`/municipio, which the address book didn't store before. No separate shipping-cost line item is sent to SICAR for either delivery type, and none is added to the Mercado Pago charge — `ecOrderDto.total`/`OrderResponse.amount` stay product-total-only. `Order` gained a `delivery_cost` column in the same migration as a **placeholder only** — nullable, intentionally unused; still true even now that envia.com is integrated (see "Admin API" below) — `shipping_service`/`Order.shipping_label` track a shipping label's own `totalPrice` separately, and nothing feeds it back into `delivery_cost`, `ecOrderDto.total`, or the Mercado Pago charge.
-
-**Incident (2026-07-23, historical)**: `neighborhood` was missing from that required-fields check, so a saved address without a neighborhood passed local validation and was sent to SICAR X with `district: null` (the address dict is built as a plain literal, not run through `exclude_none` like `DeliveryInfo.model_dump` above it). SICAR X's real `POST /api/cart/order` rejects that with `400 {"code": 2, "message": "district must not be null"}` — confirmed live via a throwaway create+cancel test order (`agent-browser`-style repro, not a captured real failure) — but `create_order_in_sicar` collapsed every non-2xx SICAR response into a generic `502 "No se pudo confirmar la orden en Sicar X"`, so the real cause never reached the frontend/logs. Fixed by adding `neighborhood` to the required-fields list so an incomplete address now fails fast with a clean `400` naming the missing field, instead of reaching SICAR X at all. `intNumber`/`reference` being `null` on the wire were confirmed fine — SICAR only rejects a null `district`. (`create_order_in_sicar` itself no longer exists — removed in the "SICAR es solo ERP de inventario" redesign below, well before the checkout-session removal described in this section — but the required-fields validation this incident produced is still exactly what runs today, now just as a pure local guard with no SICAR call behind it.)
-
-Price/total arithmetic uses `Decimal` (converted via `Decimal(str(x))`, never `Decimal(float)` directly, to avoid inheriting binary float representation error), summed and quantized to 2 decimals with `ROUND_HALF_UP` — plain `float` summation across a multi-item cart could drift the total by a cent from what SICAR X itself would have computed, back when it computed anything here at all.
-3. Local stock deltas are applied (`apply_stock_deltas`) — a single batched decrement of `Product.stock` in Postgres, no SICAR call.
-4. `create_local_order` (`services/order_history_service.py`) persists the order to the local `orders` table as `status="TO_PAY"`, linked to the authenticated `ClientAccount` — or, for a guest, to `guest_email` instead with `client_account_id = NULL` — see "Client accounts linked to orders" and "Guest checkout" below.
-5. `POST /orders` returns `amount` alongside the usual `id`/`orderUuid`, for the frontend to render the Payment Brick. No Mercado Pago call happens here (a Checkout Pro preference used to be created for the Wallet option, removed 2026-10-25).
-
-An optional `Idempotency-Key` header on `POST /orders` dedupes a retried/double-submitted checkout at the local level — distinct from Mercado Pago's own `X-Idempotency-Key` used inside `/pay` (see above), which only protects the Mercado Pago charge itself, not local order creation. `OrderIdempotencyKey` (`app/models/order.py`, unique on `(client_account_id, idempotency_key)`, plus a partial unique index on `(guest_email, idempotency_key) WHERE client_account_id IS NULL` for the guest path — see "Guest checkout" below) and `order_idempotency_service.claim_idempotency_key` implement a claim-then-fill pattern: the first request with a given key inserts a row with `order_uuid = NULL` in its own mini-transaction and proceeds with normal order creation; a retried request with the same key hits the unique constraint instead. `routes/orders.py` then branches three ways on the existing claim: if `order_uuid` is already populated (order fully created previously, and not soft-deleted since — `Order.deleted_at.is_(None)`), it short-circuits and returns that same `OrderResponse` rather than creating a second order (and double-decrementing local stock); if `order_uuid` is still `NULL` and the claim is recent (`is_claim_abandoned`, 2-minute threshold), it responds `409` ("a request with this key is already in progress, try again shortly") rather than racing the first attempt; if the claim is older than that threshold, it's treated as abandoned (the original request crashed mid-flight before ever filling in `order_uuid`) — `discard_claim` deletes it and the retry proceeds as if the key were new.
-
-**SICAR X is now contacted exactly once in this whole flow** — asynchronously, only if/when an admin accepts a `PAID` order (`admin_service.accept_order`, see "Admin API" below) — never synchronously during checkout. Neither `validate_cart_items` nor `build_order_payload` above makes any network call; both work entirely off the local `Product` snapshot `sync_task.py` already keeps fresh every 5 minutes. (This is a further removal on top of the earlier "SICAR es solo ERP de inventario" redesign below — that redesign already stopped SICAR X from *knowing about* an order at creation time, but checkout still needed a live per-shopper SICAR X session token just to validate stock/price before creating the order locally. That per-request dependency — `session_service.py`, `POST /session/init`, the customer `Authorization` header on `/orders` — has since been deleted outright; see the auth-schemes note above.)
-
-### Local-first order cancellation, decoupled from live SICAR X calls
-
-Cancellation used to work like order creation: two sequential live SICAR X admin-token calls (resolve the real document `uuid`, then cancel) had to both succeed **before** any local state changed at all. SICAR X has no webhooks of its own — it can never push anything to this API — so a briefly-unreachable SICAR X admin API used to make cancellation completely unavailable to customers, even though everything needed to cancel locally (ownership check, the stock to restore) already lived in Postgres. This is now inverted: **local Postgres is authoritative immediately, and telling SICAR X becomes an asynchronous, retried background step.**
-
-`order_history_service.prepare_local_cancellation(db, order, *, cash_register_uuid=None, require_status=None)` is the single function all three cancellation-trigger points call (`POST /orders/{id}/cancel`, `DELETE /orders/{id}`, and `finalize_order_payment`'s `rejected`/`cancelled` branch) — it takes `SELECT ... FOR UPDATE` and rechecks `status` **inside** the lock (409 if already `CANCELLED`, or if `require_status` doesn't match), sets `order.status = "CANCELLED"`, and inserts a `SicarSyncOutbox` row (`action="CANCEL"`, `status="PENDING"`, only if the order had already been accepted) — all in the caller's existing transaction, no commit of its own. **Inventory handling changed in the `Product.reserved`/`available_stock` split (see "Reserva local de stock" below)**: this function used to unconditionally restore `Product.stock` here via `apply_stock_deltas`; it now only releases the local reservation (`apply_reserved_deltas`) when the order was never accepted, and does nothing to inventory at all when it was — that restoration is deferred to the `CANCEL` outbox row succeeding, mirroring how the `ACCEPT` outbox success handler now owns the decrement. The row lock exists because removing the synchronous SICAR X call also removed an *accidental* mutex: today, two concurrent cancellation attempts on the same order (a double-click, or `/cancel` racing a delayed Mercado Pago webhook) used to be serialized by SICAR X itself rejecting the second live call before it ever reached its own stock-restore step — without a real lock, both could now race past a lock-free "not already cancelled" check and double-credit stock/reservations.
-
-Mercado Pago refund/cancellation (`payment_service.refund_payment`/`cancel_payment`, called from `/cancel`/`DELETE` when the order has an `mp_payment_id`) is **not** part of this decoupling and stays synchronous — Mercado Pago is a separate, generally-reliable system with its own webhook/retry semantics; only the SICAR X side had no webhook and no retry story of its own. It still runs **before** `prepare_local_cancellation` in both routes (money resolves before the local record does), which means it's possible for this request to genuinely refund/cancel the Mercado Pago payment and then lose the race to `prepare_local_cancellation`'s lock (a concurrent request already cancelled the order first) — a `mp_resolved_here` flag in both route handlers makes sure that case still commits the new `mp_status` instead of rolling it back with everything else, so a real, non-reversible Mercado Pago action is never silently lost from local bookkeeping. This doesn't fully close the (already-narrow, likely also mitigated by Mercado Pago's own idempotency on refunding an already-settled payment) window where two concurrent requests both reach Mercado Pago before either reaches the lock — closing that fully would mean acquiring the lock before the Mercado Pago call, which reintroduces the same "hold a lock across a live HTTP call" anti-pattern this whole redesign exists to avoid on the SICAR X side; not worth trading one for the other here.
-
-`app/worker/sicar_sync_worker.py` (scheduled every 1 minute from `sync_task.py`'s existing `AsyncIOScheduler`, alongside the 5-minute catalog job) drains `sicar_sync_outbox`. Claiming a row is a single atomic `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) ... RETURNING`, committed immediately — the lock is held for milliseconds, never across the live SICAR X HTTP call that follows (holding a Postgres lock open across a network call of unknown duration was an earlier draft of this design, rejected during review). A fourth outbox status, `IN_PROGRESS`, marks a claimed-but-not-yet-resolved row; if the worker crashes mid-call (e.g. a container restart), an `IN_PROGRESS` row older than 5 minutes becomes reclaimable again rather than staying orphaned forever. **Correction (2026-08-31, found while auditing an unrelated bug)**: this paragraph used
-to describe a `cancel_service.py` module that resolved/cached `order.sicar_document_uuid`
-and called SICAR X's document-cancel/dispatch-advance endpoints directly — that module no
-longer exists (confirmed via grep, zero matches for `cancel_service`,
-`advance_dispatch_status`, or `fetch_document_dispatch_status` anywhere in `app/`). The
-worker's `ACCEPT`/`CANCEL` branches (`_process_claimed_row` in `sicar_sync_worker.py`) now
-call `sicar_stock_service.apply_order_stock_delta(order.items, order.branch_id, sign=∓1)`
-directly — SICAR X is told about **inventory only** (a stock delta), never about the
-order/document itself or its dispatch status; there is no live cancel/dispatch call to
-SICAR X left in this codebase at all. On success the outbox row is marked `SUCCEEDED` — and, in the same commit, `Product.stock`/`Product.reserved` are mirrored locally to match (decrement + release reservation for `ACCEPT`, increment for `CANCEL`; see "Reserva local de stock" below for why) — on failure `attempts` increments with exponential backoff (1/2/4/8/16 minutes) up to `MAX_ATTEMPTS = 5`, after which the row is marked `FAILED`, logged `CRITICAL`, and reported via `admin_notification_service.notify_admin_sicar_sync_failed` — a distinct signal from routine cancellation, meant for a human to reconcile manually in SICAR X's own admin panel. Note separately: SICAR X's own admin panel requires a step-up "Autorización" (a second login from a higher-privilege user) before it will cancel *any* order through its UI — that's a UI-level safeguard on the restricted account used for browser testing, not a constraint on this API's admin B2B token, which already has cancel privileges.
-
-**`Order.deleted_at`** (nullable timestamp) replaces the old hard-delete behavior of `DELETE /orders/{order_id}` — deliberately a single column, not `Product`'s `is_deleted`+`deleted_at` pair (that split is a historical accident from two migrations a day apart, not a pattern worth mirroring here). Hard-deleting the row outright is incompatible with the outbox needing the row to still exist to retry against, so `DELETE` now soft-deletes: sets `deleted_at`, which is filtered (`Order.deleted_at.is_(None)`) in every customer/webhook-facing lookup — `list_client_orders`, `get_client_order`, `get_owned_order_by_sicar_id`, `get_order_by_uuid`, and the `POST /orders` idempotency-key replay lookup — so the order still disappears from `GET /auth/me/orders` immediately, exactly as `FRONTEND_INTEGRATION.md` documents, while the row itself persists (forever, no cleanup job exists or is planned) so nothing is lost if the SICAR X sync needs to be reconciled later. **This filter is deliberately absent from the worker's own lookup of the order by primary key** — it must keep reaching soft-deleted orders to finish telling SICAR X about them. Skipping the `deleted_at` filter on `get_order_by_uuid` specifically would have reopened a real bug: a late Mercado Pago webhook (a paid OXXO ticket, or an administrative cancellation notice) arriving after `DELETE` for a since-hidden order could otherwise resurrect/mutate it via `finalize_order_payment`.
-
-`OrderCancelResponse.sicarTimestamp` (still typed as `float`, still epoch milliseconds) changed meaning: it used to be SICAR X's own confirmation timestamp from the now-removed synchronous cancel call; it's now `datetime.now(timezone.utc).timestamp() * 1000` — the moment the cancellation was accepted **locally**. The cancellation is genuinely complete and authoritative from the customer's point of view the instant this responds; only the SICAR X-side mirroring is deferred, which the customer never needs to know about.
-
-**`POST /orders/{id}/cancel` is gated on shipping status (added 2026-07-31)**: a customer
-can no longer self-cancel an order once `Order.dispatch_status == "DISPATCHED"` — a plain
-`409` (`"Esta orden ya fue enviada y no puede cancelarse."`) raised in `routes/orders.py`
-right after the ownership lookup, deliberately **before** the Mercado Pago refund/cancel
-step, so a shipped order is rejected before any money moves. `"COMPLETE"` is deliberately
-**not** included in this gate — it's also the terminal `dispatch_status` for `PICKUP`
-orders (ready for in-store pickup, never actually shipped anywhere), which must stay
-cancellable. This check lives only in the `/cancel` route, not inside
-`prepare_local_cancellation` itself (would also affect `DELETE /orders/{id}` and
-`finalize_order_payment`'s rejected/cancelled branch, both of which are structurally
-unable to reach a dispatched order today — `DELETE` only operates on `status == "TO_PAY"`
-orders, and dispatch progression happens later in the lifecycle) and relies purely on
-whatever `dispatch_status` is already cached locally — nothing in this codebase re-fetches
-it from SICAR X live before deciding.
-
-Customer-facing cancellation notifications (`app/services/order_cancellation_notification_service.py`'s `notify_order_cancelled`) fire from all three trigger points after their commit, mirroring `notify_order_confirmed`'s existing pattern exactly (same `OrderPublic` + `clientEmail`/`clientName` payload, same HMAC signing, same non-fatal/no-retry contract) — POSTed to `{FRONTEND_BASE_URL}/api/webhooks/order-cancelled`, see `FRONTEND_INTEGRATION.md`. The same call also fires `admin_notification_service.notify_admin_order_cancelled` — an outbound webhook toward a **future admin dashboard that doesn't exist yet** (see "Local-first order cancellation" above re: `ADMIN_DASHBOARD_BASE_URL`/`ADMIN_WEBHOOK_SECRET`) — built now, ahead of the dashboard itself, so the notification plumbing is ready the moment a receiver exists.
-
-### Local catalog vs. live SICAR X data
-
-- `Product` (`app/models/product.py`) is the single local table. The sync worker upserts it with `on_conflict_do_update` on `sicar_uuid`, but **only the rows that are new or differ** from what's stored (`_changed_product_values` compares each page in Python first); unchanged rows aren't written at all. Rows are never deleted — a completed sync pass marks products whose `sicar_uuid` SICAR X didn't return this pass `is_deleted=True` instead (`_mark_missing_as_deleted`, an anti-join against the set of uuids seen), and skips that step if SICAR X returned nothing at all. `last_sync_id` is therefore now "the last pass in which this row changed", not "the last pass that saw it". `Product.price` is synced from `/product/list`'s `prices[f"N{price_list_id_suffix}"]` — **confirmed at parity with the live checkout GraphQL's `priceList.netPrice1`** on a fresh sync (spot-checked against 23 real products, 0 mismatches) as part of removing the live checkout price check below; the only mismatches seen during that investigation traced to a stale local sync (6 days old at the time), not a mapping bug — always re-sync before trusting a price comparison against live data. **Known edge case, confirmed live in `sync.log` (rare — 1 occurrence across 21 days of production logs)**: if SICAR X's `/product/list` response has no entry at all for a product's price-list key, `sync_task.py` logs a warning and saves `price = 0.00` rather than failing the sync — `order_service.validate_cart_items` treats `price <= 0` as "not available" (`409`, same as out-of-stock) specifically to guard against this, so a product synced this way is never purchasable for free.
-- **`Product.is_active` (hidden in SICAR X) is refreshed in full at most once an hour (2026-10-10).** `/product/list` doesn't return SICAR X's `hidden` flag, so the sync asks GraphQL for it per page. That check runs for the whole catalog only when `HIDDEN_REFRESH_INTERVAL` (1 h, tracked in the process-global `_last_full_hidden_refresh`) has elapsed; every other pass checks only products not yet stored, and stored ones keep their saved `is_active`. Consequences: hiding or unhiding a product in SICAR X takes **up to an hour** to reach the storefront (a worker restart forces a full check on its first pass), and a soft-deleted product that reappears keeps its old `is_active` until the next full check. If a `hidden` query fails (non-200, GraphQL `errors`, network error), that page keeps its stored `is_active`; it used to fall back to "all visible", which re-published hidden products whenever SICAR X hiccuped. A full check only counts (resets the interval) if the sync completes and no `hidden` page failed, so during a SICAR X GraphQL outage every pass retries the full check and egress goes back to the old level until it recovers. The sync is the only writer of `Product.is_active`. Tests: `tests/test_catalog_sync.py` (an autouse fixture resets `_last_full_hidden_refresh` per test).
-- `GET /products/{uuid}` (`routes/products.py`) serves from Postgres but lazily refreshes `additional_skus`, `tags`, `additional_images`, `sales_unit_uuid`, `unit_short_name`, etc. from SICAR X's GraphQL API when `details_updated_at` is null or older than 24h (`fetch_full_details_from_sicar`) — `description` is **not** part of this refresh; see "Info de producto propia" below for why. The lookup also filters `is_deleted == False, is_active == True` — same as `/catalog`/`/search` — so a discontinued or storefront-hidden product's detail page 404s instead of still resolving directly by uuid. `unit_short_name` (added alongside the checkout-session removal above) is resolved from `content { units { uuid shortName } }` — a second top-level field folded into this same existing GraphQL call, not a new request — by matching the product's own `salesUnitUuid` against that list; persisted directly on `Product` so `order_service.build_order_payload` never needs a live call or a join to show the right unit label (falls back to `"PZA"` if never resolved, same as before).
-- **Info de producto propia (2026-08-22)**: `Product` gained four nullable columns not synced from SICAR X — `brand`, `bullet_points`, `technical_specs`, `contents` (added to source a URREA distributor spreadsheet's `Marca`/`Bullets`/`Especificaciones técnicas`/`Contenido` columns, which this catalog had nowhere to put). Same treatment as `attributes`/`variant_group_uuid`: never added to `sync_task.py`'s `product_values` whitelist, so the periodic sync can't reset them. Editable one product at a time via `PATCH /admin/products/{uuid}/info` (`attribute_service.update_product_info`, `exclude_unset` partial update — a field left out of the request body is untouched, sent explicitly as `null` clears it) or in bulk via a fifth `InfoProducto` sheet on `POST /admin/bulk-import/products` (`sku` + any subset of `brand`/`bulletPoints`/`technicalSpecs`/`contents`; MERGE semantics like the `Atributos` sheet — a blank cell leaves the existing value alone, a later corrected value does apply on re-upload). **Explicit clear via bulk import (2026-08-23)**: a blank cell never deletes a stored value (by design, so a partially-filled spreadsheet can't wipe data) — the literal text `NULL` (case-insensitive) in a cell is the sentinel for "clear this field," resolved in `bulk_import_service._process_product_info_rows` before the merge in `_apply_product_info_updates`. Also fixed alongside this feature: `_apply_attribute_updates`/`_apply_variant_group_updates`/`_apply_product_info_updates` all needed `.execution_options(dml_strategy="core_only")` on their batched `UPDATE ... WHERE id = bindparam(...)` statements — without it, SQLAlchemy's ORM-level session raises `InvalidRequestError: bulk synchronize of persistent objects not supported...` the moment a bulk-import UPDATE actually touches 2+ rows in one call, the same issue `product_stock_service.py` had already solved for `apply_stock_deltas`/`apply_reserved_deltas`/`apply_sales_count_deltas` — confirmed live on Railway (crashed `POST /admin/bulk-import/products` on first real `InfoProducto` upload; `Atributos`/`Variantes` were equally exposed but hadn't been exercised with real multi-row data yet — categories/vehicles/attributes/variant groups are all still unclassified in production as of this writing, see "Atributos de producto y grupos de variantes" in `ADMIN_INTEGRATION.md`). Exposed only on `GET /products/{uuid}` (`ProductDetail`) — deliberately **not** on `ProductBasic`/catalog/search listings or as a filter, a scope decision confirmed with the user rather than assumed, since `brand` in particular is the kind of field that's often also wanted as a listing filter/badge (a materially bigger change touching `catalog_service.py` and a new index) — can be added later as its own small feature if needed.
-
-**Admin de marcas y `hasBrand` (2026-09-23)**: `brand` se normaliza en escritura con
-`brand_service.normalize_brand` (trim, `""` → `null`; el casing **no** se toca), usado por
-`PATCH /admin/products/{uuid}/info` y por todas las rutas de `/admin/brands` (el bulk import ya
-recortaba vía `_clean_str`). La migración de solo datos `a7c3e1f9d2b4` recortó una vez los valores
-existentes. Por eso agrupar/matchear por `lower(brand)` basta y no hace falta `lower(btrim(brand))`,
-lo que sigue alineado con el filtro público `brand` y con `ix_products_brand_lower`. Los duplicados
-por casing se fusionan explícitamente con `POST /admin/brands/rename` (ver la tabla Admin API).
-`POST /products`/`POST /search` ganaron `hasBrand` (`false` = "Sin marca", `brand IS NULL`;
-`true` = `IS NOT NULL`; combinable con los demás filtros) en `catalog_service._apply_has_brand`.
-Las queries admin (`is_deleted = false`, incluyendo inactivos) no usan el índice parcial de
-activos; recorren ~124k filas, aceptable para una operación admin poco frecuente.
-
-**`description` joined this same set (2026-08-22), renamed from `description_details`** —
-previously the *only* field this router's docstring's exception didn't apply to: it used to
-be genuinely SICAR-owned, written exclusively by `GET /products/{uuid}`'s lazy-refresh
-(`fetch_full_details_from_sicar`'s GraphQL `details` field) on the same 24h-staleness
-schedule as `tags`/`additional_images`/etc. The business wanted to author this copy
-directly instead of inheriting whatever SICAR X's own catalog contains, so `details` was
-dropped from that GraphQL query entirely (not fetched-and-ignored) and `description` now
-behaves identically to `brand`/`bullet_points`/`technical_specs`/`contents` in every
-respect — `PATCH /admin/products/{uuid}/info`, the `InfoProducto` bulk-import sheet
-(MERGE + `NULL`-marker-to-clear), excluded from `sync_task.py`'s whitelist. **Unlike those
-four, `description` stays exposed on `ProductBasic` too** (catalog/search listings), not
-detail-only — that's unchanged from before the rename, since `description_details` already
-had that exposure and only its ownership/writer changed, not its visibility. Migration
-`4b1f8274a2dd` did `DROP COLUMN description_details` + `ADD COLUMN description` (not a
-data-preserving rename) — confirmed with the user that the ~124k products' existing
-SICAR-sourced description text should be wiped, not carried forward, so every product
-starts this admin-owned field from `null`.
-- `POST /catalog` reads only from Postgres (`catalog_service.get_local_catalog`) — no live SICAR X calls — filtered by `department_uuid`/`category_uuid`/`in_stock` (`stock > 0`)/`tag` (containment match against `Product.tags`, a `JSONB` column with a `gin (tags jsonb_path_ops)` index — `ix_products_tags_gin`, confirmed via `EXPLAIN` to use a Bitmap Index Scan) with pagination, and sortable via `sort_by` (`price_asc`/`price_desc`/`name_asc`, validated by a Pydantic `Literal` so an invalid value is a `422` rather than silently ignored). No `sort_by` means no explicit `ORDER BY` — natural DB order, not guaranteed stable across requests. `Product.price` is `Numeric(10, 2)` (not `Float`) — money needs exact decimal precision; the sync worker (`sync_task.py`) writes it via `Decimal(str(...))`, never a raw Python `float`, to avoid inheriting binary-float representation error. `Product.tags` was originally a plain `JSON` column — switched to `JSONB` (migration `069dd8677786`) specifically so the `tag` filter above could use the `@>` containment operator with a GIN index; `additional_skus`/`additional_images` stay plain `JSON` since nothing queries inside them.
-- **Superseded as the primary engine (2026-09-26)**: `POST /search` now runs on Typesense (see "Búsqueda con Typesense" below). The Postgres search described in this bullet and the next is kept, unchanged, as its fallback, used whenever Typesense isn't configured, is down, or errors. `POST /search` (`catalog_service.search_products`) does a case-insensitive substring match (`ILIKE '%q%'`) against `sku` OR `name`, accelerated by `pg_trgm` GIN indexes (`ix_products_sku_trgm`/`ix_products_name_trgm`, migration `224799e4444b`) — confirmed via `EXPLAIN` to use a Bitmap Index Scan rather than a sequential scan. Plain substring search on 124k+ rows would be far too slow without these; a fresh Postgres (e.g. after the crash-recovery incident above, or a new environment) needs this migration applied before `/search` is usable at all — `CREATE EXTENSION pg_trgm` requires superuser/extension privileges, which Railway's managed Postgres plugin grants by default but a locked-down externally-managed Postgres might not. Also accepts the same `department_uuid`/`category_uuid` filters as `/catalog`, applied as a plain equality `AND` alongside the trigram match, plus an `in_stock` boolean to restrict to `stock > 0`. Results are ranked with a `CASE WHEN`-based `ORDER BY`: rows where `sku`/`name` **starts with** `q` sort before rows that only contain it mid-string (secondary sort by `name`) — confirmed via `EXPLAIN` that this sort stays cheap (in-memory `Sort` over the already-small filtered set, index scan untouched) and via live query that the tier boundary lands exactly where the true prefix-match count says it should.
-- **Hyphen-insensitive search (2026-09-24, migration `b8d2f5a1c7e3`)**: `/search` now compares `search_normalize(sku/name)` (= `immutable_unaccent()` + strip `-`) against the query with `-` stripped too, so `wd40` finds `WD-40`; `wd 40` already did via the per-word AND. The multi-word query joined without spaces (`wd40`) also counts as a full-phrase match for ranking. The trigram indexes are now `ix_products_sku_trgm_search`/`ix_products_name_trgm_search` on that expression (replacing the `*_trgm_unaccent` ones, which nothing else used). Not covered: `wd40` → a product literally named `WD 40` (with a space).
-- The original plain B-tree indexes on `sku`/`name` (`ix_products_sku`/`ix_products_name`) were dropped in migration `6854715fa27b` (~17MB reclaimed) — fully superseded by the trigram GIN indexes above once `/search` existed, and confirmed via codebase search that nothing else does an exact-match query or a real DB-level `ORDER BY` on either column (the model's `Column(...)` no longer sets `index=True` for them either). Found while investigating Railway's Postgres dashboard showing several "0 scans, candidate for removal" indexes — most of those (department_uuid, the trigram ones) are still genuinely used by live code paths despite showing 0 scans (the counters reset when Postgres re-initialized during the crash incidents above and haven't accumulated much history since), so don't assume "0 scans" on that dashboard means unused without checking the code first.
-- **Taxonomía**: `GET /taxonomy` (`routes/taxonomy.py`) returns the full category tree (for building nav/filter UIs) from a single self-referencing `categories` table (`app/models/taxonomy.py`, `parent_uuid` → arbitrary depth, not the fixed 2-level `Department`/`Category`/`department_category` structure this used to have — that was collapsed into `categories` by migration `5cbd5e4aa1be`, every old row surviving as a root node). This is now a human-administered PIM table, **not** synced from SICAR X at all — no lazy refresh, no live SICAR X call in this path. `taxonomy_service.get_category_tree` loads the whole (small) table in one query (ordered by `name`, case-insensitive, so both root nodes and every node's `children` come out alphabetized) and assembles the tree in Python by grouping on `parent_uuid`; `get_descendant_uuids` is a `WITH RECURSIVE` CTE used to make filtering by a parent node also match products tagged only on a descendant. A separate `product_categories` table (`category_uuid`/`product_id`, N:M) is this PIM's own product tagging — distinct from `Product.department_uuid`/`Product.category_uuid` (the raw, one-per-product classification synced from SICAR X); `POST /catalog`/`POST /search` accept a `taxonomy_uuid` filter that queries `product_categories` (descendant-inclusive) alongside the older `department_uuid`/`category_uuid` filters. Category nodes and `product_categories` rows are managed via `/v1/admin/categories/*` — see "Admin API" below.
-- **Compatibilidad de vehículos**: the next PIM slice after taxonomy, same shape but for "which vehicles does this product fit" instead of "which category is this product in." `vehicles` (`app/models/vehicle.py`) is a **flat** table — one row per make/model/year-range/engine combination (a "fitment", e.g. "Chevrolet Aveo 2008-2016 L4 1.6L") — deliberately **not** self-referencing like `categories`: a fitment isn't a hierarchy, so there's no tree/reparenting logic here. `vehicle_type` is `"AUTOMOTIVE"` or `"MOTORCYCLE"` (English constants, matching this codebase's existing vocabulary style elsewhere, not Gonher's Spanish labels below). `year_end` is nullable (`NULL` = still in current production). `product_vehicles` (N:M, product↔vehicle) mirrors `product_categories` exactly. Both start human-administered via `/v1/admin/vehicles/*` — see "Admin API" below. **Update (2026-08-01, follow-up slice)**: the storefront-facing public surface anticipated above now exists — `app/api/routes/vehicles.py` (`GET /v1/vehicles/makes`/`/models`/`/years`/`/engines`/``, `validate_api_key`, no admin key) — a cascading facet API (type → make → year → model → engine — year deliberately comes before model, not the more common make→model→year ordering — each step filtered by whatever was already picked) rather than a single free-text search, since the frontend picker is a structured dropdown wizard, not a search box; no new trigram index was needed for it, the existing `ix_vehicles_type_make_model` btree already covers the exact-match queries this uses. The `year`/`year_end` range (not a single column) is expanded into individual years via a raw `generate_series` SQL query in `vehicle_service.get_distinct_years` (scoped only to `make`/`vehicle_type` — one step earlier in the cascade than `get_distinct_models`, which now filters by year range containment instead; same raw-SQL-for-an-ORM-awkward-query precedent as `taxonomy_service.get_descendant_uuids`) — **gotcha hit and fixed**: asyncpg's `AmbiguousParameterError` on `(:vehicle_type IS NULL OR col = :vehicle_type)` when `:vehicle_type` is bound `None` — asyncpg can't infer that bound param's type from an `IS NULL` comparison alone; fixed with an explicit `CAST(:vehicle_type AS VARCHAR)`. `POST /products`/`POST /search` also gained a `vehicle_uuid` filter, mirroring `taxonomy_uuid` exactly (join through `product_vehicles`, no descendant lookup needed since `Vehicle` is flat). `VehicleAdminPublic` (the schema) was renamed to `VehiclePublic` since it's now genuinely shared by both the admin and public routes and has no admin-only fields. Deliberately still no `GET /vehicles/{uuid}` lookup-by-id route — the frontend is expected to persist the full object the resolve step (`GET /vehicles`) already returns, not just the `uuid`, if it needs to redisplay a saved vehicle later. **Update (2026-08-03)**: admin gained a reverse lookup (`GET /admin/vehicles/by-product/{productUuid}`, mirrored on the categories side too) and a bulk "assign this product to a model across several years" flow (`GET /admin/vehicles/models-for-years` + `POST /admin/vehicles/assign-by-model`, additive not replace) — see "Admin API" below for both. **Update (2026-08-03, same day)**: an even bigger bulk path now exists too — `POST /admin/bulk-import/products` (`app/services/bulk_import_service.py`) accepts a `.xlsx` with `Categorias`/`Vehiculos` sheets (either optional) and assigns both `product_categories` and `product_vehicles` in one upload, resolving products by `sku` (+ `additional_skus` fallback, cast to `JSONB` inline via `.has_any()` since the column itself is plain `JSON` — confirmed live today's catalog has zero rows using `additional_skus`, so this fallback path is forward-looking, not yet exercised by real data) rather than by `sicar_uuid`, since that's not something an admin filling a spreadsheet would know. Same additive/`ON CONFLICT DO NOTHING` semantics as `assign-by-model` (re-uploading the same file is a safe no-op), but partial-success instead of all-or-nothing: invalid rows (bad SKU, unknown category slug, no matching vehicle fitment) are skipped and reported individually (sheet/row/reason), not enough to reject the whole file — only file-level problems (corrupt file, missing both sheets, a present sheet missing a required column) reject everything. `make`/`model`/`engine`/`sku` matching is case-insensitive (real data in `vehicles` has inconsistent casing across rows, e.g. `"ITALIKA"` vs. `"Chevrolet"`); `categorySlug` stays case-sensitive since slugs are already normalized lowercase. Batch-resolves in a small constant number of queries regardless of row count (one `sku IN (...)`, one category `slug IN (...)`, one `OR`-of-`AND` query covering every distinct vehicle combo in the whole sheet) rather than one query per row — accepts that `Product.sku IN (...)` sequential-scans ~124k rows since the plain btree index on `sku` was dropped earlier (migration `6854715fa27b`) when nothing needed exact-match; fine for an infrequent admin-only bulk op, worth revisiting only if this becomes a hot path. Needs two new dependencies: `openpyxl` (reading `.xlsx`) and `python-multipart` (hard FastAPI requirement for `UploadFile`, previously absent from `requirements.txt`). `GET /admin/bulk-import/template` (`bulk_import_service.build_template_workbook`) downloads a ready-to-fill `.xlsx` with the same two sheets/columns (reusing the exact same `CATEGORIES_SHEET`/`VEHICLES_SHEET`/`*_REQUIRED_COLUMNS` constants the upload side reads, so the two can't drift apart), bold headers, cell comments on the non-obvious columns, and example rows using deliberately fake placeholder data (never a real category/vehicle pulled from the DB, so the template can't go stale) — returns the raw `.xlsx` bytes directly (`Response`, not a Pydantic `response_model`), not JSON. **Update (2026-08-03, later)**: `Categorias`' `categorySlug` cell now accepts multiple slugs separated by comma/semicolon (`_split_slugs`, `bulk_import_service.py`) so one row can assign several categories to the same product instead of needing a repeated row per category — each slug in the cell resolves and reports independently (one bad slug in a 3-slug cell still assigns the other 2 and reports just that one error), and a cell with no delimiter still behaves as a single slug, so the original one-slug-per-row format keeps working unchanged.
-
-  `vehicles` was seeded once (2026-08-01, `import_gonher_vehicles.py` at the repo root — a standalone script, not imported by the app, same convention as `secret.py`) from `catalogo.grupogonher.com`'s public reference API (`CatalogoGonherServices/api/*`, no auth) — used purely as a generic make/model/year/engine reference list for the admin's picker, **not** linked to any real product here: a live check against the local catalog found only 2 of 126,056 products even mention "Gonher" and 0 mention their part-number prefix "PRO1ONE", so there was never any real SKU overlap to import against — `product_vehicles` stays empty from this seed, same as `product_categories` did after the taxonomy migration. Scoped to Gonher's "Automotriz" and "Motocicletas" types only (skipping "Camiones, Tractocamiones y Fuera de Carretera" — confirmed to be almost entirely heavy industrial equipment, e.g. pavers and reefer units, with zero relevance to this catalog) — **41,937 rows** imported (40,499 `AUTOMOTIVE` / 1,438 `MOTORCYCLE`). The import fetches a single bulk endpoint (`Articulos/GetTagsVehiculos`, ~94k flat `"<year> <make> <model...> <engine>"` strings covering all Gonher vehicle types) rather than crawling the cascading dropdown endpoints (`Modelos/GetAniosByArmadora(Tipo)`/`GetModelosByTipoArmadoraAnio`/`Motores/GetMotoresByModeloAnio`) — confirmed live those don't actually narrow by make (the year list is the same generic 1948-2026 range regardless), so a full crawl for the ~149 relevant makes would mean tens of thousands of requests for no better data. Parsing that flat tag list is a **documented heuristic**, not guaranteed 100% clean (see the script's own docstring for the full reasoning): two engine formats exist in the data — car-style (`"L4 1.6L"`, cylinder-config + displacement with an `L` suffix) and moto/ATV-style (a bare integer cc count, e.g. `"249"`) — and 5 makes (Honda, Bmw, Triumph, Peugeot, Suzuki) appear in **both** Gonher's Automotriz and Motocicletas make lists (real brands that sell both), so for those the *engine format itself* is used as the `vehicle_type` tie-break (car-style → `AUTOMOTIVE`, bare-cc → `MOTORCYCLE`), confirmed live to track cleanly with the actual data (e.g. Honda splits into 512 `AUTOMOTIVE` rows — Civic, Accord, etc. — vs. 126 `MOTORCYCLE` rows — TRX/CB/GL1800 models). Re-running the script is safe (it de-dupes against what's already in `vehicles` before inserting) but has no stable external id to key a real upsert on, unlike the SICAR catalog sync.
-
-### Búsqueda con Typesense (`/search`, `/search/suggest`, sinónimos) (2026-09-26)
-
-Full design, live-site findings (F1-F10) and the Phase 0/3 measurements: `docs/superpowers/specs/2026-09-26-typesense-search-design.md`; implementation plan: `docs/superpowers/plans/2026-09-26-typesense-search-plan.md`. The Postgres search above kept accumulating one patch per complaint and still failed in ways a live-site audit made concrete:
-- substring noise: `pvc` matched **CPVC**, `martillo` matched "roto**martillo**";
-- an exact SKU wasn't first;
-- plural vs singular and `10mm` vs `10 mm` gave wildly different results;
-- a typo fallback returned garbage.
-
-**Architecture**
-- **Postgres stays the source of truth.** Typesense only returns *which* products and in *what order* (ids + total). `search_service.hydrate` loads them from Postgres, so price and `available_stock` are always live — same "never trust a copy of price/stock" rule as checkout.
-- **Fallback.** `app/services/search_service.py` falls back to `catalog_service.search_products` when Typesense isn't configured, is down, or errors.
-- **Breaker.** `app/services/typesense_client.py` (plain `httpx`, 1 s connect / 2 s read timeouts) has an in-process circuit breaker: after a network error or 5xx, Typesense is skipped for 30 s. Only the first request of an outage pays the timeout; verified by stopping the container mid-run (~1.3 s once, then ~0.22 s from Postgres).
-
-**Indexing** (`app/services/search_index.py`, `app/worker/search_index_worker.py`, worker process only)
-- **Dirty flag.** Migration `c4e8a2f6b1d9` adds `products.search_dirty_at`, set **only by Postgres triggers**, so the ~30 existing writers (`sync_task`, `brand_service`, `bulk_import_service`, `taxonomy_service`, `vehicle_service`, `apply_*_deltas`…) and any future ones are covered without code changes.
-  - `products_mark_search_dirty` (BEFORE INSERT/UPDATE) fires only when an indexed column really changes (`IS DISTINCT FROM`), or when availability crosses zero. `last_sync_id` is deliberately excluded, so a sync pass that only restamps `last_sync_id` marks nothing — verified: 0 of 111,407 rows.
-  - Statement-level triggers with transition tables on `product_categories`/`product_vehicles` mark the linked products once per statement.
-- **Jobs:**
-  - `drain_dirty` every 30 s. It clears a flag compare-and-clear: only if `search_dirty_at` is still the value it read, so a write during the import keeps its mark.
-  - `full_rebuild`, **only on worker startup** when needed (see `ensure_index_on_startup` below; it ran nightly until 2026-09-29, then weekly until 2026-10-06; see "Costos de Railway" for why it's no longer scheduled, and for the manual drift repair): a new collection `products_v{SCHEMA_VERSION}_{ms}`, then stopwords and synonyms, then an atomic alias swap, then the old collection is deleted. About 84k products in ~4-12 s.
-  - `reconcile_synonyms` every 5 min.
-  - `ensure_index_on_startup` rebuilds when the `products` alias is missing or points to another `SCHEMA_VERSION`. **Bump `SCHEMA_VERSION` whenever `build_schema`/`to_document` change**; the worker then rebuilds on its next start.
-  - `drain_dirty` and `full_rebuild` share an `asyncio.Lock`. Otherwise a drain during a rebuild would push to the old collection and lose the change in the new one.
-- **`normalize_search_text`** is applied identically to indexed names, queries and synonym words; it's this engine's equivalent of `search_normalize()`:
-  - lower-case, no accents;
-  - mixed fractions become one token (`1-1/2`, `1 1/2` → `1_1/2`);
-  - a number and its unit are joined (`10 mm` → `10mm`, `20 V` → `20v`), only for standalone numbers, so SKUs like `u1222v` are untouched;
-  - a naive Spanish singular per word (`llaves` → `llave`, `motores` → `motor`, `luces` → `luz`).
-- **Typesense's own `stem` is deliberately not used.** With `locale: "es"` it silently does nothing; with the default locale it breaks typo tolerance and synonyms on plural words (both measured in Phase 0).
-
-**Ranking** (`search_service`; the weights were chosen by comparing variants over the full catalog; see the spec before changing them)
-- `sku_compact`/`name_compact` (`wd40`)/`additional_skus` have no typos. `name_first` (the name's first word = product type) has a deliberately **low** weight: at a high weight, `llave allen` returned artillery wrenches with "boca hexagonal". `text_match_type=max_weight`; prefix only when the last word has ≥ 3 chars.
-- Relevance sort: `_text_match`, then one lexicographic `_eval` tie-break (name **starts with** a query word > in stock > has photo; see "Orden por defecto…" (2026-10-13) for why it lists every combination instead of weights), then `sales_count`. Nearly all products have `sales_count` 0, so text-match ties are common: without the tie-break, `martillos` put "Engrapadora tipo martillo" first.
-- An exact SKU (any format, e.g. `UBP1 1/4`) is pinned first on page 1 via a second search filtering `sku_lower`. **Accepted edge:** if the pinned product isn't also a text match, the last text hit of page 1 doesn't reappear on page 2.
-
-**Endpoints**
-- `POST /v1/search`: unchanged request/response contract.
-- New `GET /v1/search/suggest?q=&limit=` (1-10, default 6): products (`ProductSuggestion`: `sicarUuid`, `sku`, `name`, `imageUrl`, `price`) plus up to 4 brands (`{name, count}`, a facet on `brand`) in one `multi_search`; `brands: []` on the Postgres fallback.
-- `/v1/admin/search/synonyms`: see the Admin API table.
-  - `search_synonyms` is the source of truth (covered by the `frequent` backups). Words are stored normalized and the response returns the stored form.
-  - Postgres commits first; the push to Typesense is best-effort, and `syncedToSearch: false` means the worker's reconcile applies it within 5 min.
-  - The migration seeded 4 entries: cuadro/entrada/mando, allen/hexagonal, inalambrico→bateria/20v/12v (one-way), desarmador/destornillador.
-
-**Verification tooling**
-- `search_eval.py` (repo root, standalone) runs the live-site and user queries against both engines. It exits 1 if a `top5` case misses in Typesense or a `no_regress` case gets worse. On the full local catalog on 2026-09-26: **39/39**.
-- Tests:
-  - `tests/test_search_index.py` (normalization, with real catalog names);
-  - `tests/test_typesense_client.py`;
-  - `tests/test_search_service.py`;
-  - `tests/test_search_dirty_triggers.py`;
-  - `tests/test_admin_search_synonyms.py` (HTTP-level);
-  - `tests/test_search_index_integration.py` and `tests/test_search_relevance_integration.py` (real Typesense; skipped without `TYPESENSE_URL`; CI runs a Typesense service container).
-
-**Known leftovers**
-- `te pvc` ("te" as a spelling of "tee") → fix with a one-way admin synonym after launch.
-- `talador` ranks "Hacha taladora" first (prefix beats a transposition typo); minor.
-- The storefront offers no "Relevancia" sort option: confirm with the frontend which `sortBy` it sends by default, since anything but `relevance` bypasses the ranking above.
-
-### Ofertas, relacionados, avisos y correos de marketing (2026-10-10)
-
-These came from the frontend's `CAMBIOS_NECESARIOS.md`. The contract is documented in `FRONTEND_INTEGRATION.md` ("Funciones nuevas (2026-10-10)") and `ADMIN_INTEGRATION.md` ("Precio de oferta"). Migrations: `d5f1a9c3e7b2`, `e7b3c5d9f1a4`, `f2c8e4a6b0d3`.
-
-**`price` includes IVA.** It's stored as-is from SICAR's price list. The `8.62069` examples in the docs were stale; 99.99 % of real prices end in `.x0`.
-
-**Precio de oferta**
-- **Columns.** `Product.compare_at_price` and `sale_ends_at` hold the *previous* price, entered by hand in the admin. They're PIM-owned and not in the sync whitelist. The charged price is still `price`, from SICAR.
-- **Reading.** Always read them through `Product.is_on_sale` (hybrid) or the `effective_compare_at_price`/`effective_sale_ends_at` properties, never the raw columns. A sale stops showing on its own when `sale_ends_at` passes, or when SICAR raises `price` to ≥ the previous price.
-- **Exposure.** `ProductBasic` reads them via `validation_alias`. `ProductDetail`, `ProductSuggestion` and `CartItemPublic` set them by hand.
-- **`onSale` filter.**
-  - Postgres: `Product.is_on_sale`, backed by the partial index `ix_products_on_sale`.
-  - Typesense: the `sale_until` int64 field (`0` = no valid sale, `SALE_NO_END` = no end date), filtered as `sale_until:>now`.
-- **Reindexing.** `SCHEMA_VERSION` 3 added `sale_until` (now 4, see "Orden por defecto…"); a bump makes the worker rebuild Typesense on its next start (~15 s). The search-dirty trigger now also watches the two columns.
-- **Admin routes.** `PUT/DELETE /admin/products/{uuid}/sale`, plus bulk `PUT/DELETE /admin/products/sale` by uuids or by `categoryUuid`. Bulk accepts `compareAtPercent`. All are audited.
-
-**Productos relacionados** (`GET /products/{uuid}/related`, `related_service.py`)
-- **Levels, in order:**
-  1. bought together in PAID orders from the last 180 days (`jsonb_array_elements(items::jsonb)`);
-  2. same taxonomy node, then its parent;
-  3. same brand;
-  4. same vehicles.
-- **Rules.** No repeats; the product itself and its variant group are excluded; in-stock first within each level.
-- **Cache.** The uuid list is cached in-process for 1 h (LRU, 5k entries); products are hydrated from Postgres on every request. This is correct only while there's a single `api` instance.
-
-**GA4 order lines.** `OrderPublic`/`AdminOrderPublic` add `productUuid`/`unitPrice`/`lineTotal` to each `items[]` line at serialization (`schemas/orders.enrich_order_items`), derived from the stored `uuid`/`priceTax`/`amountTax`. Both amounts are pre-coupon. The stored JSON isn't touched, so old orders get the fields too.
-
-**Notificaciones salientes con outbox (`webhook_outbox`)**
-- **What uses it.** The three new worker-born webhooks: `product-back-in-stock`, `wishlist-price-drop`, `cart-abandoned`.
-- **Enqueue.** `webhook_outbox_service.enqueue_webhook` only does `db.add`, in the same transaction that marks the source notified. A crash can't lose or duplicate the email.
-- **Delivery.** `webhook_outbox_worker.py` runs every 1 min with the same claim/lease pattern as `sicar_sync_worker`. It re-signs on each attempt and adds `X-Webhook-Id` (stable across retries) and `X-Webhook-Event`.
-- **Retries.** Any non-2xx or network error retries after 1 min, 10 min and 1 h, then the row is `FAILED` + `capture_message`.
-- **Older webhooks** (`order-confirmed`, …) still go direct, without the outbox.
-
-**Avisos de reabastecimiento** (`stock_alerts`, `stock_alert_service.py`, `stock_alert_worker.py`)
-- **Subscribing.** Only possible while `available_stock = 0` (409 otherwise).
-- **Idempotency.** One active alert per product+email, enforced by a partial unique index.
-- **Rate limits.** 10/min per IP; 20 per email per day.
-- **Detection needs no sync hook and no trigger.** Every 5 min the worker treats "active alert + product now available" as back-in-stock. That covers every stock writer: the sync, the outbox `CANCEL`, and reservation releases.
-- **On detection.** It enqueues the webhook and sets `notified_at` (once).
-- **Accepted gaps.** Availability shorter than one tick is missed. Alerts expire after 90 days.
-
-**Correos de marketing**
-- **Consent.** `ClientAccount.marketing_emails` is `false` for everyone, including existing accounts. Users opt in at `register`/`google` (account creation only) or via `PATCH /auth/me`. `marketing_emails_updated_at` records the time of the last change; every change also goes to the append-only `marketing_consent_events` (see "Orden por defecto, filtro de precio e historial de consentimiento").
-- **Unsubscribe tokens.** `create_unsubscribe_token(scope, sub)` is a no-`exp` JWT on `CLIENT_JWT_SECRET` with `purpose: "unsubscribe"`, so it's rejected as a session. Scopes:
-  - `marketing`: `sub` = client uuid;
-  - `stock-alert`: `sub` = alert uuid.
-- **Unsubscribe route.** `POST /notifications/unsubscribe` takes no session and is idempotent.
-- **`wishlist_price_drop_worker.py` (hourly).** Compares each saved product against `WishlistItem.baseline_price`, which is set on add, follows price rises, and resets after each notice. No sync hook.
-  - Rules: drop ≥ 5 %, price differs from `last_notified_price`, at most one webhook per client per 24 h (`last_price_drop_email_at`), grouped and deduped across lists.
-- **`abandoned_cart_worker.py` (every 30 min).** Covers account carts only, with ≥ 1 item.
-  - Qualifies when: untouched for 2 h, and no order from the account since the last touch.
-  - Frequency: at most once per 7 days, and only if the cart changed after the previous email.
-  - **Gotcha:** `Cart.updated_at` has `onupdate`. `abandoned_notified_at` is written with a core `UPDATE` that sets `updated_at=Cart.updated_at`, so marking doesn't look like a cart change.
-- **`order-payment-pending`** was deliberately not built (the user's decision): the unpaid reservation only lasts 30 min.
-
-### Orden por defecto, filtro de precio e historial de consentimiento (2026-10-13)
-
-These came from the frontend's `frontend_requests.md`. The contract is in `FRONTEND_INTEGRATION.md` ("Funciones nuevas (2026-10-13)") and `ADMIN_INTEGRATION.md` ("Clientes: historial de consentimiento"). Migrations: `a3d9f7c2e5b1`, `b6e2c9a4f1d7`.
-
-**Default order (`sortBy: "relevance"`)**
-- `POST /products`: in stock (`available_stock > 0`) first, then with photo (`image_url` not null/empty), then `sales_count desc, name`. Price/name sorts are unchanged.
-- `/search` (Typesense and the Postgres fallback): text match still rules. Stock and photo break ties after it, below `name_first` and above `sales_count`.
-- **Every sort ends in `Product.id`** (Postgres). `sales_count`/`name`/`price` tie constantly, and without a unique tie-breaker consecutive `offset`s could repeat or skip products. No `sortBy` on `/products` now means `ORDER BY id`, not "no order".
-- Cost: measured on the full local catalog, the new `ORDER BY` costs the same as the old one; the `count(*) OVER()` window already forces a scan of the whole filtered set.
-- **Typesense `_eval` gotcha.** `_eval([(a):3, (b):1])` does **not** sum the weights of the clauses a document matches; it gets one clause's score. This was verified against Typesense 28: a product with stock + photo tied one with stock only. So the old `name_first:3, in_stock:1` never let stock break ties among `name_first` matches. `search_service._tiebreak_eval` lists every combination as its own clause, scored by bitmask, highest first. It's lexicographic whether Typesense takes the first match or the max.
-- Index: `SCHEMA_VERSION` 4 adds `has_image` (bool) and `facet: true` on `price`. The search-dirty trigger now also fires when a product gains or loses its photo (only the crossing, not a URL change).
-
-**Price filter (`minPrice`/`maxPrice`) and `priceRange`**
-- `PriceFilterMixin` (`schemas/products.py`) is shared by `LocalCatalogFilter` and `SearchFilter`. `Decimal`, `ge=0`, inclusive, and `422` if `min > max`. It filters on `price`, never `compare_at_price`.
-- `priceRange` is the min/max of the filtered set **without** the price filter, over `price > 0` only (0.00 is a sync error and unpurchasable). It's `null` for an empty set.
-  - Postgres (`catalog_service._fetch_page`): without a price filter it rides the same `count(*) OVER()` window, at no extra cost. With one, it takes a separate aggregate over the unpriced statement.
-  - Typesense: a second search in the same `multi_search` (same `q`, unpriced `filter_by` + `price:>0`, `per_page: 0`, `facet_by: price`) reads the facet `stats`. Search order is fixed: `[main, price stats, SKU pin]`.
-- The Postgres typo fallback only runs when the unpriced word match is empty. If words match but nothing is in the price range, the answer is 0, not fuzzy matches.
-
-**Marketing consent history (`marketing_consent_events`, `marketing_consent_service.py`)**
-- Append-only legal evidence: a trigger rejects `UPDATE`/`DELETE`/`TRUNCATE`. There's no FK cascade either; the table holds evidence, like `Order`.
-- `record_marketing_consent` is the **only** writer of `ClientAccount.marketing_emails`. It sets the bool, `marketing_emails_updated_at` and the event in one transaction, with the same timestamp, so `marketingConsentAt` (`ClientPublic`) equals the latest `changedAt`. It doesn't commit.
-- When it records:
-  - register: always, even `false`;
-  - Google: only when the account is created;
-  - `PATCH /auth/me`: only on a real change;
-  - unsubscribe (scope `marketing`): only if it was `true`.
-- `source` is fixed per endpoint (`Literal` with a single value, `422` otherwise). Unsubscribe takes `email_unsubscribe`/`one_click_unsubscribe`. `admin` is reserved; no route uses it yet. The migration backfilled one `migrated` event per account that already had `marketing_emails_updated_at`.
-- IP/UA (`ConsentContextDep`) follow the rate-limit trust rule: with a valid `X-Frontend-Auth`, `X-Client-IP` and the new `X-Client-User-Agent`; otherwise the connection IP and the request's own `User-Agent`. An SSR render without a visitor gives a null IP. `rate_limit._is_trusted_frontend` became public (`is_trusted_frontend`) for this.
-- `GET /admin/clients/{uuid}/consents` (any admin) returns the full history. `AdminOrderPublic` gained `clientUuid` (null for guests) so the dashboard can get there from an order.
-
-### Reserva local de stock (`Product.reserved`, `available_stock`) (2026-08-07)
-
-**Confirmed bug, now fixed**: `Product.stock` used to be mutated by two independent,
-uncoordinated writers. Checkout (`routes/orders.py`) decremented it directly the moment an
-order was created (`TO_PAY`) — well before payment or admin acceptance, the only
-reservation mechanism that existed — while `sync_task.py`'s 5-minute catalog sync blindly
-overwrote it from SICAR X's raw `/product/list` value via the upsert's `sicar_fields`
-whitelist. Whichever writer ran most recently won: a sync tick landing between checkout and
-admin acceptance silently reverted the local decrement, reopening the product to be
-oversold — and since SICAR X is never told about an order until an admin accepts a `PAID`
-one (see `sicar_stock_service.apply_order_stock_delta` above), this window was really
-"checkout → whenever an admin gets around to accepting," not just "checkout → next sync
-tick." The team had already hit and fixed this *exact* class of bug once, for a different
-column — `Product.sales_count` is deliberately excluded from `sync_task.py`'s upsert
-whitelist so the periodic sync can't reset it — but `stock` never got the same treatment,
-since unlike `sales_count` it legitimately needs to come from SICAR too (real restocks,
-other channels), so it couldn't simply be excluded outright.
-
-**Fix: split the concerns onto two columns.** `Product.stock` keeps its old meaning (SICAR
-truth) but its writers narrow to just `sync_task.py`'s upsert plus two new local mirrors
-(below) — checkout and cancellation no longer touch it directly. A new `Product.reserved`
-(`Numeric(12,3)`, `CHECK (reserved >= 0)`, migration `380517fdd109`) tracks the sum of
-quantities held by currently-open local orders not yet mirrored into SICAR's real stock —
-never added to `sync_task.py`'s `product_values` dict, so it's automatically excluded from
-the sync whitelist the same way `sales_count` already is. `Product.available_stock` is a
-`hybrid_property` (`max(stock - reserved, 0)` in Python, `GREATEST(stock - reserved, 0)` in
-SQL via `.expression`) — the single definition of "can this actually be sold right now,"
-used everywhere a customer-facing or cart-validation read of stock used to read raw `stock`:
-`order_service.validate_cart_items`, `catalog_service.py`'s three `in_stock` filters
-(`get_local_catalog`/`search_products`/`get_best_selling_products`), `cart_service._enrich`,
-`GET /products/{uuid}`, and `attribute_service.get_variant_group_detail`'s sibling listing.
-A partial expression index (`ix_products_available_stock`, migration `3a208e2812e1`,
-declared on `Product.__table_args__` too so autogenerate won't flag it for removal) backs
-those `in_stock` filters — it has to index `GREATEST(stock - reserved, 0)` verbatim, not
-just `(stock - reserved)`, since Postgres won't recognize the two as equivalent for
-index-matching purposes even though they're algebraically the same for a `> 0` comparison.
-
-**Lifecycle**: (1) checkout reserves — `apply_reserved_deltas` (new in
-`product_stock_service.py`, mirrors `apply_sales_count_deltas`'s batched-executemany shape
-exactly), positive delta, `stock` untouched. (2) cancel/delete before acceptance
-(`prepare_local_cancellation`, `accepted_at is None`) releases the hold — same function,
-negative delta — `stock` untouched, since SICAR was never told about this order. (3) `ACCEPT`
-outbox success (`sicar_sync_worker.py`, same commit as `row.status = "SUCCEEDED"`, right
-after `apply_order_stock_delta(sign=-1)` succeeds) decrements `stock` locally **and**
-releases `reserved` for that order's items — net effect on `available_stock` is zero, but
-`stock` becomes accurate immediately instead of waiting up to 5 minutes for the next sync,
-and the hold correctly stops being held (it's now permanent). (4) `CANCEL` outbox success
-increments `stock` back — no `reserved` change, since it was already released at step 3 (the
-only way a `CANCEL` row gets enqueued is for an order that had `accepted_at is not None`).
-(5) cancel/delete *after* acceptance does nothing to inventory at step 2's function at
-all — restoration is deferred entirely to step 4, a deliberate trade (confirmed with the
-user): a customer/admin cancelling an already-accepted order now sees `available_stock` lag
-behind until the outbox's `CANCEL` row succeeds (normally well under a minute, up to the
-existing ~16-minute backoff ceiling if SICAR X is struggling) instead of the old behavior of
-an instant-but-wrong local restoration that the next sync would silently revert anyway.
-
-Walkthrough confirming this closes the race: `stock=10, reserved=0` → checkout qty 3 →
-`reserved=3` (`available_stock=7`) → 5-min sync lands, SICAR truth still 10 → upsert sets
-`stock=10` (whitelist), `reserved` untouched → still `available_stock=7`, correctly
-unclobbered → admin accepts → worker PATCHes SICAR's *live* stock down to 7, then locally
-`stock=7, reserved=0` → `available_stock=7`, matches SICAR truth exactly.
-
-**Drift alert**: if SICAR's real stock drops for a reason unrelated to this backend (an
-in-store sale) while units are held online, `reserved` can transiently exceed `stock` —
-`available_stock` clamps at 0 for display, but `reserved` still holds more than physically
-exists. `sync_task.py` checks for `products WHERE reserved > stock AND is_deleted=false AND
-is_active=true` after every successful sync pass and, if any match, calls
-`admin_notification_service.notify_admin_stock_drift` — a new outbound webhook
-(`/api/webhooks/product-stock-drift`, same HMAC/no-retry contract as the other two admin
-webhooks, documented in `ADMIN_INTEGRATION.md`) meant for manual reconciliation, not
-auto-resolved by this backend.
-
-**Admin views deliberately show both numbers, customer views show only one.**
-`ProductBasic.stock` (used by `POST /products`, `POST /search`, `GET
-/products/best-sellers` — all customer-facing) is aliased to source from
-`available_stock` while keeping the wire key `"stock"` unchanged, so the frontend contract
-doesn't shift. A separate `ProductAdminBasic` (`schemas/products.py`) is used everywhere a
-product list is admin/PIM-facing — `GET /admin/categories/{uuid}/products`, `GET
-/admin/vehicles/{uuid}/products`, `GET /admin/variant-groups/{uuid}/products`, `GET
-/admin/attributes/{uuid}/products` — and exposes `stock` (raw, physical) *and*
-`availableStock` (net of reservations) side by side, since an admin managing PIM data needs
-the true inventory count, not just what's sellable. (Found and fixed in passing while wiring
-this up: `admin_list_attribute_products` was constructing its response without a required
-`sales_count` field, so `GET /admin/attributes/{uuid}/products` had been crashing with a 500
-on every call — unrelated to this feature, just discovered alongside it.)
-
-### Client accounts — a third, distinct auth scheme
-
-`ClientAccount`/`ClientAddress` (`app/models/client.py`, migrations `ad4e748fca2d` + `d8ca048fb64d` for the later `country` column) back `POST /auth/register` and `POST /auth/login` (`routes/auth.py`, `services/client_service.py`) — purely local accounts for the frontend's own login/registration, **unrelated** to the SICAR X admin/B2B token (there is no per-shopper SICAR X token anymore — see "SICAR X auth" above). `ClientAccount` has a locally-generated `uuid` (public identifier, separate from the auto-increment `id`), unique `email`, optional `phone`, and `hashed_password` (bcrypt, via `app/core/security.py`'s `hash_password`/`verify_password`). `ClientAddress` is a one-to-many saved address book per account (`client_account_id` FK, `ondelete="CASCADE"`).
-
-Both `/auth/register` and `/auth/login` return `{token, client}` — `token` is a JWT signed with `CLIENT_JWT_SECRET` (`HS256`, `sub` = the client's `uuid`, `exp` per `CLIENT_JWT_EXPIRE_MINUTES`), created by `create_client_token`. `/auth/register` auto-logs-in (returns a token immediately, same shape as `/auth/login`) rather than requiring a separate login call after signup. Duplicate email → `409`; wrong credentials → `401`; both still require the standard `x-api-key` header like every other route (this is frontend-to-middleware auth, not a replacement for it).
-
-`email` is lowercased before every write/read in `client_service.py` (`register_client`/`authenticate_client`) — Postgres's `=` and Pydantic's `EmailStr` are both case-sensitive, so without this, `Juan@x.com`/`juan@x.com` would silently register as two different accounts and logins would fail unpredictably based on casing. `authenticate_client` also always runs `verify_password` — against a fixed dummy bcrypt hash (`_DUMMY_HASH`, computed once at import) when the account doesn't exist — so a nonexistent-email response and a wrong-password response take the same amount of time; skipping the bcrypt call for nonexistent accounts would let an attacker enumerate registered emails by response latency. `POST /auth/login` is rate-limited to 5/minute per IP (`slowapi`, `app/core/rate_limit.py`); `PATCH /auth/me` to 10/minute (covers repeated `current_password` guesses too) — both in-memory, per-process, since there's only one `api` instance today; would need a shared backend (e.g. Redis) if that ever changes.
-
-`GET /auth/me` / `PATCH /auth/me` (`routes/auth.py`) are the first routes protected by this token — `app/core/security.py`'s `get_current_client` dependency decodes the `Authorization` JWT (`Bearer` prefix optional), rejects expired/invalid tokens or a deactivated/missing account with `401`, and loads the bare `ClientAccount` (addresses **not** eager-loaded here — see below). `GET` returns the same `ClientPublic` shape as the auth responses — built for a "Mi cuenta" page. `PATCH` (`services/client_service.py`'s `update_client`) supports partial updates to `name`/`phone`; changing `new_password` additionally requires a correct `current_password` in the same request (`401` if it doesn't match) — you cannot change the password on a stolen/stale token alone. Both still require `x-api-key` on top of the client token, same as every route.
-
-`ClientAccount.addresses` deliberately does **not** use `lazy="selectin"` — `get_current_client` runs on every protected route, including `POST`/`PATCH`/`DELETE /auth/me/addresses`, which never touch `client.addresses` at all, so a blanket eager-load would cost every one of those an unneeded extra query. Instead, `Base` mixes in SQLAlchemy's `AsyncAttrs` (`app/core/database.py`), and every code path that actually needs the list (the auth responses, `GET /auth/me`, `GET /auth/me/addresses`) explicitly does `await client.awaitable_attrs.addresses` right before it's needed — this populates the ORM instance's loaded state so a later synchronous access (e.g. during Pydantic's `from_attributes` serialization of `ClientPublic.addresses`) doesn't trigger a lazy load, which would otherwise raise `MissingGreenlet` under the async ORM.
-
-### Google login and email verification
-
-`ClientAccount` gained four columns (migration `7da0e13dcb05`): `auth_provider` (`"local"` | `"google"`, plain string — same "constrain the vocabulary in the application layer, not the DB" pattern as `Order.status`/`deliveryType`), `google_sub` (Google's stable per-account identifier, unique, only populated for `auth_provider="google"`), `is_verified`/`email_verified_at`. `hashed_password` is now nullable — Google-only accounts don't have one. Existing accounts were backfilled as `auth_provider="local"`/`is_verified=true` (transient `server_default`, same pattern `56c152338087` used for `client_addresses.uuid`) rather than left `false` — real paying customers shouldn't be retroactively flagged unverified.
-
-**Verification is soft by design today**: `is_verified` blocks nothing (not login, not checkout) — it's only exposed on `ClientPublic` for the frontend to act on (e.g. a banner). This was a deliberate scope decision, not an oversight; if that changes later, note `POST /auth/resend-verification` currently requires an active session (`CurrentClientDep`), which would need rethinking if login itself ever became blocked for unverified accounts (a user locked out with no session would have no way to reach it).
-
-**`POST /auth/google`** (`google_auth_service.py`, `client_service.get_or_create_google_client`) verifies a Google Identity Services ID token — obtained by the frontend client-side, POSTed to this backend like any other request (still gated by the normal `x-api-key`, since the frontend's own JS makes this call, unlike the Mercado Pago webhook which genuinely can't send it). Deliberately **ID-token verification, not a server-side OAuth redirect** — avoids needing a `GOOGLE_CLIENT_SECRET` or a redirect_uri pointing at this backend entirely; the backend only ever checks a signature, never talks to Google's token endpoint. Verification uses `PyJWKClient` (built into the already-installed `PyJWT`, not the separate `google-auth` package — consistent with this codebase's existing preference for raw/minimal libraries over SDKs everywhere else: raw `bcrypt` not `passlib`, raw `httpx` not an SDK for the Mercado Pago webhook, raw `PyJWT` not `python-jose`). **Gotcha**: `PyJWKClient.fetch_data()` uses blocking `urllib`, not `httpx` — `verify_google_id_token` wraps it in `asyncio.to_thread`, same pattern already used for bcrypt (`app/core/security.py`). Needs the `cryptography` package (added to `requirements.txt`) since PyJWT's RS256 support is gated behind it — this project previously only used JWT's `HS256` (client sessions, symmetric, no extra deps needed).
-
-Account resolution: match by `google_sub` first (existing Google-linked account). If not found, and an account already exists with that email, **reject with `409`** ("log in with your password instead") rather than auto-linking — local registration today doesn't prove email ownership, so auto-linking by email would let an attacker who'd pre-registered someone else's address with a password of their choosing retain access to what the real owner now believes is a Google-secured account. No self-serve "link Google to my existing account" flow exists yet (deliberately deferred, not built) — the only way past the `409` today is logging in with the local password. New Google accounts get `is_verified` from Google's own `email_verified` claim (not assumed unconditionally `true` — Google's docs allow it to be `false` in some Workspace configurations) and skip the verification-email flow when `true`.
-
-**Email verification** (`POST /auth/verify-email`, `POST /auth/resend-verification`) uses a stateless, purpose-scoped JWT rather than a new DB table or a new secret — reuses `CLIENT_JWT_SECRET` (`create_email_verification_token`/`decode_email_verification_token`, `app/core/security.py`) with a `"purpose": "email_verify"` claim, 24h expiry. **Security detail**: without a discriminator, a verification token (valid `sub`+`exp`, same secret) would also work as a session token if intercepted — `_resolve_client_from_token` (session decode, used by every `Authorization`/`X-Client-Token`-gated route) now rejects any token carrying a `purpose` claim at all (a denylist, for backward compatibility with session tokens already issued before this claim existed), while `decode_email_verification_token` requires `purpose == "email_verify"` specifically (an allowlist, since every such token is newly minted — no compatibility constraint to preserve). A dedicated secret was considered and rejected: if `CLIENT_JWT_SECRET` itself ever leaks, an attacker can already forge session tokens directly, which is strictly worse than forging a verification token — a second secret would only add Railway-deploy surface (one more "New required var alert") without closing a real gap.
-
-The actual email send follows the same non-fatal, no-retry, HMAC-signed outbound webhook pattern as order confirmation (`app/services/client_notification_service.py`, mirrors `order_notification_service.py` almost exactly) — `notify_verification_requested`, POSTed to `{FRONTEND_BASE_URL}/api/webhooks/verification-requested`, reusing `FRONTEND_WEBHOOK_SECRET`/`sign_hmac_sha256` (no new secret). Named "verification-**requested**", not "email-verification" — the event is "please send a verification email," not "the email was verified," to avoid confusion with a hypothetical future "verified" event. Fired from `register_client` after commit (local accounts only — Google accounts with `email_verified=true` skip it) and from `resend_verification_email` (`400` if already verified).
-
-### Password reset (`POST /auth/forgot-password`, `POST /auth/reset-password`)
-
-**Deliberately DB-backed and single-use, unlike email verification's stateless JWT.**
-`email_verify` tokens can be safely reused (confirming twice is a no-op), so a stateless
-JWT was enough; a password-reset link is higher-value and must stop working the instant
-it's used or superseded, which a stateless JWT alone can't do without also tracking state
-somewhere — so this reuses no JWT machinery at all. `PasswordResetToken`
-(`app/models/password_reset.py`, migration `d546a205a4be`) stores only `sha256(token)` in
-`token_hash` (unique/indexed) plus `expires_at`/`used_at` — the plain token
-(`secrets.token_urlsafe(32)`, 256 bits of entropy) is never persisted, only emailed once via
-the webhook below. 30-minute TTL (`PASSWORD_RESET_TOKEN_EXPIRE_MINUTES`, `security.py`) —
-deliberately much shorter than email verification's 24h, since this grants account takeover
-if intercepted. `client_service.request_password_reset` marks any prior unused token for
-the same account `used_at` before issuing a new one, so only the most recently requested
-link ever works.
-
-**No enumeration, including of `auth_provider`.** `POST /auth/forgot-password` always
-returns the identical `200` body whether or not the email resolves to an account — same
-principle as `authenticate_client`'s constant-time dummy-hash comparison. A Google-only
-account (`hashed_password IS NULL`) is a special case of this: rather than silently letting
-a "reset" turn a Google account into a hybrid local+Google one (rejected as a design
-option), `request_password_reset` sends **no token** for it, but still fires the
-`password-reset-requested` webhook with `has_password=False` — the "you sign in with
-Google" messaging only ever reaches the actual inbox, never the HTTP response, so the API
-itself never reveals which case occurred.
-
-**Password changes now invalidate other sessions — closes a real pre-existing gap.**
-Before this, `PATCH /auth/me`'s password-change path updated `hashed_password` but left
-every previously issued session JWT valid until its own natural expiry (up to
-`CLIENT_JWT_EXPIRE_MINUTES`, 7 days) — a stolen token survived a password change. Both this
-new flow and `PATCH /auth/me` now set `ClientAccount.password_changed_at`
-(migration `d546a205a4be`); `create_client_token` gained an explicit `iat` claim (PyJWT
-doesn't set one automatically) so `_resolve_client_from_token` — the single decode path
-shared by every session-token-gated route — can reject any token whose `iat` predates the
-account's `password_changed_at`. Tokens issued before this deploy have no `iat` at all;
-they're treated as unconditionally predating any real `password_changed_at`, which only
-matters (and is only correct) once that account has changed its password at least once
-since this shipped.
-
-`POST /auth/reset-password` auto-logs-in on success (same `{token, client, cart}` shape as
-`/auth/login`, via the shared `_build_auth_response`) so the frontend doesn't need a
-separate login call right after a reset — same UX precedent as register's auto-login.
-
-### Address book (`/auth/me/addresses`)
-
-`ClientAddress` is exposed as its own sub-resource (`routes/addresses.py`, `services/address_service.py`) rather than folded into `PATCH /auth/me` — a one-to-many collection needs per-item add/edit/remove, which a single-resource PATCH would force into error-prone client-side diffing (send the whole array, backend guesses what changed). All four routes sit under `/auth/me/addresses`, gated by the same `get_current_client` + `x-api-key` pair as `/auth/me`, and every lookup/update/delete scopes by `client_account_id == current client` — an address `uuid` belonging to a different client resolves as a plain `404`, not `403` (doesn't confirm the row exists at all).
-
-- `GET /auth/me/addresses` — list.
-- `POST /auth/me/addresses` — create (`ClientAddressCreate`; `street` required, everything else optional).
-- `PATCH /auth/me/addresses/{uuid}` — partial update (`ClientAddressUpdate`, all fields optional).
-- `DELETE /auth/me/addresses/{uuid}` — `204` on success.
-
-`ClientAddress.uuid` (migration `56c152338087`) is the public identifier for these routes — added for the same reason every other externally-referenced row in this codebase uses a `uuid` instead of the raw auto-increment `id` (`Product.sicar_uuid`, `ClientAccount.uuid`). "At most one default address per client" is enforced at the DB level with a partial unique index (`ix_client_addresses_one_default`, `UNIQUE (client_account_id) WHERE is_default = true`) rather than only in application code — `address_service.py`'s `_clear_existing_default` unsets any prior default in a separate `UPDATE` *before* the insert/update that sets the new one, so the constraint is never transiently violated; the index is declared directly on the `ClientAddress` model (unlike the `pg_trgm` indexes) so autogenerate won't flag it as a false-positive removal on the next migration.
-
-Deliberately not built yet: no auto-default-on-first-address behavior (the client must explicitly pass `is_default: true`), no email-change flow (changing the login identifier isn't supported by `/auth/me` — would need its own verification flow). `/orders` **does** let a client pick a saved address for `deliveryInfo` now — `deliveryType: "DELIVERYMAN"` references one by `addressUuid` (see "Request flow: placing an order" above); `PICKUP` still doesn't need one. Google login and email verification are now built — see "Google login and email verification" below (`hashed_password` is nullable and `ClientAccount` has a provider marker, as anticipated here previously).
-
-`ClientAddress` also carries optional `latitude`/`longitude` (migration `bda8078263da`) and `zip_code` gets a lightweight `^\d{5}$` format check in `ClientAddressCreate`/`Update` (`schemas/client.py`). Neither is backed by a server-side integration — **this backend never geocodes or validates postal codes against any external provider**. The frontend's address form resolves zip → state/city/colonias/coordinates itself by calling `envia.com`'s Geocodes API directly (`GET https://geocodes.envia.com/zipcode/{country}/{zipcode}`, `GET https://geocodes.envia.com/locate/{country}/{city}`) — confirmed live to need no API key and to allow CORS from an arbitrary `Origin`, so there's nothing for this API to proxy or protect. `latitude`/`longitude` here just persist whatever coordinates the frontend already resolved, same as any other address field.
-
-Note there's no backend-served county/municipio catalog for a manual "pick a state, then pick a county" flow — envia.com's Geocodes API only does zip/city lookups, not "list all municipios in a state." An earlier pass at this (a Sepomex-based zip proxy plus a bundled INEGI states/municipios JSON file) was built, verified, and then deliberately removed in favor of the envia.com-based approach — if a manual state→county dropdown is needed later, it'll need its own data source, since neither this backend nor envia.com currently serves one.
-
-### Client accounts linked to orders (`/auth/me/orders`)
-
-Orders are tied to `ClientAccount` when the customer is logged in. **Login used to be strictly required to place an order** — that restriction was lifted by guest checkout (see below), so treat this section as describing the account path specifically; a `ClientAccount`-less order is a first-class, supported case now, not an error state. This required solving a real conflict, at the time login became required: `POST /orders` already used the `Authorization` header for the SICAR X customer-session token (needed then to actually talk to SICAR X's cart/order APIs), so there was no header left for the local client-account JWT. Resolution: a **new header, `X-Client-Token`**, carries the client-account JWT on `/orders` and `/cancel`. `X-Client-Token` is decoded by the `get_current_client_header` dependency (`app/core/security.py`) — same JWT/`CLIENT_JWT_SECRET` verification as `get_current_client`, refactored into a shared `_resolve_client_from_token` helper. It was required (not optional) on `/orders`/`/cancel` until guest checkout below, which switched both (plus `DELETE`) to `OptionalClientHeaderDep` — a missing token no longer 401s by itself, it routes to the guest path instead; an invalid/expired one still does. `X-Client-Token` was also added to `main.py`'s CORS `allow_headers` — easy to forget and would otherwise silently fail preflight from a browser frontend. (The SICAR X customer-session token that originally forced this header split has since been deleted entirely — see "SICAR X auth" above — so `Authorization` is now free/unused on `/orders`/`/cancel`; `X-Client-Token` was kept as-is rather than moved back to `Authorization`, to avoid stacking two breaking frontend changes into one.)
-
-`Order`/nothing-else (`app/models/order.py`, migrations `45f23f03f9ce` + `9838c19e3da0`, later `a1c9f26db47e` for guest checkout) is the **only local record of an order that exists anywhere** — SICAR X itself exposes no endpoint to list a customer's past orders, so this table is now the sole source for order history, not a cache of something queryable elsewhere. `client_account_id` is now a **nullable** FK — a `NULL` here means a guest order, identified instead by `guest_email` (see "Guest checkout" below); a `CHECK` constraint (`ck_orders_has_identity`) still guarantees one of the two is always populated. Deliberately **without** `ondelete=CASCADE` (unlike `ClientAddress`) since an order is a financial record that shouldn't vanish if account deletion is ever added later (no such feature exists today). `delivery_info`/`items` are snapshotted from `build_order_payload`'s output at creation time as plain `JSON` (not `JSONB`) — nothing queries inside them, same reasoning as `Product.additional_skus`/`additional_images`. `create_local_order` adds an `imageUrl` per line (`Product.image_url`, looked up from the same `local_products` dict already loaded in `routes/orders.py` for `build_order_payload`, keyed by `sicar_uuid`) onto a copy of `ecOrderDto["products"]` before storing — `build_order_payload`'s own return value never carries this field (added purely for local storage, no external document exists anymore for it to diverge from). Added so the frontend can show a product image per line in order history and in the `order-confirmed` webhook email. Older orders (created before this) have no `imageUrl` on their `items`. `create_local_order` (`services/order_history_service.py`) is called from `POST /orders` right after local stock deltas are applied; `OrderResponse` gained a new `orderUuid` field (the local `Order.uuid`) so the frontend can jump straight to `GET /auth/me/orders/{orderUuid}` after checkout without a separate list-and-match step (or, for a guest, `GET /orders/guest/{orderUuid}` — see below).
-
-`POST /cancel` enforces **ownership**: for an account, `get_owned_order_by_sicar_id` looks up the local `Order` by `sicar_order_id` scoped to the caller's `client_account_id` *before* calling SICAR X at all, returning `404` (not `403`, same "don't confirm it exists" pattern as `address_service`) if the order doesn't belong to the caller. On successful cancellation the local `order.status` is set to `"CANCELLED"` alongside the existing stock-restore logic. (For a guest, ownership is proven differently — see "Guest checkout" below.)
-
-`GET /auth/me/orders` (list, paginated like `/catalog`) and `GET /auth/me/orders/{order_uuid}` (detail) live in `app/api/routes/client_orders.py`, mirroring `addresses.py`'s router-per-subresource pattern — both gated by the standard `get_current_client` + `x-api-key`. Both are **Postgres-only** — `client_orders.py`'s own docstring is explicit that there's no live SICAR X call here at all; the dashboard admin is the sole source of truth for `dispatch_status` (see the correction note right below).
-
-**Correction (2026-08-31, found while auditing an unrelated bug)**: the two paragraphs
-that used to sit here described a live SICAR X GraphQL lazy-refresh of
-`dispatch_status`/`dispatch_history` (`fetch_document_dispatch_status`,
-`TERMINAL_DISPATCH_STATUSES`, `refresh_order_status_if_needed`, all in a `cancel_service.py`
-module) plus a live `PUT .../external/v1/dispatch` call to advance it
-(`cancel_service.advance_dispatch_status`). None of that exists anymore — confirmed via
-grep, zero matches for any of those identifiers or that module anywhere in `app/`, and
-directly contradicted by `admin_service.accept_order`'s own current docstring/code.
-**What actually happens today**: `dispatch_status` is a purely local, admin-driven field.
-`admin_service.accept_order` sets it to `"PENDING"` **locally, immediately** (no SICAR X
-call in that step at all) while enqueueing a `SicarSyncOutbox(action="ACCEPT")` row whose
-only job is telling SICAR X about the **inventory** delta
-(`sicar_stock_service.apply_order_stock_delta`, see `sicar_sync_worker.py`'s
-`_process_claimed_row`) — SICAR X is never told about the order, its document, or its
-dispatch status at all. Every later transition (`PENDING`→`PREPARING`→`COMPLETE`→`DISPATCHED`)
-is driven by `admin_service.advance_order_dispatch_status`
-(`POST /admin/orders/{uuid}/advance-status`), a local state-machine check
-(`_LEGAL_DISPATCH_TRANSITIONS`) with no external call either. The
-`PENDING_ACCEPTANCE`→`PENDING`→`PREPARING`→`COMPLETE`→`DISPATCHED` vocabulary itself is
-still accurate (genuinely confirmed live against SICAR X's admin panel at the time) — it's
-just no longer synced live in either direction.
-
-### Guest checkout (2026-08-11)
-
-`POST /orders` accepts requests with **no** `X-Client-Token` — the dependency was switched from `CurrentClientHeaderDep` to `OptionalClientHeaderDep` (`client: ClientAccount | None`), the same pattern `Cart` already used for anonymous shoppers. This sits alongside the account path from the section above, not in place of it — an authenticated request behaves exactly as before. The business wanted to let customers buy without registering, but still recover their order history if they create an account later with the same email.
-
-**What a guest sends instead of a token**: `deliveryInfo.contactInfo.email` becomes **required** (it's the guest's only identity — `ContactInfo.email` is still `Optional` at the schema level, since the schema can't see auth state; `routes/orders.py` enforces it with a `400` when `client is None`), lowercased and stored on the new `Order.guest_email` column (indexed). `deliveryInfo.addressUuid` is rejected for a guest (`400` — there's no address book without an account); for `DELIVERYMAN`, a guest sends a full inline address instead via the new `deliveryInfo.address` field (`GuestDeliveryAddress`, `app/schemas/orders.py` — deliberately defined there rather than in `schemas/client.py`, alongside `ClientAddressBase`, to avoid a circular import: `schemas/client.py` → `schemas/cart.py` → `schemas/orders.py` already exists). `DeliveryInfo`'s validator now requires **exactly one** of `addressUuid`/`address` for `DELIVERYMAN` — which one is *legal* for a given caller (account vs. guest) is a route-level check, not a schema one, same reasoning as the email requirement. The resulting `delivery_address_snapshot` is built to the exact same `ClientAddressPublic` shape the account path already produces (just with `uuid: None`, since there's no real address-book row) — `shipping_service`/`admin_service` needed zero changes to keep reading it. Guests **cannot** apply coupons (`couponCode` → `400`) — `coupon_service`'s per-client limits (`first_purchase_only`, `max_uses_per_client`) have no account identity to key off for a guest, so allowing it would make those caps unenforceable.
-
-**Proving ownership without a session** (`POST /orders/{id}/pay`, `/cancel`, `DELETE /orders/{id}`, and the new `GET /orders/guest/{id}`): a guest instead proves ownership by possessing the order's own identifier — **either** `id` (`sicar_order_id`) or `orderUuid` (`Order.uuid`), both already returned once at checkout, both high-entropy. `order_history_service.get_order_for_action(db, client, order_id)` is the single resolver all four routes now call: with a `client`, it's the unchanged `get_owned_order_by_sicar_id`; with `client=None`, it matches `Order.sicar_order_id == order_id OR Order.uuid == order_id`, scoped to `client_account_id IS NULL`, `404` (not confirming existence) otherwise. This deliberately lets the frontend reuse the exact same `id` field/code path for `/pay`/`/cancel` regardless of login state, rather than needing to send a different field for guests.
-
-**Retroactive linking, gated on verified email** (`client_service.link_guest_orders_by_email`): whenever a `ClientAccount.is_verified` flips to `True` — from the `/auth/verify-email` click (`verify_client_email`) or from `get_or_create_google_client`'s new-account branch when Google's `email_verified` claim is already `True` — every guest order (`client_account_id IS NULL`) whose `guest_email` matches that account's email gets linked (`client_account_id` set, `guest_email` cleared) in the **same transaction** as the verification commit. Deliberately **never** triggered by a plain unverified registration or login — registration alone doesn't prove ownership of the email address, so linking on it would let someone claim another person's guest order history (address, phone, past purchases) by registering with their email before they do. A linked order immediately stops being reachable via the guest path (`get_order_for_action`'s `client_account_id IS NULL` filter no longer matches) and starts showing up in `GET /auth/me/orders` instead — this is the intended behavior, documented in the guest routes' docstrings, not a bug to "fix" if reported.
-
-**Idempotency for guests**: `OrderIdempotencyKey.client_account_id` is also now nullable (with a new `guest_email` column). The existing composite unique constraint on `(client_account_id, idempotency_key)` can't detect collisions between two guest requests, since Postgres treats `NULL != NULL` in a unique index — a separate partial unique index, `ux_order_idempotency_guest_key ON (guest_email, idempotency_key) WHERE client_account_id IS NULL`, covers that case instead. `claim_idempotency_key` branches its re-select query on whether `client_account_id` is set.
-
-**Everywhere else that assumed an account exists** needed a guest fallback: `order_notification_service.notify_order_confirmed`, `order_cancellation_notification_service`, and `admin_service._to_admin_order_public` all previously did `client_account.name if client_account else None` for the outbound webhook/admin `clientName` — factored into one shared `order_display_service.resolve_client_name(order, client_account)` (its own small module, not `order_history_service.py`, which already imports both notification services at module level — putting it there would create a circular import) that falls back to `delivery_info["contactInfo"]["name"]` for a guest order. `ClientAddressPublic.uuid` is now `Optional[str] = None` (a guest's synthetic snapshot has no real address-book row) — `GET /admin/orders` would otherwise 500 on any guest `DELIVERYMAN` order. `AdminOrderPublic` gained `isGuest`/`guestEmail` fields so the admin dashboard can tell guest orders apart from account ones.
-
-Migration: `a1c9f26db47e_add_guest_checkout_support`.
-
-### Cart (`/v1/cart*`)
-
-A server-side cart (`Cart`, `app/models/cart.py`) backs both anonymous and logged-in shoppers, replacing whatever cart state used to live only in the frontend. `Cart.items` is `[{"uuid", "quantity"}, ...]` only — **never a price/name snapshot**; every read (`cart_service._enrich`) re-joins against the live local `Product` cache, so a price change or a product going `is_deleted`/inactive between adding-to-cart and checkout is reflected immediately (an unavailable line comes back with `available: false` and no price, rather than a stale one).
-
-Identity resolution (`routes/cart.py`'s `get_cart_context`, used by every route except `/merge`) prioritizes an authenticated account: if `X-Client-Token` resolves (via the same `OptionalClientHeaderDep` used elsewhere — invalid-but-present still 401s, only *absent* falls through), the cart is looked up by `Cart.client_account_id`; otherwise it falls back to the anonymous `charly_cart_token` httpOnly cookie (`app/core/cookies.py`, `SameSite=None; Secure` in production since frontend/API are cross-site, `Lax; not Secure` in development for plain `http://localhost`, scoped to path `/v1/cart` only, ~1-year max-age since carts don't auto-expire by design). `Cart.client_account_id` is nullable **and** unique — Postgres allows multiple `NULL`s under a unique constraint, so this enforces "at most one cart per account" while still allowing arbitrarily many anonymous carts.
-
-- `GET /v1/cart` — read-only, never creates a row; no resolved cart returns an empty `CartResponse`.
-- `PUT /v1/cart` — replaces the entire item list. If anonymous and no cart resolves (missing/unrecognized cookie), silently mints a new one and sets the cookie on the response — same silent-mint behavior as `PATCH /items`.
-- `PATCH /v1/cart/items` — adjusts one line by `delta` (positive adds/increments, negative decrements) without needing the full item list like `PUT`; a resulting quantity ≤ 0 removes the line. No cart + `delta <= 0`, or missing product + `delta <= 0`, is a no-op `200` (same "absence isn't an error" idiom as `GET`/`DELETE`), not an error.
-- `DELETE /v1/cart` — deletes the resolved cart row outright (not a soft-delete) and clears the cookie; no-op if nothing resolves.
-- `POST /v1/cart/merge` — requires `Authorization` (`CurrentClientDep`, same header/dependency as `/auth/me`), takes an explicit `cartToken` in the body, and **404s** if it doesn't resolve to a real anonymous cart — unlike the silent-mint routes above, a caller here already has a real token in hand, so silently succeeding on a bad one would mask a real bug.
-- The merge itself (`cart_service._reparent_or_merge`, shared by `/cart/merge` and the tolerant path below) either reparents the anonymous cart onto the account directly (account had no cart yet) or sums quantities line-by-line into the account's existing cart and deletes the now-consumed anonymous row.
-
-**Login/register also merge a cart inline**, via a second, tolerant entry point (`try_merge_cart_token`, not the strict `/merge` route): `POST /auth/register`, `/auth/login`, and `/auth/google` all accept an optional `cartToken` in the request body and merge it into the newly authenticated account within the same call (`routes/auth.py`'s shared `_build_auth_response`), returning the resulting cart inline in `ClientAuthResponse` so the frontend doesn't need a separate `GET /cart` just to hydrate its UI post-login. Unlike `/cart/merge`, an absent or already-stale `cartToken` here is **silently ignored** (just logged) rather than a `404` — the frontend can't know whether a locally-stored token is still valid, and login/registration shouldn't become fragile over stale cart state.
-
-### Wishlist / favoritos (`app/models/wishlist.py`, `app/services/wishlist_service.py`) (2026-08-19)
-
-Account-only (no anonymous/guest wishlist, unlike Cart) — a saved-for-later product list only
-makes sense as something that persists across visits/devices, which requires an account
-anyway; matches `ClientAddress`/`ProductReview`'s pattern (`CurrentClientDep`), not Cart's
-anonymous-cookie-plus-merge complexity. `WishlistCollection`/`WishlistItem` are one unified
-mechanism, not two parallel features: every client has exactly one collection flagged
-`is_default=true` (named "Favoritos"), enforced unique at the DB level via a partial unique
-index (`ix_wishlist_collections_one_default`, same pattern as `ix_client_addresses_one_default`)
-— this is the fixed target of the heart-icon shortcut routes below — plus any number of
-additional named collections the client creates explicitly. `WishlistItem` is a pure toggle
-table (no own `uuid`, addressed via `collection_id` + `product_id`, same shape as
-`ReviewHelpfulVote`) with `UniqueConstraint(collection_id, product_id)` — the same product can
-be saved in several different collections of the same client, just not twice in the same one.
-`product_id` FKs to `Product.id` with no `ondelete` (same reasoning as `ProductReview.product_id`
-— products are never hard-deleted, only `is_deleted=True` flagged, so no cascade is needed).
-
-The default collection is created **lazily**, on the first `PUT /wishlist/favorites/{uuid}` —
-same silent-mint-on-first-use idiom as Cart's anonymous cart — not eagerly on registration.
-`GET /wishlist/favorites` never creates it (same "a GET never creates a row" idiom as
-`GET /cart`) — no default collection yet just returns an empty list.
-
-`wishlist_service.list_items` mirrors `cart_service._enrich`'s live-enrichment philosophy:
-a saved product going `is_deleted`/inactive doesn't delete the `WishlistItem` row (the client
-explicitly chose to save it), the response just marks that line `available: false` with no
-`product` detail, same as an unavailable cart line. `add_item`/`remove_item` are both
-idempotent (`INSERT ... ON CONFLICT DO NOTHING` / delete-if-exists) — saving an already-saved
-product, or removing an already-absent one, is a `200`/`204` no-op, never an error, same
-"absence isn't an error" idiom used throughout Cart/coupons.
-
-Deliberately out of scope for this pass (v1 is pure save/organize/remove): no back-in-stock
-or price-drop notifications tied to wishlisted products — a legitimately separate feature this
-schema doesn't preclude adding later; no "is this product favorited" per-product check route —
-the frontend fetches the (bounded, cheap) favorites list once and checks client-side, same
-reasoning `GET /v1/vehicles/{uuid}` was never built; no combined "move to cart" action — the
-frontend already has `PATCH /cart/items` + `DELETE .../items/{productUuid}` to do this itself
-with two existing calls.
-
-Endpoints (all under `/v1/wishlist`, `client account (Authorization, required — CurrentClientDep,
-not X-Client-Token)`, `x-api-key` like every non-admin route): `GET/POST /collections`, `PATCH/DELETE
-/collections/{uuid}` (`404` if not owned by the caller; `DELETE` is `409` on the default
-collection — it can't be removed), `GET/POST /collections/{uuid}/items`, `DELETE
-/collections/{uuid}/items/{productUuid}`, plus the heart-icon shortcuts `GET /favorites`,
-`PUT /favorites/{productUuid}`, `DELETE /favorites/{productUuid}` — thin wrappers that resolve
-(or lazily create, for `PUT`) the default collection and delegate to the exact same service
-functions as the named-collection routes, no duplicated logic.
-
-### Cupones de descuento (`app/models/coupon.py`, `app/services/coupon_service.py`) (2026-08-10)
-
-`Coupon` supports three discount shapes (`discount_type`: `PERCENTAGE` with an optional `max_discount_amount` cap, or `FIXED_AMOUNT`) applied over one of three scopes (`scope_type`: `ORDER` — the whole cart, `CATEGORY` — only lines whose product is under one of `coupon_categories`' assigned categories (descendant-inclusive, via the same `taxonomy_service.get_descendant_uuids` CTE `/catalog`'s `taxonomyUuid` filter already uses), or `PRODUCT` — only lines in `coupon_products`), plus four independent usage-limit mechanisms (`max_total_uses`, `max_uses_per_client`, `first_purchase_only`, and `coupon_assigned_clients` — a non-empty eligibility list makes an otherwise-public code client-restricted), a validity window (`starts_at`/`ends_at`), and `min_order_amount`. Admin CRUD lives at `/v1/admin/coupons/*` (`app/api/routes/admin_coupons.py`), same shape as categories/vehicles — `PUT .../categories`/`.../products`/`.../clients` each replace their full assigned set, not incremental.
-
-**Two-tier application, same "never trust the client's number" principle as price/stock elsewhere**: `Cart.coupon_code` (nullable) is a pure preview — `POST`/`DELETE /v1/cart/coupon` set/clear it, and `cart_service.get_cart_response` recomputes `discountAmount`/`total` live on every `GET /v1/cart` (mirrors how price/stock are already re-derived fresh on every read, never cached). This preview does **not** reserve anything — no `CouponRedemption` row is created here. The real, authoritative validation+lock happens only in `POST /orders`: the frontend resends the same code as `couponCode` in the request body (since `POST /orders` never reads `Cart` at all — see "Request flow: placing an order" above, the frontend already resends `products`/`deliveryInfo` independently of the cart row for the same reason), and `order_service.build_order_payload` gains a `discount_amount` param, subtracting it from the accumulated line total once at the end (never redistributed per-line — each line's `amountTax` stays undiscounted; the discount lives only at `ecOrderDto.total`/`discountAmount`/`subtotal`).
-
-**Concurrency**: `max_total_uses`/`max_uses_per_client` are `COUNT(*)`-based caps, not expressible via a unique constraint (unlike `OrderIdempotencyKey`'s claim-then-fill pattern). `coupon_service.lock_and_validate_coupon` takes `SELECT ... FOR UPDATE` on the `Coupon` row itself before counting existing `PENDING`+`CONFIRMED` `CouponRedemption` rows and validating — the lock is held for the rest of `create_order`'s transaction (single commit, same shape as everywhere else in that route), making the count-check and the subsequent `CouponRedemption` insert (`create_redemption`, called right after `create_local_order` so `order.id` exists) atomic together. This only serializes concurrent claims of the *same code* during checkout, not a hot path like `Product.reserved`.
-
-**Redemption lifecycle, deliberately asymmetric with the `Product.reserved` pattern above**: `CouponRedemption.status` is `PENDING` (set at order creation, alongside the stock reservation) → `CONFIRMED` (set in `finalize_order_payment`'s `became_paid` branch, i.e. the real `TO_PAY`→`PAID` transition only, never a webhook retry — same guard `apply_sales_count_deltas` already uses) or `RELEASED` (set in `prepare_local_cancellation`, called from all three cancellation trigger points, unconditionally — but only actually mutates a still-`PENDING` row). **Anti-abuse policy, confirmed with the user**: once `CONFIRMED`, a redemption is never released back, even if the order is later cancelled/refunded — unlike `Product.reserved`/`stock`, which *do* get restored on a post-acceptance cancel (via the outbox's `CANCEL` success handler). The asymmetry is deliberate: inventory restoration reflects physical reality (the item is back on the shelf), while a coupon "give-back" on refund would let a customer cycle apply→pay→cancel→reapply for effectively unlimited uses of a capped code. `release_redemption`/`confirm_redemption` both key off the redemption's own `status`, not the order's `status`, so they're safe to call unconditionally from the shared cancellation/payment-finalization paths without needing to duplicate the "was this order ever accepted" branching `Product.reserved`'s release logic has.
-
-### Payments with Mercado Pago (Checkout Bricks)
-
-`POST /orders` used to pay the SICAR order immediately with a hardcoded `CASH` paymentId via the admin token — no real payment processor was ever involved, it was internal SICAR bookkeeping only. A real Mercado Pago charge now sits between order creation and that bookkeeping step. This repo is backend-only — the Payment Brick UI itself is built in the separate Next.js frontend; this API only exposes the contract it needs (documented in `FRONTEND_INTEGRATION.md`).
-
-Two backend calls are unavoidable, not a design choice: the Brick needs the `amount` *before* it can render — i.e. before the card is tokenized client-side, which only happens in the Brick's own `onSubmit` *after* render.
-
-1. `POST /orders` — validates the cart locally (no SICAR X call, see "Request flow: placing an order" above), reserves stock in Postgres, persists the local `Order` as `status="TO_PAY"`. Returns `id`/`orderUuid` plus `amount`.
-2. Frontend renders the Payment Brick with `initialization.amount` (card, debit card and OXXO; no Wallet).
-   - **Card / OXXO submit** (the Brick's `onSubmit` fires client-side, synchronous MP response) → frontend calls **`POST /orders/{order_id}/pay`** with the Brick's `formData` (`token`, `paymentMethodId`, `issuerId`, `installments`, `payer`) — mirrors `/cancel`'s ownership pattern (`get_order_for_action`, `X-Client-Token` optional since guest checkout, `404` if not owned/found). `409` if the order isn't still `TO_PAY` (already paid/cancelled — blocks double-charge). `payment_service.create_payment` charges via Mercado Pago's `POST /v1/orders` (see the Orders API notes below); **the amount always comes from `order.total` already in Postgres, never from the request body** — same "don't trust the client's price" principle `build_order_payload` already applies elsewhere. The `X-Idempotency-Key` is a hash of `order.uuid` + the payload, so a retried submit dedupes on Mercado Pago's side instead of double-charging.
-
-**Orders API only (2026-10-25)**: charges, lookups, refunds and cancellations all go through Mercado Pago's Orders API (`POST /v1/orders`, ids `ORD...`/`ORDTST...`), not the Payments API. Test credentials of apps created in MP's new panel are `APP_USR-` credentials of an auto-created test seller, and `POST /v1/payments` rejects them with `401 "Unauthorized use of live credentials"` (code 7) while `/v1/orders` accepts them (verified side by side). `payment_service` is an adapter: `_order_as_payment` translates every Orders response into the old Payments shape (status mapping from MP's official migration guide: `processed`→`approved`, `action_required`→`pending`, `failed`→`rejected`, `canceled`→`cancelled`, `charged_back`+`in_process`→`in_mediation`), so `finalize_order_payment`, the cancel routes and the admin are unchanged. Everything left of the Payments API was removed the same day (the old app only ever had test orders): `get_payment`/`refund_payment`/`cancel_payment` answer `409` for a non-`ORD` id (`_require_mp_order_id`), and the webhook ignores any notification whose id isn't `ORD...`. Wallet (Checkout Pro preference), `Order.mp_preference_id` (migration `d8e3a1f6b2c4`), `API_BASE_URL` and the frontend's Status Screen Brick and `/checkout/success|failure|pending` pages are gone. Gotchas verified against the sandbox:
-- A declined card is HTTP **402** with the order in `data` (`status: failed`); `create_payment` returns it as a normal `rejected` result instead of raising.
-- `refunds[]` also lists failed attempts (`status: failed`), so the refunded amount comes from the transaction's `refunded_amount`, or the sum of `processed` refunds; summing the raw list gave $250 refunded on a $150 order.
-- A refund right after another one gets `409 post_processing_operation_pending` for a few seconds; `_refund_mp_order` retries with the same idempotency key.
-- A partial refund needs the transaction id (`PAY...`), read from the order; a full refund sends no `transactions`.
-- `/cancel` only works on `created`/`action_required` orders (e.g. an unpaid OXXO ticket).
-- No `notification_url` in the body: webhooks are configured on the app (topics `order` and `topic_chargebacks_wh`). Order notifications arrive as `type=order` with `data.id=ORD...`; a chargeback also arrives as an order notification (`order.charged_back`), so the standalone Chargebacks payload (numeric `case_id`) is ignored.
-- `payment_method.type` is required: the frontend sends the Brick's `selectedPaymentMethod` as `paymentTypeId`; otherwise it's inferred from `/v1/payment_methods` (cached 1 h).
-- The Status Screen Brick only takes numeric payment ids, so the frontend shows its own `OrderResultPanel`, and `mpStatusDetail` uses the Orders codes (`rejected_by_issuer`, ...).
-- Chargeback detail: the order lists its cases in `transactions.chargebacks[]` (`_order_as_payment` exposes `chargeback_case_ids`); the webhook fetches `GET /v1/chargebacks/{case_id}` for each and `chargeback_service.process_chargeback` records it against that order. The old lookup by `payments[0]` matched numeric Payments ids and was removed.
-Tests: `tests/test_mp_orders_api.py`.
-
-Both paths funnel into the same `order_history_service.finalize_order_payment(db, order, mp_payment)` — the one place that maps a Mercado Pago payment status onto local order state (never duplicate this branching). Note this predates and is unrelated to the checkout-session removal above — SICAR X isn't told about any order here either way, only later, if/when an admin accepts a `PAID` order (see "SICAR es solo ERP de inventario" below):
-- `approved` → local `status = "PAID"`. Nothing is sent to SICAR X at this point — that only happens asynchronously once an admin accepts the order.
-- `pending`/`in_process` (OXXO ticket awaiting cash payment, card under review) → local `status` stays `"TO_PAY"`. `mp_ticket_url` (from `transaction_details.external_resource_url`) is stored so an OXXO barcode link can be surfaced later.
-- `rejected`/`cancelled` → calls `prepare_local_cancellation` (`order_history_service.py`, see "Local-first order cancellation" below) to release the reserved stock, built from `order.items` already on the row (the caller doesn't need to resend the cart, unlike the manual `/orders/{id}/cancel` endpoint) → local `status = "CANCELLED"`.
-
-On the actual `TO_PAY`→`PAID` transition (not on a webhook retry for an order already `PAID`), `finalize_order_payment` also notifies the frontend via `order_notification_service.notify_order_confirmed` — an outgoing, HMAC-signed webhook POSTed to `{FRONTEND_BASE_URL}/api/webhooks/order-confirmed`, plain `httpx`, no SDK. The frontend receives it and sends the actual confirmation email itself (its own `react-email` template, its own Resend account) — this backend does not call Resend directly. This split exists because of two separate constraints that don't go away just by moving the send: the *trigger* must stay server-to-server (`finalize_order_payment` is the only point where both payment paths — card/OXXO synchronous `/pay`, and late OXXO/card confirmations via the Mercado Pago webhook — converge; anything driven by the customer's browser, including polling, would silently miss delayed confirmations, since there may be no browser tab open at all when those resolve), while the *template* is better owned once, by the frontend, instead of hand-duplicated in Python. An earlier version of this integration had the backend call Resend directly with a hand-ported copy of the frontend's HTML template — replaced by this webhook once that duplication became a real maintenance problem.
-
-The webhook payload reuses `OrderPublic` (`app/schemas/orders.py`, `model_validate(order).model_dump(by_alias=True, mode="json")`) — the same shape already returned by `GET /auth/me/orders/{orderUuid}` — plus two fields the frontend needs but `OrderPublic` doesn't carry, `clientEmail`/`clientName`. `clientName` is always `order.awaitable_attrs.client_account.name`. `clientEmail` prefers `order.delivery_info["contactInfo"]["email"]` (the checkout's own contact email, which the frontend now collects and validates as required — the one place a customer can supply a corrected/different receipt address at order time), falling back to `client_account.email` only when the order was created without a contact email (older orders, or any other caller of `POST /orders` that omits it) — this guarantees `clientEmail` is never empty, matching `order_notification_service.notify_order_confirmed`'s early-return guard. **Incident (2026-07-25)**: this previously always used `client_account.email` and never `deliveryInfo.contactInfo.email` — changed after the frontend team made the checkout's contact email a required, validated field (previously it was optional/hand-typed and could be stale, which is why the account email was preferred back then). Signed with `X-Webhook-Timestamp`/`X-Webhook-Signature` (`HMAC-SHA256(FRONTEND_WEBHOOK_SECRET, f"{ts}." + raw_json_body)`, hex digest) — see `FRONTEND_INTEGRATION.md` for the full contract the frontend must implement to verify it. Non-fatal by design: a failed call is logged and swallowed, never raised — must not block or roll back a payment already recorded. There is **no retry** if this fails (no outbox/retry infra exists in this codebase) — a missed webhook means a silently lost confirmation email, an accepted gap for now.
-
-`Order.status` vocabulary is now `{TO_PAY, PAID, CANCELLED}` (was `{PAID, CANCELLED}`) — `TO_PAY` is the default and mirrors SICAR X's own native document-status vocabulary (`ACTIVE`/`TO_PAY`/...). (This used to also reference `cancel_service.py`, which no longer exists — see the correction note under "Client accounts linked to orders" above.)
-
-**`POST /payments/webhook`** (`app/api/routes/payments.py`) is the only router in this codebase **without** `Depends(validate_api_key)` — Mercado Pago's servers can't send our static `x-api-key`. Authenticity instead comes entirely from `payment_service.verify_webhook_signature` (HMAC-SHA256 over a manifest string keyed by `MP_WEBHOOK_SECRET`, checked against the `x-signature`/`x-request-id` headers) — rejects before doing anything else if it fails. **Caveat**: the exact manifest format is no longer published verbatim on Mercado Pago's current docs (they push the official SDK instead, which is synchronous and therefore not used here — every other external integration in this codebase, SICAR X included, uses plain `httpx` for the same non-blocking-event-loop reason). The format is `id:{data.id};request-id:{x-request-id};ts:{ts};`. **Verified 2026-10-27 with the panel's simulator (app `1795540605864554`, test mode):** MP signs `data.id` exactly as it arrives (`Prueba`), not lowercased as its own guide says, so `verify_mercadopago_webhook_signature` accepts both. The key is the one under Webhooks → **Modo de prueba** of that app. A real (non-simulated) `order` notification hadn't arrived yet at that point. On success, the webhook re-fetches the payment via `payment_service.get_payment` (never trusts the notification body itself for the actual status — Mercado Pago's own recommended practice) and calls the same `finalize_order_payment`. Always responds `200` even on a no-op (unknown order, already-terminal status) — Mercado Pago retries aggressively on any non-2xx.
-
-`POST /orders/{order_id}/cancel` also got a payment-cleanup step: before the local cancellation (`prepare_local_cancellation`), if the order has an `mp_payment_id`, it refunds (`payment_service.refund_payment`) an already-`approved` payment or cancels (`payment_service.cancel_payment`) a still-`pending`/`in_process` one — the real-world, non-reversible money fact resolves before local bookkeeping, same ordering principle used throughout "Local-first order cancellation" below.
-
-### Contracargos de Mercado Pago ("Compra no reconocida") (2026-08-31)
-
-What happens when a buyer flags an already-confirmed order as "Compra no reconocida"
-with their bank/Mercado Pago. Before this, **nothing** — the webhook route always
-assumed every notification was about a `payment` and called `get_payment()`, and even
-after adding a branch for it, the route's own `if order.status in ("PAID", "CANCELLED"):
-return "already final"` short-circuit would have swallowed it anyway, since a chargeback
-by definition only ever happens on an order that's already `PAID`.
-
-**Follow-up audit (2026-08-31, same day)**: narrowing that guard to just
-`if order.status == "CANCELLED"` turned out to still be one status too aggressive — a
-`PAID` order can be cancelled+refunded by another path (admin, customer) and the
-cardholder can still dispute the *original* charge afterward ("dispute after refund," a
-real pattern). The guard is now `if order.status == "CANCELLED" and mp_payment.get("status")
-not in MP_CHARGEBACK_STATUSES` — a chargeback is let through even on a `CANCELLED` order,
-every other status still short-circuits there. Safe for the same reason as before:
-`finalize_order_payment`'s `MP_APPROVED_STATUSES` branch was hardened at the same time to
-explicitly check `order.status != "CANCELLED"` before touching anything (it previously had
-no such guard of its own, relying entirely on callers never invoking it on a cancelled
-order — a delayed/replayed `"approved"` notification could otherwise have resurrected a
-cancelled+refunded order back to `PAID` once the blanket `CANCELLED` short-circuit was
-narrowed).
-
-**A second, related fix found while designing the first one**: the chargeback branch used
-to gate its one-time alert on `if order.disputed_at is None`. Once `in_mediation`/`refunded`
-(below) started sharing that same `disputed_at` marker, a real mediation→chargeback
-*escalation* on the same order would never re-alert, since `disputed_at` would already be
-set from the mediation event. Fixed by gating each dispute-shaped branch on the actual
-status *transition* (`previous_mp_status != "charged_back"` / `!= "in_mediation"`,
-captured before `order.mp_status` gets overwritten) instead — `disputed_at` itself is still
-set once as a historical marker, it just no longer *gates* whether either alert fires.
-
-Two independent detection paths, for robustness — Mercado Pago's own docs confirm a
-chargeback flips the associated **payment's** `status` to `charged_back` regardless of
-dashboard config, while richer detail (deadline, `coverage_eligible`/
-`documentation_required`, and the final `coverage_applied` outcome) only arrives via a
-**separate `chargebacks` webhook topic** that must be enabled explicitly in the Mercado
-Pago dashboard (a manual, external, non-code step — do this in production or path 2
-below never fires):
-
-1. **Default path, always active** — `MP_CHARGEBACK_STATUSES = {"charged_back"}` in
-   `order_history_service.py`; `finalize_order_payment` sets `Order.disputed_at` (once,
-   on first detection — never cleared back to `None`, same historical-marker philosophy
-   as every other timestamp column on `Order`) and fires
-   `admin_notification_service.notify_admin_chargeback_received`. `Order.status` is
-   deliberately untouched (stays `PAID`) — same "money-only event" policy as partial
-   refunds (see "Admin RBAC, audit log, and partial refunds" below).
-2. **Enriched path (rewritten 2026-10-25 for the Orders API)** — when an order
-   notification (`type=order`, e.g. `order.charged_back`) carries cases in
-   `transactions.chargebacks[]`, `POST /payments/webhook` calls
-   `payment_service.get_chargeback(case_id)` (`GET /v1/chargebacks/{case_id}`) for each and
-   hands the response to `chargeback_service.process_chargeback(db, order, ...)`, which
-   upserts a `Chargeback` row against that order (`app/models/chargeback.py`, one row per
-   event — mirrors `Refund`'s shape exactly, including "no accumulator column, derive from
-   the rows") keyed on `mp_chargeback_id` (idempotent — a repeat/resolution notification
-   just refreshes the existing row), and maps Mercado Pago's `coverage_applied`
-   (`None`/`true`/`false`) onto this codebase's own
-   `Chargeback.status` vocabulary: `IN_PROCESS`/`WON`/`LOST`. On a real
-   `IN_PROCESS`→`WON`/`LOST` transition it fires
-   `notify_admin_chargeback_resolved`. **Gotcha**: Mercado Pago's own API returns the
-   field misspelled `coverage_elegible` (missing the second "i") — confirmed in their
-   docs, not a typo on this side; `chargeback_service.py` reads that exact key while the
-   local column stays correctly spelled `coverage_eligible`.
-
-**Two sibling statuses closed the same day (2026-08-31 audit)**: `finalize_order_payment`
-originally only branched on `approved`/`pending`/`in_process`/`rejected`/`cancelled`/
-`charged_back` — two more real Mercado Pago payment statuses fell through silently, same
-bug shape as the original chargeback gap:
-- **`in_mediation`** (`MP_MEDIATION_STATUSES`) — the buyer opened a claim/mediation case, a
-  stage that can precede a full `charged_back` escalation. On the real transition, sets
-  `Order.disputed_at` if still unset (same historical marker as a chargeback) and fires
-  `notify_admin_payment_in_mediation`. Does not touch `Order.status`.
-- **`refunded`** (`MP_REFUNDED_STATUSES`) — the payment was refunded directly through
-  Mercado Pago's own dashboard, outside `POST /admin/orders/{uuid}/refund`. On the real
-  transition, inserts a `Refund` row (`amount` from `transaction_amount_refunded`,
-  `issued_by_admin_id=None`, `mp_refund_id=None`) **before** committing — without this,
-  `SUM(Refund.amount)` (the documented single source of truth for "how much has been
-  refunded," see "Admin RBAC, audit log, and partial refunds" below) would silently
-  under-count an out-of-band refund — then fires `notify_admin_out_of_band_refund`. Does
-  not touch `Order.status`/stock, same "human decides next steps" policy as everywhere
-  else in this family.
-
-**Deliberately out of scope for this pass** (confirm with the user before building
-either, priorities may have changed):
-- Submitting dispute-fighting documentation (`POST /v1/chargebacks/{id}/documentation`)
-  — needs real proof-of-delivery assets and admin-dashboard UI that doesn't exist yet,
-  same reasoning as why `/shipping/*` never got document uploads either.
-- Any automatic `Order.status`/`Product.stock`/`Product.reserved` change on a **lost**
-  (`LOST`) chargeback — same "money-only event, a human decides next steps" policy as
-  partial refunds. A lost dispute becomes visible to the admin (`Order.disputed_at`, the
-  `Chargeback` row, the `order-chargeback-resolved` webhook); whether to also restock or
-  otherwise adjust the order is a business call, not automated here.
-
-Admin visibility mirrors the `Refund` surface exactly: `GET
-/admin/orders/{uuid}/chargebacks` (any authenticated admin, no `require_super_admin` —
-unlike refunds there's no "who can issue" restriction to mirror, since a chargeback is
-system-detected, never admin-issued) and `AdminOrderPublic.disputedAt`. **No audit-log
-entry** — `audit_service.log_action` is only ever called with a real `AdminUser` from a
-route handler; a chargeback is a system event with no admin actor, so it follows the
-`logger.critical` + admin-webhook pattern instead, same as
-`notify_admin_sicar_sync_failed`/`notify_admin_stock_drift`. See `ADMIN_INTEGRATION.md`
-for the two new outbound webhooks' full payload shape
-(`order-chargeback-received`/`order-chargeback-resolved`).
-
-### Endpoints (all verified live end-to-end)
-
-All paths below live under the `/v1` prefix (e.g. `POST /v1/orders`) — mounted in `app/api/v1_router.py`, omitted from the table below for brevity.
-
-| Endpoint | Token used | Notes |
-|---|---|---|
-| `POST /products` (catalog listing) | none (just `x-api-key`) | Postgres only, paginated, filterable by `department_uuid`/`category_uuid`/`in_stock`/`minPrice`/`maxPrice`, sortable via `sort_by` (`relevance` = in stock, then with photo, then best-selling). Returns `priceRange`. |
-| `POST /search` | none (just `x-api-key`) | Typesense (see "Búsqueda con Typesense"): typo/plural/accent/unit-tolerant, admin-managed synonyms, exact SKU pinned first; price/stock hydrated from Postgres. Falls back to the Postgres search (substring match via `pg_trgm`) when Typesense is unavailable. Same filters as the catalog listing (incl. `minPrice`/`maxPrice`), plus `in_stock`; paginated; returns `priceRange` (additive). |
-| `GET /search/suggest` | none (just `x-api-key`) | Autocomplete: up to `limit` (1-10, default 6) products plus up to 4 matching brands with counts, in one call. `brands` is empty on the Postgres fallback. |
-| `GET /products/{uuid}/related` | none (just `x-api-key`) | "También te puede servir": bought together → taxonomy → brand → vehicles. `limit` 1-24. |
-| `POST /products/{uuid}/stock-alerts` | client account (`X-Client-Token`, optional) | "Avísame cuando llegue" for an out-of-stock product. `201`/`200` idempotent, `409` if in stock. |
-| `GET /auth/me/stock-alerts`, `DELETE /auth/me/stock-alerts/{productUuid}` | client account (required `Authorization` header) | List / cancel own stock alerts. |
-| `POST /notifications/unsubscribe` | none (just `x-api-key`) — the token itself proves identity | Unsubscribe link from marketing / stock-alert emails. |
-| `GET /products/{uuid}` | admin/B2B (internal, only if stale) | Serves from Postgres; lazily refreshes detail fields from SICAR GraphQL if `details_updated_at` is null/>24h old. |
-| `GET /taxonomy` | admin/B2B (internal, only if stale) | Departments + nested categories from Postgres; same 24h lazy-refresh pattern. |
-| `GET /vehicles/makes`/`/models`/`/years`/`/engines` | none (just `x-api-key`) | Cascading distinct-value facets for a vehicle picker (type → make → model → year → engine), each narrowed by whatever was already selected. No pagination — small, bounded value lists. |
-| `GET /vehicles` | none (just `x-api-key`) | Final resolve step: matching `Vehicle` fitment(s) for whatever subset of `vehicleType`/`make`/`model`/`year`/`engine` is given, each with a `uuid` usable as `vehicleUuid` on `/products`/`/search`. Paginated (`total`/`docs`), same shape as `/products`. |
-| `GET /cart` | none required; optional `X-Client-Token` or anonymous cart cookie | Read-only, never creates a cart. See "Cart" above. |
-| `PUT /cart` | none required; optional `X-Client-Token` or anonymous cart cookie | Replaces the entire item list; silently mints an anonymous cart + cookie if none resolves. |
-| `PATCH /cart/items` | none required; optional `X-Client-Token` or anonymous cart cookie | Increments/decrements one line by `delta`; removes the line at qty ≤ 0. |
-| `DELETE /cart` | none required; optional `X-Client-Token` or anonymous cart cookie | Deletes the resolved cart row outright; no-op if none resolves. |
-| `POST /cart/merge` | client account (required `Authorization` header) | Merges an explicit anonymous `cartToken` into the authenticated account's cart. `404` if the token doesn't resolve. |
-| `POST /cart/coupon` | none required; optional `X-Client-Token` or anonymous cart cookie | Sets `Cart.coupon_code` and returns a live-recomputed discount preview. Not authoritative — see "Cupones de descuento" above. `400` if no cart or empty; `404`/`409` if the code doesn't validate. |
-| `DELETE /cart/coupon` | none required; optional `X-Client-Token` or anonymous cart cookie | Clears the applied coupon. No-op if none was applied. |
-| `POST /orders` | client account (`X-Client-Token`, optional — see "Guest checkout") | Reserves the order locally (`TO_PAY`); does not charge anything yet, and makes no live SICAR X call at all — validated entirely against the local catalog. Login is no longer required — omit `X-Client-Token` for a guest order (requires `deliveryInfo.contactInfo.email`, forbids `addressUuid`/`couponCode`, needs `deliveryInfo.address` inline for `DELIVERYMAN`). Optional `Idempotency-Key` header dedupes a retried submit — see "Request flow: placing an order" above. Optional `couponCode` (account only) re-validates and locks in a coupon discount — see "Cupones de descuento" above. |
-| `POST /orders/{order_id}/pay` | client account (`X-Client-Token`, optional) — must own the order | Charges the order via Mercado Pago (card/OXXO `onSubmit` formData) and finalizes it (`PAID`/`TO_PAY`/`CANCELLED`). Without a token, `order_id` (either `id` or `orderUuid`) itself proves guest ownership — see "Guest checkout". |
-| `POST /orders/{order_id}/cancel` | client account (`X-Client-Token`, optional) — must own the order | Cancels and restores stock **locally, immediately** — refunds/cancels the Mercado Pago payment first (still synchronous) if one exists, then defers the actual SICAR X cancellation to `sicar_sync_outbox`/`sicar_sync_worker.py` (async, retried). See "Local-first order cancellation" above. Without a token, `order_id` (either `id` or `orderUuid`) itself proves guest ownership — see "Guest checkout". |
-| `DELETE /orders/{order_id}` | client account (`X-Client-Token`, optional) — must own the order | Only for orders still `TO_PAY` (409 otherwise) — cancels any pending Mercado Pago payment, restores stock locally, and soft-deletes the local `Order` row (`deleted_at`, no longer a hard delete — see "Local-first order cancellation" above) so it still vanishes from history immediately while the row survives for the async SICAR X sync. Without a token, `order_id` (either `id` or `orderUuid`) itself proves guest ownership — see "Guest checkout". |
-| `GET /orders/guest/{order_id}` | none (just `x-api-key`) — `order_id` (either `id` or `orderUuid`) itself proves ownership | Status lookup for a guest order (no account). `404` if it doesn't exist, or if it's since been retroactively linked to an account (use `GET /auth/me/orders/{orderUuid}` from then on) — see "Guest checkout". |
-| `POST /payments/webhook` | none (Mercado Pago signature via `x-signature`/`x-request-id`, no `x-api-key`) | Order notifications from Mercado Pago's Orders API (`type=order`, `data.id=ORD...`): async status changes for card/OXXO, refunds and chargebacks. Anything else is ignored. |
-| `POST /auth/register` | none (just `x-api-key`) | Creates a local client account (name/email/phone/password); returns `{token, client}`, auto-logged-in. `409` on duplicate email. Fires a verification-email webhook (non-fatal). Optional `cartToken` merges an anonymous cart inline. |
-| `POST /auth/login` | none (just `x-api-key`) | Validates email/password against local client accounts; returns `{token, client}`. `401` on bad credentials. Optional `cartToken` merges an anonymous cart inline. |
-| `POST /auth/google` | none (just `x-api-key`) | Verifies a Google ID token (frontend-obtained) and logs in/creates the matching account; returns `{token, client}`. `409` if the email already has a local password account. Optional `cartToken` merges an anonymous cart inline. |
-| `POST /auth/verify-email` | none (just `x-api-key`) | Confirms a verification token from the outbound webhook; marks the account verified. No session required — the token itself proves ownership. |
-| `POST /auth/resend-verification` | client account (required `Authorization` header) | Re-fires the verification webhook. `400` if already verified. |
-| `POST /auth/forgot-password` | none (just `x-api-key`) | Always returns the same generic `200`, regardless of whether the email resolves to an account — fires the `password-reset-requested` webhook if it does (with `hasPassword: false` and no token for Google-only accounts). |
-| `POST /auth/reset-password` | none (just `x-api-key`) — the reset token itself proves ownership | Confirms a single-use DB-backed reset token (`400` if invalid/used/expired), sets the new password, and returns `{token, client}` like `/auth/login` — auto-logged-in. Invalidates the account's other active sessions. |
-| `GET /auth/me` | client account (required `Authorization` header) | Returns the authenticated client's own account info (including saved addresses) — for a "Mi cuenta" page. |
-| `PATCH /auth/me` | client account (required `Authorization` header) | Partial update of `name`/`phone`; `new_password` requires a correct `current_password` in the same call. |
-| `GET /auth/me/addresses` | client account (required `Authorization` header) | List the client's saved addresses. |
-| `POST /auth/me/addresses` | client account (required `Authorization` header) | Add an address; `is_default: true` unsets any prior default. |
-| `PATCH /auth/me/addresses/{uuid}` | client account (required `Authorization` header) | Partial update of one address; `404` if it doesn't belong to the caller. |
-| `DELETE /auth/me/addresses/{uuid}` | client account (required `Authorization` header) | Remove one address; `204` on success, `404` if not owned by the caller. |
-| `GET /auth/me/orders` | client account (required `Authorization` header) | Paginated order history for the caller, most recent first. Postgres only. |
-| `GET /auth/me/orders/{orderUuid}` | client account (required `Authorization` header) | Order detail; `404` if not owned by the caller. Lazily refreshes `dispatch_status`/`dispatch_history` from SICAR X if not yet in a terminal fulfillment state. |
-| `GET /products/{productUuid}/reviews` | none (just `x-api-key`) | Paginated, non-hidden reviews for a product, sortable via `sortBy` (`newest`/`highest_rating`/`lowest_rating`/`most_helpful`). Returns the cached `averageRating`/`reviewsCount` plus a live-computed `ratingBreakdown` (1-5 star counts). |
-| `POST /products/{productUuid}/reviews` | client account (required `Authorization` header) | Creates a review (`rating` 1-5 + optional `comment`). `409` if the client already reviewed this product — edit the existing one instead. `isVerifiedPurchase` computed once at creation from the client's `PAID` orders. |
-| `PATCH /reviews/{uuid}` | client account, must own | Edit own review's `rating`/`comment`. `404` if not owned. |
-| `DELETE /reviews/{uuid}` | client account, must own | Delete own review. `204`. |
-| `PUT`/`DELETE /reviews/{uuid}/helpful` | client account (required `Authorization` header) | Idempotent mark/unmark of a "helpful" vote — one per client per review. |
-| `GET /auth/me/reviews` | client account (required `Authorization` header) | Own review history, paginated, most recent first — includes reviews an admin has hidden (only the author still sees those here). |
-| `GET`/`POST /wishlist/collections` | client account (`Authorization`, required) | List/create named wishlist collections. |
-| `PATCH`/`DELETE /wishlist/collections/{uuid}` | client account, must own | Rename/delete a collection. `404` if not owned, `409` deleting the default "Favoritos" collection. |
-| `GET`/`POST /wishlist/collections/{uuid}/items` | client account, must own | List (paginated, enriched with `ProductBasic`) / idempotently add a product to a collection. |
-| `DELETE /wishlist/collections/{uuid}/items/{productUuid}` | client account, must own | Idempotently remove a product from a collection. |
-| `GET /wishlist/favorites` | client account (required) | Same as the collection-items list, for the default "Favoritos" collection — never creates it. |
-| `PUT`/`DELETE /wishlist/favorites/{productUuid}` | client account (required) | Heart-icon shortcut: idempotent add/remove on the default collection, auto-created on first `PUT`. |
-
-### Admin API (`/v1/admin/*`) — new, internal-only, not part of the frontend contract
-
-Built for operational visibility (queue depth/failures were previously invisible without a direct Postgres connection — see the Postgres-volume incidents above and the worker's own invisible logs on Railway) and to let staff accept an order and assign a delivery company. **Not** documented in `FRONTEND_INTEGRATION.md` — this is an internal/admin surface, not something the storefront frontend calls.
-
-**Superseded (2026-08-18)**: every `/v1/admin/*` sub-router used to depend on `validate_admin_key` (a single shared `X-Admin-Key`/`ADMIN_API_KEY`). That's gone — every sub-router now depends on `get_current_admin` (`app/core/security.py`), which decodes an `AdminUser` JWT from `Authorization: Bearer <token>`, obtained via `POST /admin/auth/login`. See "Admin RBAC, audit log, and partial refunds" below for the full design (roles, bootstrap, audit logging, refunds) — the table below only lists what's new/changed on top of that.
-
-| Endpoint | Notes |
-|---|---|
-| `POST /admin/auth/login` | Login de `AdminUser` (email+password) → `{token, admin}`. No requiere `get_current_admin` (obviamente — es la ruta que lo emite). Rate-limited, comparación en tiempo constante ante correo inexistente, mismo patrón que `POST /auth/login` de clientes. |
-| `GET /admin/auth/me` | Datos del `AdminUser` autenticado. |
-| `POST /admin/admins` / `GET /admin/admins` / `PATCH /admin/admins/{uuid}` | Gestión de cuentas admin — **solo `super_admin`** (`require_super_admin`). `PATCH` incluye restablecer la contraseña de otro admin directamente (sin flujo de correo). Ver "Admin RBAC, audit log, and partial refunds" abajo. |
-| `GET /admin/audit-log` | Historial de acciones admin registradas explícitamente (no las ~30 rutas completas todavía) — **solo `super_admin`**. Filtrable por admin/acción/tipo de recurso/rango de fechas. |
-| `GET /admin/health` | DB connectivity (`SELECT 1`), whether the process's `sicar_auth` singleton currently holds a token, and `sicar_sync_outbox` row counts grouped by `status`. |
-| `GET /admin/sync/catalog-status` | Reads the new single-row `SyncStatus` table (`last_run_started_at`/`last_run_finished_at`/`last_success_at`/`products_processed`/`products_deactivated`/`last_error`), written by `sync_task.py` at the start/end of each catalog sync pass — previously there was **no queryable "when did the catalog last sync" anywhere** (`Product.last_sync_id` is a per-pass `uuid4()`, not a timestamp, and `Product` has no `updated_at` column). |
-| `GET /admin/sync/outbox` | Lists `SicarSyncOutbox` rows, filterable by `status` (defaults to excluding `SUCCEEDED`), paginated, ordered by `next_attempt_at`. |
-| `POST /admin/sync/outbox/{id}/retry` | Resets a `FAILED` row to `PENDING` with `next_attempt_at = now()` so `sicar_sync_worker.py` picks it up on its next tick, unchanged. `404` if the row isn't `FAILED`. |
-| `GET /admin/orders` | Admin-wide order search — filterable by `status`, `dispatch_status`, client email/uuid, date range; paginated. Unlike every other order lookup in this codebase, **not** scoped to one client. `client_email`/`client_uuid` filters join through `ClientAccount` and so structurally can't match guest orders — `AdminOrderPublic.isGuest`/`guestEmail` (see "Guest checkout" above) let the results at least be told apart, no dedicated guest filter exists yet. |
-| `GET /admin/orders/{order_uuid}` | Admin detail view of any order (optionally including soft-deleted via a query flag), returned as `AdminOrderPublic` with `clientEmail`/`clientName` inlined directly (same resolution `order_display_service.resolve_client_name` uses elsewhere — falls back to `contactInfo.name`/`.email` for a guest order). |
-| `POST /admin/orders/{order_uuid}/accept` | Sets `Order.accepted_at`/`accepted_by` and `Order.dispatch_status = "PENDING"` locally and immediately; enqueues a `SicarSyncOutbox` row with `action="ACCEPT"` whose only job is telling SICAR X about the inventory delta (`sicar_stock_service.apply_order_stock_delta`, see the correction note under "Client accounts linked to orders" above) — same local-first/async-sync pattern as cancellation. Auditado (`order.accept`). |
-| `POST /admin/orders/{order_uuid}/assign-delivery` | Sets `Order.delivery_company` (free text) + `delivery_assigned_at`. Local metadata only, deliberately — no external courier API call, unrelated to the real envia.com integration below. |
-| `POST /admin/orders/{order_uuid}/shipping/quote` | Cotiza opciones de envío con envia.com (`POST /ship/rate/`, `app/services/shipping_service.py`) para un pedido `DELIVERYMAN` con `dispatchStatus: COMPLETE` — `409` si no lo es. Origin por defecto es una constante propia (`ENVIA_ORIGIN_*`, ver "Configuration" above), overrideable campo por campo vía un `origin` opcional en el body (`ShippingOriginOverride`, `app/schemas/admin.py`) — cualquier campo omitido/vacío cae de vuelta a `.env`, ver ADMIN_INTEGRATION.md. Destination viene de `Order.delivery_address_snapshot`. No persiste nada. |
-| `POST /admin/orders/{order_uuid}/shipping/generate` | Genera una guía real (con costo) vía envia.com (`POST /ship/generate/`), acepta el mismo `origin` opcional que `/shipping/quote` (independiente entre llamadas — no reusa el de una cotización previa), persiste `Order.shipping_label` y avanza `Order.dispatch_status` a `"DISPATCHED"` **de inmediato** (a diferencia de `ACCEPT`, este campo no es un simple espejo de Sicar X aquí — el hecho real ya ocurrió cuando envia.com respondió 200, mismo principio que la cancelación local-first y `finalize_order_payment`). **No encola nada en `SicarSyncOutbox`** (corregido 2026-08-11 — una versión anterior de esta nota afirmaba lo contrario; confirmado contra el código que no existe ni ha existido un `action="DISPATCH"`, `sicar_sync_worker.py` solo tiene ramas `ACCEPT`/`CANCEL`) — Sicar X nunca se entera de que existe una guía de envío. `409` si ya tiene una guía (sin regeneración) o si el pedido no está listo para envío. Ver ADMIN_INTEGRATION.md para el shape completo y la advertencia de confiabilidad (efecto real con costo, sin reintento automático sobre timeout). **Actualización (2026-08-11)**: `Order.shipping_label` ahora también se expone al cliente — `OrderPublic` (`app/schemas/orders.py`) ganó un campo `shipping_label` (schema `ShippingLabelInfo`, movido a `app/schemas/shipping.py` para que tanto `orders.py` como `admin.py` puedan importarlo sin ciclo) incluyendo `trackUrl`, así que `GET /v1/auth/me/orders/{orderUuid}` y el webhook `order-dispatched` que este endpoint ya disparaba (`order_status_notification_service.notify_order_dispatched`, ver más abajo) ahora traen la guía real en vez de nada — no se agregó ningún webhook ni columna nueva, la notificación ya se disparaba en el momento correcto, solo le faltaba el dato. |
-| `POST /admin/orders/{order_uuid}/shipping/cancel` | Cancela ante envia.com (`POST /ship/cancel/`) una guía ya generada, reconstruyendo la petición solo con `carrier`/`trackingNumber` ya persistidos en `Order.shipping_label` — el admin no los vuelve a capturar. Si envia.com confirma, en una sola transacción limpia `Order.shipping_label` a `null` y revierte `Order.dispatch_status` de `"DISPATCHED"` a `"COMPLETE"` — la única forma de desbloquear ese camino, ya que `/advance-status` se niega a revertir esa transición mientras `shipping_label` siga poblado. `reason` se persiste en `Order.shipping_cancellation_reason`/`shipping_label_cancelled_at` (mismo patrón que `Order.cancellation_reason`), expuesto en `AdminOrderPublic`, pero — a diferencia de ese — nunca se le notifica al cliente, es auditoría interna. Sin `SicarSyncOutbox`, mismo motivo que `/shipping/generate`. `409` si el pedido no tiene guía. `502` si envia.com rechaza la cancelación (típicamente: la guía ya fue recogida por el carrier o pasó la ventana de cancelación) — mensaje real de envia.com entre paréntesis, mismo tratamiento de `meta:"error"` que `/shipping/generate`. Ver ADMIN_INTEGRATION.md. |
-| `POST /admin/orders/{order_uuid}/refund` | Emite un reembolso parcial o total (Mercado Pago) sobre una orden `PAID` — **solo `super_admin`**. `409` si la orden no está `PAID`/no tiene `mp_payment_id`; `400` si `amount` excede lo restante (`order.total` menos la suma de `Refund` previos). No toca `Order.status` (se queda `PAID`) ni `Product.stock`/`reserved` — evento solo monetario. Ver "Admin RBAC, audit log, and partial refunds" abajo. |
-| `GET /admin/orders/{order_uuid}/refunds` | Lista los `Refund` de una orden (parciales explícitos + el automático de una cancelación completa). Cualquier admin autenticado puede ver; solo `super_admin` puede emitir. |
-| `GET /admin/orders/{order_uuid}/chargebacks` | Lista los `Chargeback` ("Compra no reconocida") detectados sobre una orden — ver "Contracargos de Mercado Pago" arriba. Sin ruta de emisión: esta API los detecta sola vía el webhook de Mercado Pago, ningún admin los crea a mano. |
-| `POST /admin/categories` | Crea un nodo del árbol de categorías (`app/api/routes/admin_categories.py`, `taxonomy_service.create_category`). `name` requerido, `parentUuid` opcional (root si se omite). `slug` siempre se deriva de `name` (nunca lo manda el admin) — mismo slugify de la migración `5cbd5e4aa1be`, desambiguado en runtime contra los slugs actuales. `uuid` generado localmente (`uuid4()`). `404` si `parentUuid` no existe. |
-| `PATCH /admin/categories/{uuid}` | Actualización parcial (`exclude_unset=True`, mismo patrón que `PATCH /auth/me/addresses/{uuid}`): `name` y/o `parentUuid` en la misma llamada — no hay endpoint de "mover" separado. Renombrar recalcula el `slug`. Mover valida que el nuevo padre no sea el nodo mismo ni uno de sus propios descendientes (`409`, vía `get_descendant_uuids`) — guarda contra ciclos en el árbol. |
-| `DELETE /admin/categories/{uuid}` | Borrado real (no soft-delete), **solo `super_admin`**, auditado (`category.delete`). `409` si el nodo todavía tiene subcategorías o productos asignados en `product_categories` — hay que reasignarlos/quitarlos primero; deliberadamente no hay cascada ni reparenteo automático. |
-| `PUT /admin/categories/{uuid}/products` | Reemplaza el conjunto **completo** de productos asignados directamente a la categoría (`productUuids`, resueltos contra `Product.sicar_uuid`) — la única forma de poblar `product_categories`, que hasta este endpoint no tenía ningún escritor. Reemplazo, no incremental: no hay add/remove de un producto a la vez. `404` si algún `productUuid` no resuelve a un producto real y no eliminado (el detalle nombra cuáles). |
-| `PATCH /admin/categories/{uuid}/products` | Incremental (a diferencia del `PUT` de arriba): agrega/quita sin necesitar conocer el conjunto completo asignado — seguro de usar aunque la categoría tenga más productos que el límite de `GET .../products` (200). `add` ya asignados se ignora (idempotente); `remove` no asignados o inexistentes también se ignora (no-op tolerante). `422` si un mismo `productUuid` aparece en `add` y `remove` a la vez. `404` si algún uuid de `add` no resuelve a un producto real y no eliminado. |
-| `DELETE /admin/categories/{uuid}/products` | Desasigna **todos** los productos de la categoría de un solo golpe — equivalente a un `PUT` con `productUuids: []`, pero sin que el caller necesite conocer/traer el conjunto completo primero (pensado para el botón "vaciar categoría" del dashboard admin). Solo borra filas de `product_categories`: no toca los productos en sí (siguen existiendo, siguen vendibles, solo dejan de estar bajo esta categoría) ni la categoría misma — a diferencia de `DELETE /admin/categories/{uuid}`, que sí borra el nodo (y de hecho exige que ya no tenga productos asignados, ver arriba). `404` si la categoría no existe. Sin restricción de `super_admin` (mismo nivel que `PUT`/`PATCH`, no como el `DELETE` del nodo). |
-| `GET /admin/categories/{uuid}/products` | Lista paginada de productos asignados directamente al nodo (sin descendientes — para eso está el filtro `taxonomyUuid` de `/catalog`/`/search`), pensada para poblar la UI de edición antes de un `PUT`/`PATCH`/`DELETE` de arriba. |
-| `GET /admin/categories/by-product/{productUuid}` | Dirección inversa: dado un producto (`sicar_uuid`), qué categorías tiene asignadas directamente — `taxonomy_service.get_categories_for_product`, pensado para precargar una pantalla de "editar tags de este producto". Lista simple sin paginar (acotada por naturaleza), ordenada por `name`. `404` si el producto no existe/está eliminado, `[]` si existe pero no tiene categorías. |
-| `GET /admin/categories/export` | Descarga un CSV (`text/csv`, `utf-8-sig` para que Excel muestre bien los acentos) con una fila por par (categoría, producto) de todo el árbol — vía outer joins, una categoría sin productos (o con productos ya `is_deleted`) igual aparece con las columnas de producto en blanco. `categoryUuid` opcional (vía `get_descendant_uuids`) acota el export a ese subárbol; `category_path` en cada fila es la cadena de ancestros completa (`Padre > Hijo`), resuelta aparte para toda la tabla de categorías así un export acotado igual muestra los nombres de ancestros fuera del subárbol. `404` si `categoryUuid` no resuelve. |
-| `POST`/`GET`/`GET {uuid}`/`PATCH {uuid}`/`DELETE {uuid} /admin/coupons` | CRUD de cupones (`app/api/routes/admin_coupons.py`, `coupon_service.py`) — mismo patrón `exclude_unset`/paginado que categorías/vehículos. `POST`/`PATCH`/`DELETE` auditados (`coupon.create`/`.update`/`.delete`); `DELETE` además **solo `super_admin`** (crear/editar solo requieren `get_current_admin`). `DELETE` es `409` si el cupón ya tiene algún uso registrado (cualquier status) — usar `PATCH {isActive: false}` en su lugar. `DELETE` sí cascada sobre las propias filas de alcance/elegibilidad del cupón (`coupon_categories`/`coupon_products`/`coupon_assigned_clients` tienen `ondelete="CASCADE"` del lado `coupon_id` — ver `app/models/coupon.py` — a diferencia de `product_categories`/`product_vehicles`, que no cascadan porque ligan dos entidades independientes). Ver "Cupones de descuento" arriba y `ADMIN_INTEGRATION.md` para el shape completo. |
-| `PUT`/`GET /admin/coupons/{uuid}/categories`/`/products`/`/clients` | `PUT` reemplaza completo (no incremental) el alcance (`scopeType=CATEGORY`/`PRODUCT`, `409` si no coincide) o la lista de clientes elegibles (resuelta por email, vacía = público) de un cupón; `GET` lee el conjunto actual para poblar la UI antes de un `PUT` — `.../categories` sin paginar (acotado por naturaleza), `.../products`/`.../clients` paginados. **Nota**: `DELETE /admin/categories/{uuid}` ahora también 409 si alguna fila de `coupon_categories` la referencia (chequeo agregado en `taxonomy_service.delete_category` junto con esta feature) — sin él, borrar una categoría todavía usada por el alcance de un cupón rompía con un `IntegrityError` crudo (500) en vez de un `409` limpio, confirmado en vivo. |
-| `GET /admin/coupons/{uuid}/redemptions` | Historial paginado de usos de un cupón (`PENDING`/`CONFIRMED`/`RELEASED`) — ver "Cupones de descuento" arriba para el significado de cada status. |
-| `POST /admin/vehicles` | Crea un fitment (`vehicleType`/`make`/`model`/`yearStart`/`yearEnd`/`engine`) — sin tree, a diferencia de categorías. `422` si `yearEnd < yearStart`. |
-| `GET /admin/vehicles` | Busca/lista vehículos — filtrable por `vehicleType` (exacto) y `make`/`model` (`ILIKE` parcial). Único punto de entrada para encontrar un vehículo ya existente vía búsqueda libre; el equivalente público a `GET /taxonomy` ya existe (`GET /v1/vehicles/*`, ver arriba) pero es un selector en cascada, no búsqueda libre. |
-| `PATCH /admin/vehicles/{uuid}` | Actualización parcial (`exclude_unset`, mismo patrón que categorías) — `yearEnd: null` explícito marca el fitment como todavía vigente. |
-| `DELETE /admin/vehicles/{uuid}` | Borrado real, **solo `super_admin`**, auditado (`vehicle.delete`). `409` si tiene productos asignados en `product_vehicles`; sin chequeo de "hijos" (no existen, tabla plana). |
-| `PUT /admin/vehicles/{uuid}/products` | Reemplaza el conjunto completo de productos asignados a un vehículo (`productUuids`) — mismo comportamiento reemplazo-no-incremental que el equivalente de categorías. |
-| `GET /admin/vehicles/{uuid}/products` | Lista paginada de productos asignados directamente a un vehículo. |
-| `GET /admin/vehicles/by-product/{productUuid}` | Dirección inversa, mismo propósito que el equivalente de categorías arriba — `vehicle_service.get_vehicles_for_product`. Lista simple sin paginar, ordenada por `make`/`model`/`yearStart`. Mismos `404`/`[]` que el equivalente de categorías. |
-| `GET /admin/vehicles/models-for-years` | Dado `make` y una lista repetida de `years`, devuelve solo los modelos que existen en **todos** esos años (`vehicle_service.get_distinct_models_for_years` — intersección vía `generate_series` + `GROUP BY model HAVING COUNT(DISTINCT y) = :num_years`, no unión). Alimenta `assign-by-model` de abajo; distinto del selector público en cascada (`GET /v1/vehicles/*`), que resuelve un año a la vez. |
-| `POST /admin/vehicles/assign-by-model` | Asignación masiva **aditiva** (a diferencia de `PUT .../{uuid}/products`, que reemplaza): agrega `productUuids` a todos los fitments de `make`/`model` (y `vehicleType`/`engine` si se mandan) cuyo rango de años toque alguno de `years` — pensado para "este producto le queda a este modelo en varios años" sin elegir cada `uuid` de vehículo uno por uno. `vehicle_service.assign_products_to_model_years`, `INSERT ... ON CONFLICT DO NOTHING` sobre la PK compuesta de `product_vehicles` (idempotente ante reintentos — pares ya existentes no se duplican ni cuentan como error). `404` si algún `productUuid` no resuelve, o si ningún fitment coincide con la combinación dada. |
-| `GET /admin/bulk-import/template` | Descarga un `.xlsx` de ejemplo listo para llenar (`bulk_import_service.build_template_workbook`) — mismas hojas/columnas que el endpoint de abajo espera (comparten las mismas constantes, no pueden desalinearse), encabezados en negritas, comentarios de celda en las columnas menos obvias, filas de ejemplo con datos ficticios (no datos reales). Devuelve los bytes del `.xlsx` directamente (`Response`), no JSON. |
-| `POST /admin/bulk-import/products` | Importación masiva **aditiva** de `product_categories`/`product_vehicles` desde un `.xlsx` (`app/services/bulk_import_service.py`, hojas opcionales `Categorias`/`Vehiculos`, ver ADMIN_INTEGRATION.md para el shape completo). Productos resueltos por `sku` (+ `additional_skus` como fallback), no `sicarUuid`; `make`/`model`/`engine`/`sku` sin distinguir mayúsculas, `categorySlug` sí. Éxito parcial (filas inválidas se omiten y se reportan en `errors`, no bloquean el resto) en vez de todo-o-nada — solo problemas a nivel de archivo completo (`400`/`422`) rechazan la solicitud entera. Mismo `INSERT ... ON CONFLICT DO NOTHING` que `assign-by-model` (subir el mismo archivo dos veces es un no-op seguro). Batch-resuelve en un número constante de consultas (no una por fila). |
-| `PUT`/`DELETE /admin/products/{uuid}/sale`, `PUT`/`DELETE /admin/products/sale` | Previous price ("precio tachado") for one product or in bulk (uuids or `categoryUuid`, fixed price or `compareAtPercent`). Audited. See "Ofertas, relacionados, avisos y correos de marketing". |
-| `GET /admin/brands` | Una entrada por marca (grupo `lower(brand)` sobre productos no eliminados): `name` (`MIN(brand)`), `productCount`, `variants` (todas las grafías crudas; más de una = duplicado a fusionar) + `unbrandedCount`. `brand_service.list_brands`. |
-| `PATCH /admin/products/brand` | Asigna/quita (`null`/`""`) la marca de 1-500 productos (`productUuids`) en un solo `UPDATE`. Éxito parcial: uuids que no resuelven vuelven en `notFound`. Auditado (`product.brand_bulk_set`). |
-| `POST /admin/brands/rename` | `{from, to}`: todo producto con `lower(brand) = lower(from)` pasa a `to` (fusiona si `to` ya existe; también corrige solo casing). `404` si nada coincide, `422` si alguno viene vacío. Auditado (`brand.rename`). |
-| `DELETE /admin/brands?name=X` | Pone `brand = null` en todo producto con esa marca (case-insensitive). Idempotente: `{updated: 0}` en vez de `404`. Auditado (`brand.delete`). |
-| `GET /admin/clients/{uuid}/consents` | Full append-only history of `marketingEmails` changes for one account (source, privacy-notice version, IP, UA, UTC time), newest first. Any admin. `404` if the account doesn't exist. |
-| `GET /admin/search/synonyms` | Paginated list of search synonyms (newest first); `q` matches the root or any word. Any admin. |
-| `POST /admin/search/synonyms` | `{root?, synonyms[]}` → `201`. Multi-way (no `root`, 2+ distinct words) or one-way (`root` + 1+ words). Words are normalized like searches (`Baterías` → `bateria`, `20 V` → `20v`) and returned in stored form. `422` for invalid shapes; `409` for an identical entry (same root + same word set). Response includes `syncedToSearch`. Audited (`search_synonym.create`). Any admin. See "Búsqueda con Typesense". |
-| `PATCH /admin/search/synonyms/{uuid}` | `exclude_unset`; explicit `root: null` makes it multi-way. Same validation. Audited with before/after (`search_synonym.update`). Any admin. |
-| `DELETE /admin/search/synonyms/{uuid}` | Hard delete, **`super_admin` only** (same split as coupons), `204`. Audited (`search_synonym.delete`). Removed from Typesense immediately if available, otherwise by the 5-minute reconcile. |
-| `GET /admin/dashboard/summary` | KPIs (`totalRevenue`/`orderCount`/`averageOrderValue`/`totalUnitsSold`) + serie diaria para un rango `startDate`/`endDate` (default: últimos 30 días), agregados directamente sobre `Order.total`/`Order.total_quantity` — sin desempacar `items`. Solo pedidos `PAID` no eliminados. |
-| `GET /admin/dashboard/top-products` | Productos más vendidos en el rango (`sortBy=revenue\|quantity`), agregados vía `jsonb_array_elements` sobre el snapshot de `Order.items` — nombre/sku/imagen son los vigentes al momento de cada venta, no el `Product` actual (correcto aunque el producto se haya renombrado o eliminado después). |
-| `GET /admin/dashboard/top-categories` | Ventas por categoría PIM (`product_categories`/`categories`, no el `categoryUuid`/`departmentUuid` sincronizado de Sicar X) en el rango — une el `uuid` de cada línea de `items` contra el `Product` actual por `sicar_uuid`, sin filtrar `is_deleted`. Un producto en varias categorías suma su revenue/unidades completas a cada una (desglose por faceta, no partición); productos sin categoría asignada quedan excluidos. |
-| `GET /admin/reviews` | Búsqueda/listado admin-wide de reseñas (no solo de un producto) — filtrable por `productUuid`/`productSku` (coincidencia exacta case-insensitive contra `Product.sku`, mismo patrón que `bulk_import_service._resolve_products`)/`clientEmail`/`clientUuid`/`rating`/`isHidden`/`hasReply`, paginado. Incluye ocultas salvo que se filtre `isHidden=false` explícitamente. |
-| `PATCH /admin/reviews/{uuid}` | `exclude_unset`, ajusta `isHidden`/`hiddenReason`. Auditado (`review.moderate`). Ocultar una reseña la excluye de inmediato de `Product.average_rating`/`reviews_count` (recalculados en la misma llamada vía `recompute_product_rating`) y de la vista pública — reversible, el propio autor la sigue viendo en `GET /auth/me/reviews`. |
-| `DELETE /admin/reviews/{uuid}` | Borrado real (no soft-delete), auditado (`review.delete`) — para contenido genuinamente abusivo/ilegal, distinto de ocultar (reversible). |
-| `PUT`/`DELETE /admin/reviews/{uuid}/reply` | Crea/reemplaza o elimina la única respuesta oficial de un admin por reseña (no un hilo). |
-
-Nueva tabla `product_reviews` (rating 1-5 + comentario opcional, una por cliente por
-producto vía `UniqueConstraint`, moderación admin via `is_hidden`/`hidden_reason`,
-respuesta oficial inline via `admin_reply`/`admin_reply_at`) y
-`product_review_helpful_votes` (un voto "útil" toggleable por cliente por reseña —
-existe como tabla, no solo un contador, porque hace falta poder revertir el voto de UN
-cliente en particular). `Product` gana `average_rating`/`reviews_count`, cacheados y
-mantenidos exclusivamente por `review_service.recompute_product_rating` — excluidos del
-upsert de `sync_task.py`, mismo tratamiento que `sales_count`/`reserved` (ver "Reserva
-local de stock" arriba). A diferencia de esos dos, el recálculo es un `AVG`/`COUNT`
-completo sobre las reseñas no ocultas después de cada escritura que cambia el conjunto
-visible (crear, editar el rating, eliminar, ocultar/mostrar) — no un delta incremental
-— deliberadamente, para no repetir la clase de bug de deriva ya vista con
-`reserved`/`stock`; el volumen de reseñas por producto es chico, así que un recálculo
-completo es barato. `isVerifiedPurchase` se calcula una sola vez al crear la reseña
-(escaneo Python-side de las órdenes `PAID` del cliente — `Order.items` es `JSON` plano,
-no `JSONB`, así que no hay containment de BD que aprovechar aquí) y nunca se
-recalcula después. `ProductBasic`/`ProductAdminBasic` (`POST /products`, `POST
-/search`, listados admin) ganan `averageRating`/`reviewsCount` de paso, para que un
-grid de productos pueda mostrar estrellas sin una llamada aparte por producto.
-
-**INCIDENTE (2026-07-30): `/shipping/quote` devolvía `options: []` para pedidos con
-carriers realmente disponibles.** Investigado en vivo contra el sandbox real de envia.com
-(no solo su documentación, que resultó ambigua/inconsistente entre endpoints sobre qué
-campo usar como identificador de carrier). El catálogo de carriers y el identificador que
-`_fetch_available_carriers` ya usaba (`name`, p. ej. `"fedex"`, `"dhl"`) resultaron
-correctos — **no** era un problema de formato de carrier. La causa real: `state` en el
-objeto `destination`/`origin` que envia.com espera tiene `minLength: 2, maxLength: 3`
-(confirmado tanto contra `docs.envia.com/reference/shipping-rates` como en vivo), y
-`_destination_address` mandaba `ClientAddress.state` tal cual (p. ej. `"Ciudad de México"`,
-14 caracteres) — envia.com rechazaba la petición con
-`meta:"error"`/`"String is too long ...properties:state"` para **todos** los carriers por
-igual (es una validación de esquema anterior a evaluar cobertura por carrier), y
-`get_shipping_quote` lo interpretaba como "cada carrier individualmente no disponible",
-produciendo el `200 {"options": []}` reportado. Arreglado con
-`shipping_service._normalize_mx_state` — convierte nombres completos (y variantes/alias
-comunes, con o sin acentos) de los 32 estados a su código ISO 3166-2:MX de 3 letras antes
-de mandarlos a envia.com; un valor que ya mide ≤3 caracteres se deja intacto (confirmado en
-vivo que envia.com no valida que sea un código "real", solo la longitud). Además,
-`get_shipping_quote` ahora detecta el patrón general de este incidente (no solo el caso de
-`state`): si **todos** los carriers consultados fallan con el mismo mensaje literal de
-`meta:error`, se asume un problema estructural de la petición (no de cobertura) y se
-levanta un `502` con ese mensaje real de envia.com, en vez de un `200 {"options": []}`
-silencioso — así una regresión similar en el futuro es diagnosticable sin repetir esta
-misma investigación en vivo.
-
-**INCIDENTE (2026-07-30): `/shipping/generate` nunca generó un envío real en envia.com,
-pero el endpoint respondía `200` como si lo hubiera hecho.** Detectado porque el dashboard
-de pruebas de envia.com no mostraba ningún envío tras usar el endpoint. Confirmado en vivo:
-`POST /ship/generate/` respondía `HTTP 200` con `meta:"error"`/`"Required property
-missing: settings"` — un rechazo real, pero `generate_shipping_label` solo revisaba
-`response.status_code` (nunca `meta`, a diferencia de `get_shipping_quote`, que sí lo hace
-desde el incidente anterior), así que lo trataba como éxito: devolvía un `shippingLabel`
-con `trackingNumber`/`labelUrl` en `null` y `totalPrice: 0`, que se persistía igual,
-avanzaba `dispatchStatus` a `DISPATCHED` y disparaba la notificación "pedido enviado" al
-cliente — sin que ningún envío existiera del lado de envia.com. Dos causas, arregladas
-juntas en `shipping_service.generate_shipping_label`:
-1. El payload de `/ship/generate/` (a diferencia de `/ship/rate/`) exige `carrier`/
-   `service`/`type` anidados bajo un objeto `shipment`, más un objeto `settings`
-   (`printFormat`/`printSize`) obligatorio que no se mandaba en absoluto — confirmado
-   contra `docs.envia.com/reference/create-shipping-label` y en vivo (con el payload
-   corregido, envia.com responde `meta:"generate"` y un `shipmentId` real, visible en su
-   dashboard). Se usa `printFormat: "PDF"`/`printSize: "STOCK_4X6"` — la combinación
-   "default" ya documentada para esta cuenta (ver `carrier-print-options` arriba).
-2. `meta:"error"` en `HTTP 200` ahora se detecta explícitamente (mismo patrón ya usado en
-   `get_shipping_quote`) y se levanta como `502` real — ya no puede confundirse con éxito.
-
-`ShippingLabelInfo`/`Order.shipping_label` ganó un campo `shipmentId` (el id que usa el
-dashboard de envia.com) para que sea inmediato confirmar ahí que un envío realmente existe,
-en vez de tener que inferirlo del `trackingNumber`.
-
-**INCIDENTE (2026-07-30, continuación): incluso con el fix anterior, algunas opciones de
-`/shipping/quote` seguían fallando en `/shipping/generate`** con `"Origin/Destination
-branch code is required for branch to home/home to branch service"`. Causa: `dropOff` en
-la respuesta de `/ship/rate/` no siempre es `0` (puerta a puerta) — algunos
-carriers/servicios (confirmado en vivo: paquetexpress `ground_do`/`ground_od`, dropOff 1/2)
-exigen que el origen o el destino sea una sucursal física del carrier, identificada por un
-`branch_code` que envia.com no incluye en el payload de `/ship/generate/` salvo que se
-mande explícitamente — y este backend no lo recolecta ni lo soporta hoy. Soportarlo bien
-requeriría exponer, por opción, la lista de sucursales cercanas (confirmado en vivo que
-`branches` en la respuesta de `/ship/rate/` es relativa a lo que se mande como
-`destination` — para sucursales del lado del origen hay que consultar con origen/destino
-invertidos) y una UI nueva en el dashboard admin para elegirla — decidido explícitamente
-diferir eso. En vez de eso, `get_shipping_quote` ahora descarta cualquier opción con
-`dropOff` distinto de `0` — el admin solo ve opciones puerta a puerta, que ya se sabe que
-generan guías correctamente con el payload actual.
-
-### Admin RBAC, audit log, and partial refunds (2026-08-18)
-
-The first slice of a broader "reliability foundation" push (full design in
-`docs/superpowers/specs/2026-08-18-reliability-foundation-design.md`) — this repo already
-handles real checkout/payment/inventory logic but had zero automated tests, no
-error-tracking/alerting beyond three narrow admin webhooks, no way to attribute an admin
-action to a specific person (one shared `X-Admin-Key`), and no partial-refund support.
-This section covers the RBAC/audit/refund pieces; see "Test suite + CI" and "Error
-tracking" further below for the rest.
-
-**`AdminUser`** (`app/models/admin_user.py`, migration `b3f7a91c4e2d`) replaces the old
-shared `X-Admin-Key`/`ADMIN_API_KEY` entirely — every `/v1/admin/*` sub-router's
-`dependencies=[Depends(validate_admin_key)]` became `dependencies=[Depends(get_current_admin)]`
-(mechanical swap across all ~12 admin route files, same router-level-dependency pattern as
-before). `role` is a plain string, `"super_admin" | "staff"` — same "constrain the
-vocabulary in the application layer, not the DB" convention as `Order.status`/
-`ClientAccount.auth_provider`. Rows are never hard-deleted, only deactivated
-(`is_active=False`) — `admin_audit_log`/`refunds` FK to `admin_user_id` and need the row
-to keep existing for history, same reasoning as `Order` not cascading on delete.
-
-**Auth flow**: `POST /admin/auth/login` (email+password, rate-limited, constant-time
-dummy-hash comparison against a nonexistent email — identical anti-enumeration pattern to
-`client_service.authenticate_client`) → `{token, admin}`. The JWT is signed with a new,
-**separate** secret (`ADMIN_JWT_SECRET`, own signing domain — a leak of `CLIENT_JWT_SECRET`
-should never let someone forge admin sessions or vice versa), 12h expiry (a staff session,
-not a buyer's). `get_current_admin` (`app/core/security.py`) decodes it and loads the
-`AdminUser`; `require_super_admin` wraps it and 403s (not 401 — authenticated but
-forbidden) if `role != "super_admin"`. `staff` gets everything except: `AdminUser`
-management, `DELETE` on categories/vehicles/coupons, and refund issuance.
-
-**Bootstrap**: a standalone `create_admin_user.py` at the repo root (not imported by the
-app — same convention as `secret.py`/`import_gonher_vehicles.py`) creates the first
-`super_admin`, run once via `railway run python create_admin_user.py --email ... --name
-... --password ...`. Every subsequent `AdminUser` is created via `POST /admin/admins`
-(`super_admin` only) — no self-service password reset exists or is planned; a `super_admin`
-resets a colleague's password directly via `PATCH /admin/admins/{uuid}`, appropriate for a
-small internal team.
-
-**Audit log** (`app/models/audit_log.py`, migration `c9e2d4a7f158`, `app/services/audit_service.py`):
-`admin_audit_log` records `admin_user_id`/`action`/`resource_type`/`resource_id`/`detail`
-(JSON). `log_action(...)` is called inline in the same transaction as the mutation it's
-logging (same pattern `SicarSyncOutbox` inserts already follow — no commit of its own),
-right before that route's own commit. **Scoped to the highest-value mutations for this
-pass, not literally every admin endpoint** (~30 exist today): order accept/cancel/refund,
-`AdminUser` create/update, coupon create/update/delete, category/vehicle delete, review
-moderate/delete. Extending it to more routes later is a small, additive change per route —
-this wasn't a hard technical ceiling, just a deliberately bounded first slice.
-`GET /admin/audit-log` (`super_admin` only) lists it, filterable/paginated.
-
-**Partial refunds** (`app/models/refund.py`, migration `e6a1c8d3f942`): `payment_service.refund_payment`
-gained an optional `amount` param (Mercado Pago's refund endpoint natively supports partial
-amounts server-side; omitting it still refunds in full, unchanged for every existing call
-site). A `refunds` table holds one row per refund event — an order can have several
-(multiple partial refunds over time); the total refunded is `SUM(Refund.amount) WHERE
-order_id = :id`, not a separate running-total column, to avoid a second source of truth to
-keep in sync. `POST /admin/orders/{uuid}/refund` (`super_admin` only) validates the order
-is `PAID` with an `mp_payment_id` (`409` otherwise) and that `amount` doesn't exceed
-`order.total` minus prior refunds (`400` otherwise), then calls Mercado Pago and persists
-the row. **Deliberately does not touch `Order.status`** (stays `PAID`) **or**
-`Product.stock`/`reserved` — a refund is a money-only event in this design; restocking a
-physically-returned item would need its own confirmation workflow and isn't bundled here
-(YAGNI). The two pre-existing full-refund call sites (`POST /orders/{id}/cancel` and
-`admin_service.cancel_order_admin`) now also insert a `Refund` row (`issued_by_admin_id =
-NULL` for the customer-initiated one) — so `refunds` is the single source of truth for "how
-much of this order has been refunded" instead of a special case living outside the table.
-
-**Error tracking** (`app/core/error_tracking.py`): a tiny provider-agnostic
-`capture_exception`/`capture_message` pair — today's implementation just logs (unchanged
-behavior), wired into a new catch-all `Exception` handler in `main.py` (before the generic
-500) and into both worker failure points (`sicar_sync_worker.py`'s `MAX_ATTEMPTS`
-exhaustion, `sync_task.py`'s sync failures — additive, alongside their existing
-logging/webhook calls, not replacing them). Adopting a real provider (Sentry or otherwise)
-later means changing only this module's internals — no call-site changes anywhere.
-
-**Test suite + CI**: `tests/` (pytest + pytest-asyncio) covers the highest-risk paths first
-— checkout/reservation (`test_checkout_flow.py`, `test_stock_reservation.py`), the payment
-webhook's status transitions (`test_payment_webhook.py`), and local-first cancellation
-(`test_cancellation.py`) — plus the new admin auth/refund pieces
-(`test_admin_auth.py`/`test_refunds.py`). `tests/conftest.py` runs `alembic upgrade head`
-once per session against a **real, separate** Postgres database (`TEST_DATABASE_URL`, or
-`DATABASE_URL` with the db name swapped to `sicarx_test` if unset — never the dev/prod
-database) and gives each test its own transaction that's rolled back afterward (real
-SQL/constraints, no cross-test pollution, no per-test schema teardown). External services
-(Mercado Pago, in `test_refunds.py`) are monkeypatched at the service-function boundary —
-no test makes a real third-party call. `.github/workflows/tests.yml` runs the suite against
-a `postgres:16` service container on every push/PR to `main`.
-
-**Correction (2026-09-26)**: an earlier version of this note said the suite had never been
-executed and blamed the failing DB connection on "local security software". Both are now
-wrong. The Postgres server log showed the real cause, a **password authentication failure**:
-the `.env` credentials didn't match the local instance, which asyncpg surfaces confusingly as
-`connection was closed in the middle of operation`. With a correct local database the whole
-suite runs green: 161 tests plus 13 Typesense-only ones as of the search work above. The
-local test DB is `sicarx_test` (empty; the session fixture migrates it).
-
-### Auth on this API's own endpoints
-
-Every route **except** `/v1/admin/*` depends on `validate_api_key` (`app/core/security.py`), which checks a static `x-api-key` header against `settings.X_API_KEY`. This is separate from both SICAR X token schemes above — it authenticates the frontend to this middleware, not this middleware to SICAR X. `/v1/admin/*` has never used this scheme (internal/staff surface, not the storefront frontend) — it's gated purely by its own `AdminUser` JWT (`Authorization: Bearer`, see "Admin RBAC, audit log, and partial refunds" above) via `get_current_admin`.
-
-## Logging
-
-- The FastAPI app logs to `app.log` (configured in `main.py`).
-- The worker logs separately to `sync.log` via a `RotatingFileHandler` (10MB × 5 backups) configured in `app/worker/sync_task.py` — the two processes do not share a logger config.
-- Log messages and docstrings throughout are in Spanish; keep new code consistent with that convention.
+Two processes share one Postgres:
+1. **FastAPI app** (`app/main.py`).
+2. **Worker** (`app/worker/sync_task.py`), own `AsyncIOScheduler` and logging:
+   - catalog sync, every 5 min;
+   - `sicar_sync_worker` (drains `sicar_sync_outbox`), every 1 min;
+   - `search_index_worker`: `drain_dirty` every 30 s, `reconcile_synonyms` every 5 min, `ensure_index_on_startup`;
+   - `webhook_outbox_worker` every 1 min, `stock_alert_worker` every 5 min, `wishlist_price_drop_worker` hourly, `abandoned_cart_worker` every 30 min.
+
+Conventions: log messages and docstrings are in Spanish. Money is `Decimal` (`Decimal(str(x))`, never from float), quantized with `ROUND_HALF_UP`. Status vocabularies are plain strings constrained in the app layer, not DB enums. Externally referenced rows use a `uuid`, not `id`; a resource not owned by the caller is `404`, not `403`. External HTTP calls use plain `httpx` (no SDKs); blocking work (bcrypt, `PyJWKClient`) goes through `asyncio.to_thread`. Never use `Depends(XxxDep)` on an `Annotated` dep alias (causes `422 args/kwargs`).
+
+### SICAR X auth
+
+One admin/B2B token (`app/services/sicar_auth.py`, `sicar_auth` singleton per process), seeded from `SICAR_TOKEN`. Every caller: try → on 401 `refresh_token()` → retry once. There is no per-shopper SICAR token or `/session/init` anymore.
+
+### Placing an order (`app/api/routes/orders.py`)
+
+No live SICAR X call anywhere in checkout.
+1. Body is only `products: [{uuid, quantity}]`, `deliveryInfo`, optional `couponCode`. `X-Client-Token` optional (absent → guest; invalid → 401).
+2. `validate_cart_items` checks local `Product` (`is_deleted=false`, `is_active=true`) and rejects with `409` if missing, not enough `available_stock`, or `price <= 0` (the sync can save `0.00` when a price-list key is missing).
+3. `build_order_payload` (pure): `priceTax` = `Product.price` (IVA included); `amountTax` = **line total** (`price * quantity`), not unit price; `unit` = `Product.unit_short_name` or `"PZA"`; `serie` = `"TL"`. A coupon discount is subtracted once from the total, never per line.
+4. `apply_reserved_deltas` reserves stock; `create_local_order` persists `status="TO_PAY"` (adds `imageUrl` per line). Response includes `id`, `orderUuid`, `amount`.
+- `deliveryType` is `PICKUP` | `DELIVERYMAN`. `DELIVERYMAN` needs exactly one of `addressUuid` (account) or inline `address` (guest). Required address fields: `street`, `city`, `county`, `state`, `zipCode`, `extNumber`, `neighborhood` → `400` naming missing ones. Snapshot uses `ClientAddressPublic` shape; `country` is `"MEX"`. No shipping cost is charged; `Order.delivery_cost` is an unused placeholder.
+- `Idempotency-Key` header: `OrderIdempotencyKey` claim-then-fill (unique on `(client_account_id, key)`, partial unique on `(guest_email, key) WHERE client_account_id IS NULL`). Existing filled claim → replay; unfilled < 2 min → `409`; older → discard and proceed.
+
+### Payments (Mercado Pago Orders API, `app/services/payment_service.py`)
+
+- Frontend renders the Payment Brick (card, debit, OXXO; no Wallet) with `amount`, then calls `POST /orders/{id}/pay` with the Brick's formData. Amount always comes from `order.total`. `X-Idempotency-Key` = hash of `order.uuid` + payload.
+- Only the **Orders API** (`/v1/orders`, ids `ORD...`) is used; test credentials are rejected by the Payments API. `_order_as_payment` maps responses to the old Payments shape (`processed`→`approved`, `action_required`→`pending`, `failed`→`rejected`, `canceled`→`cancelled`, `charged_back`, `in_process`→`in_mediation`). Non-`ORD` ids get `409`; webhooks for them are ignored.
+- Sandbox gotchas: declined card = HTTP 402 with the order in `data` (treated as `rejected`); refunded amount comes from `refunded_amount` or the sum of `processed` refunds (`refunds[]` includes failed ones); a refund right after another can get `409 post_processing_operation_pending` (retried with same key); partial refund needs the `PAY...` transaction id; `/cancel` only works on `created`/`action_required`; `payment_method.type` required (frontend sends `paymentTypeId`, else inferred from `/v1/payment_methods`, cached 1 h); no `notification_url` — webhooks are configured on the MP app (topics `order`, `topic_chargebacks_wh`).
+- `order_history_service.finalize_order_payment` is the **only** place mapping MP status to order state: `approved` → `PAID` (only if not `CANCELLED`) + confirm coupon + sales count + `order-confirmed` webhook (on the real transition only); `pending`/`in_process` → stays `TO_PAY`, stores `mp_ticket_url`; `rejected`/`cancelled` → `prepare_local_cancellation`; `charged_back` / `in_mediation` → set `disputed_at` once, alert admin on the real status transition, status stays `PAID`; `refunded` (out-of-band) → insert a `Refund` row + admin alert.
+- `POST /payments/webhook` is the only non-admin route without `x-api-key`. Signature: HMAC-SHA256 of `id:{data.id};request-id:{x-request-id};ts:{ts};` with `MP_WEBHOOK_SECRET` (the app's **test-mode** key); accepts `data.id` as-is or lowercased. It re-fetches the order from MP, never trusts the body, and always returns 200. Chargebacks are let through even on a `CANCELLED` order.
+- Chargeback detail: cases listed in `transactions.chargebacks[]` are fetched via `GET /v1/chargebacks/{case_id}` and upserted by `chargeback_service.process_chargeback` (`IN_PROCESS`/`WON`/`LOST` from `coverage_applied`). MP's field is misspelled `coverage_elegible`. A lost chargeback changes nothing automatically.
+- Outbound frontend webhooks (`order-confirmed`, `order-cancelled`, `order-dispatched`, `verification-requested`, `password-reset-requested`) are HMAC-signed (`X-Webhook-Timestamp`, `X-Webhook-Signature` = hex HMAC-SHA256 of `f"{ts}." + body` with `FRONTEND_WEBHOOK_SECRET`), non-fatal, no retry. `clientEmail` prefers `deliveryInfo.contactInfo.email`, falls back to the account email.
+- Tests: `tests/test_mp_orders_api.py`.
+
+### Cancellation (local-first)
+
+- `order_history_service.prepare_local_cancellation` is shared by `POST /orders/{id}/cancel`, `DELETE /orders/{id}` and `finalize_order_payment`. It takes `SELECT ... FOR UPDATE`, rechecks status inside the lock (409 if already cancelled), sets `CANCELLED`, releases the coupon redemption if `PENDING`, and: if not accepted → releases `reserved`; if accepted → enqueues a `SicarSyncOutbox(action="CANCEL")` (stock restored when it succeeds). No commit of its own.
+- MP refund/cancel runs synchronously **before** it; `mp_resolved_here` makes sure a real MP action is committed even if the cancellation loses the race.
+- `/cancel` returns `409` when `dispatch_status == "DISPATCHED"` (checked before any money moves; `COMPLETE` is still cancellable, since it's also the terminal state for `PICKUP`).
+- `DELETE /orders/{id}` only for `TO_PAY`; soft-deletes via `Order.deleted_at`. Every customer/webhook lookup filters `deleted_at IS NULL`; the outbox worker deliberately doesn't.
+- `sicar_sync_worker.py`: claims one row with an atomic `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING`, committed before the HTTP call (never hold a lock across it). `IN_PROGRESS` rows older than 5 min are reclaimable. `ACCEPT`/`CANCEL` call `sicar_stock_service.apply_order_stock_delta(items, branch_id, sign=∓1)` — SICAR only ever learns inventory deltas, never orders/documents/dispatch. Backoff 1/2/4/8/16 min, `MAX_ATTEMPTS=5`, then `FAILED` + `notify_admin_sicar_sync_failed` + `capture_message`.
+- `OrderCancelResponse.sicarTimestamp` is the local cancellation time (epoch ms).
+
+### Stock reservation (`Product.reserved`, `available_stock`)
+
+- `Product.stock` = SICAR truth, written by the sync and by the outbox success handlers. `Product.reserved` = held by open, not-yet-accepted orders; excluded from the sync. `available_stock` (hybrid, `GREATEST(stock - reserved, 0)`) is what every customer-facing read and `in_stock` filter uses (partial expression index `ix_products_available_stock` must match that exact expression).
+- Lifecycle: checkout → `reserved += q`; cancel before accept → `reserved -= q`; `ACCEPT` success → `stock -= q`, `reserved -= q`; `CANCEL` success → `stock += q`.
+- After each sync, `reserved > stock` rows trigger `notify_admin_stock_drift`.
+- Customer `ProductBasic.stock` is sourced from `available_stock`; admin lists use `ProductAdminBasic` (`stock` + `availableStock`).
+- Batched `UPDATE ... WHERE id = bindparam(...)` statements need `.execution_options(dml_strategy="core_only")`, otherwise SQLAlchemy raises `bulk synchronize of persistent objects not supported` with 2+ rows.
+
+### Catalog
+
+- **Sync** (`sync_task.py`): upserts on `sicar_uuid`, only rows that differ (`_changed_product_values`, compared in Python — not a `WHERE` on `ON CONFLICT`, which still writes WAL). Products not seen in a completed pass get `is_deleted=True` (skipped if SICAR returned nothing). `last_sync_id` = last pass that changed the row. Writes `SyncStatus`. Commits after each page read.
+- `Product.price` comes from `/product/list` `prices[f"N{price_list_id_suffix}"]`, IVA included.
+- `is_active` (SICAR `hidden`, via GraphQL per page): full check at most hourly (`HIDDEN_REFRESH_INTERVAL`, `_last_full_hidden_refresh`); other passes only check new products. A failed page keeps stored values. Hiding/unhiding takes up to 1 h to show. Tests: `tests/test_catalog_sync.py`.
+- **PIM-owned columns, never in the sync whitelist**: `brand`, `bullet_points`, `technical_specs`, `contents`, `description`, `attributes`, `variant_group_uuid`, `sales_count`, `reserved`, `average_rating`, `reviews_count`, `compare_at_price`, `sale_ends_at`, `package_weight_kg`/`package_length_cm`/`package_width_cm`/`package_height_cm`. Any new locally-owned column must stay out of `product_values` too.
+- `GET /products/{uuid}` filters deleted/inactive, and lazily refreshes `additional_skus`, `tags`, `additional_images`, `sales_unit_uuid`, `unit_short_name`, etc. from SICAR GraphQL if `details_updated_at` is null/>24h. `description` is admin-authored, not refreshed.
+- Product info edits: `PATCH /admin/products/{uuid}/info` (`exclude_unset`) or the `InfoProducto` sheet of the bulk import (blank cell = keep, literal `NULL` = clear). `brand` is normalized by `brand_service.normalize_brand` (trim, `""`→null, casing untouched), so grouping by `lower(brand)` is enough. `hasBrand` filter on `/products`/`/search`.
+- **Package dimensions** (`package_dimensions_service.py`, for shipping quotes): `package_weight_kg` + `package_length_cm/width_cm/height_cm` of one sale unit's package. All four or none (`ck_products_package_dims_all_or_none`), all `> 0`; caps 1500 kg / 600 cm; rounded to 3/2 decimals, a positive value below the step rounds up to it. Not in the search trigger. Written by `PUT/DELETE /admin/products/{uuid}/package-dimensions`, the `Medidas` bulk-import sheet (replace; only changed rows written) and `import_package_dimensions.py` (Urrea distributor template: SICAR `sku` = `"U"` + its `Código`, never the raw code, which collides with other brands; EAN fallback; dry-run by default, `--apply` writes to `DATABASE_URL`, `--out` builds a `Medidas` xlsx to upload in prod). Exposed as `packageDimensions` on `GET /products/{uuid}`. Not yet used by checkout or `shipping_service`.
+- Catalog listing (`catalog_service`): `tag` filter uses JSONB `@>` with a GIN index; `Product.price` is `Numeric(10,2)`.
+- Postgres search (now the Typesense fallback): `search_normalize(sku/name)` (unaccent, strip `-`) with trigram GIN indexes `ix_products_sku_trgm_search`/`ix_products_name_trgm_search`; prefix matches rank first. Needs `pg_trgm` (extension privileges). "0 scans" on Railway's index dashboard doesn't mean unused; check the code.
+- **Taxonomy**: self-referencing `categories` (`parent_uuid`), admin-managed, not synced. `get_descendant_uuids` is a recursive CTE. `product_categories` (N:M) is the PIM tagging used by the `taxonomyUuid` filter; `Product.department_uuid`/`category_uuid` are SICAR's raw classification.
+- **Vehicles**: flat `vehicles` table (`vehicle_type` `AUTOMOTIVE`/`MOTORCYCLE`, `year_end` null = current), `product_vehicles` N:M, `vehicleUuid` filter. Public cascade `GET /vehicles/makes|years|models|engines` (order: type → make → year → model → engine) and `GET /vehicles`. Seeded once from Gonher's public reference (`import_gonher_vehicles.py`, heuristic parsing). **asyncpg gotcha**: `(:p IS NULL OR col = :p)` with `None` raises `AmbiguousParameterError`; use `CAST(:p AS VARCHAR)`.
+- **Bulk import** (`POST /admin/bulk-import/products`, `bulk_import_service.py`): sheets `Categorias` (comma/semicolon-separated slugs), `Vehiculos`, `Atributos`, `Variantes`, `InfoProducto`, `Medidas`. Products resolved by `sku` (case-insensitive) with `additional_skus` fallback. Additive (`ON CONFLICT DO NOTHING`), partial success with per-row errors; batch-resolves in a constant number of queries. `GET /admin/bulk-import/template` shares the same column constants.
+
+### Search with Typesense (`/search`, `/search/suggest`)
+
+Spec: `docs/superpowers/specs/2026-09-26-typesense-search-design.md` (may have been deleted).
+- Typesense returns only ids/order/total; `search_service.hydrate` loads products from Postgres (price/stock always live). Falls back to `catalog_service.search_products` when unconfigured/down/erroring. `typesense_client.py`: 1 s connect / 2 s read, circuit breaker skips Typesense for 30 s after a network error or 5xx.
+- **Indexing** (worker only): `products.search_dirty_at` is set **only by Postgres triggers** (on indexed-column changes, availability crossing zero, photo gained/lost, sale columns; statement-level triggers on `product_categories`/`product_vehicles`). `drain_dirty` clears with compare-and-clear. `full_rebuild` (new collection → stopwords/synonyms → alias swap → drop old) runs only at startup when the `products` alias is missing or on another `SCHEMA_VERSION`. **Bump `SCHEMA_VERSION` whenever `build_schema`/`to_document` change.** `drain_dirty`/`full_rebuild` share an `asyncio.Lock`.
+- `normalize_search_text` is applied identically to names, queries and synonyms: lowercase, no accents, mixed fractions as one token (`1 1/2` → `1_1/2`), number+unit joined (`10 mm` → `10mm`, standalone numbers only), naive Spanish singular. Typesense's `stem` is deliberately not used (broken for `es`).
+- **Ranking**: `sku_compact`/`name_compact`/`additional_skus` without typos; `name_first` low weight; `text_match_type=max_weight`; prefix only when the last word has ≥3 chars. Sort: `_text_match`, then `_tiebreak_eval` (name starts with a query word > in stock > has photo), then `sales_count`. `_eval` doesn't sum clause weights — every combination is listed as its own clause. Exact SKU is pinned first on page 1 via a second search. `multi_search` order: `[main, price stats, SKU pin]`.
+- `GET /search/suggest`: products + up to 4 brands (facet); `brands: []` on fallback.
+- Synonyms: `search_synonyms` table is the source of truth, stored normalized; admin CRUD at `/admin/search/synonyms`; push to Typesense is best-effort (`syncedToSearch`), reconciled every 5 min.
+- Known leftovers: `te pvc` (add a one-way synonym); confirm which `sortBy` the storefront sends by default (only `relevance` uses this ranking).
+
+### Sorting, price filter, priceRange
+
+- `sortBy: "relevance"` on `/products`: in stock first, then has photo, then `sales_count desc, name`. Every Postgres sort ends in `Product.id` (stable pagination); no `sortBy` = `ORDER BY id`.
+- `minPrice`/`maxPrice` (`PriceFilterMixin`, inclusive, `422` if min > max) filter `price`. `priceRange` = min/max of the set without the price filter, over `price > 0`; null if empty. The Postgres typo fallback only runs when the unpriced word match is empty.
+
+### Sales, related products, notifications, marketing
+
+- **Sale price**: `compare_at_price`/`sale_ends_at` (admin-entered previous price). Always read via `Product.is_on_sale` / `effective_compare_at_price` / `effective_sale_ends_at` (a sale disappears when it expires or SICAR's `price` rises to ≥ previous). Typesense field `sale_until` (`0` = none, `SALE_NO_END`). Admin `PUT/DELETE /admin/products/{uuid}/sale` and bulk `/admin/products/sale` (audited).
+- **Related** (`GET /products/{uuid}/related`, `related_service.py`): bought together (PAID, 180 d) → taxonomy node, then parent → brand → vehicles; in-stock first; uuid list cached in-process 1 h (only valid with a single `api` instance).
+- Order line enrichment (`productUuid`/`unitPrice`/`lineTotal`) happens at serialization (`schemas/orders.enrich_order_items`); stored JSON untouched.
+- **`webhook_outbox`**: used by `product-back-in-stock`, `wishlist-price-drop`, `cart-abandoned`. `enqueue_webhook` only `db.add`s in the caller's transaction. Worker retries after 1 min, 10 min, 1 h, then `FAILED`. Adds `X-Webhook-Id`/`X-Webhook-Event`. Older webhooks still go direct.
+- **Stock alerts**: subscribe only while `available_stock = 0`; one active per product+email (partial unique); rate-limited; the worker detects availability every 5 min (no sync hook); expire after 90 days.
+- **Marketing**: `ClientAccount.marketing_emails` defaults `false`. `marketing_consent_service.record_marketing_consent` is the **only** writer (sets bool, timestamp and an append-only `marketing_consent_events` row, no commit). Events are immutable (trigger blocks UPDATE/DELETE/TRUNCATE). IP/UA from `ConsentContextDep` (`X-Client-IP`/`X-Client-User-Agent` only with a valid `X-Frontend-Auth`).
+- Unsubscribe tokens: no-`exp` JWT on `CLIENT_JWT_SECRET`, `purpose: "unsubscribe"`, scopes `marketing` (sub = client uuid) / `stock-alert` (sub = alert uuid); `POST /notifications/unsubscribe` is idempotent.
+- `wishlist_price_drop_worker`: vs `WishlistItem.baseline_price`, drop ≥5%, ≤1 webhook per client per 24 h. `abandoned_cart_worker`: account carts idle 2 h with no newer order, ≤1 per 7 days. **Gotcha**: `Cart.updated_at` has `onupdate`; mark `abandoned_notified_at` with a core `UPDATE` that sets `updated_at=Cart.updated_at`.
+
+### Client accounts
+
+- `ClientAccount`/`ClientAddress` are local accounts, unrelated to SICAR. Session JWT: HS256 on `CLIENT_JWT_SECRET`, `sub` = client uuid, explicit `iat`. `get_current_client` reads `Authorization` (Bearer optional); `/orders`, `/cancel`, `/pay`, cart use `X-Client-Token` (`OptionalClientHeaderDep`). Both go through `_resolve_client_from_token`, which rejects tokens with any `purpose` claim and tokens whose `iat` predates `password_changed_at`.
+- Emails are lowercased on every read/write. `authenticate_client` always runs bcrypt (dummy hash for unknown emails). Rate limits are in-memory per process (`slowapi`).
+- `ClientAccount.addresses` is not eager-loaded; use `await client.awaitable_attrs.addresses` before serializing (avoids `MissingGreenlet`).
+- Register/login/google/reset-password return `{token, client, cart}` (`_build_auth_response`) and accept an optional `cartToken` merged tolerantly.
+- **Google** (`POST /auth/google`): verifies the ID token with `PyJWKClient` (needs `cryptography`). Matches by `google_sub`; an existing email account → `409` (no auto-linking). `is_verified` from Google's `email_verified`.
+- **Email verification**: stateless JWT with `purpose: "email_verify"`, 24 h. Soft: blocks nothing. Verifying links guest orders by email (`link_guest_orders_by_email`, same transaction) — never on unverified registration.
+- **Password reset**: DB-backed single-use `PasswordResetToken` (only `sha256` stored, 30 min TTL, previous ones invalidated). `forgot-password` always returns the same 200; Google-only accounts get the webhook with `hasPassword: false` and no token. Password changes (reset or `PATCH /auth/me`, which needs `current_password`) set `password_changed_at`.
+- Addresses: `/auth/me/addresses`; one default per client via partial unique index (clear old default first). `zip_code` `^\d{5}$`; `latitude`/`longitude` come from the frontend (it calls envia.com Geocodes directly; this backend never geocodes).
+
+### Orders history and guest checkout
+
+- `Order` is the only record of an order anywhere. `client_account_id` nullable FK (no cascade) with `guest_email`; `CHECK ck_orders_has_identity`. `items`/`delivery_info` are JSON snapshots.
+- `GET /auth/me/orders[/{uuid}]` are Postgres-only.
+- Guests: require `deliveryInfo.contactInfo.email`, can't use `addressUuid` or coupons. `get_order_for_action(db, client, order_id)` resolves ownership for `/pay`, `/cancel`, `DELETE`, `GET /orders/guest/{id}`: with a client, by ownership; without, `order_id` matches `sicar_order_id` or `Order.uuid` with `client_account_id IS NULL`. Once linked to an account, the guest path 404s by design.
+- `order_display_service.resolve_client_name` handles guest names (separate module to avoid circular imports).
+- `dispatch_status` is purely local: `accept_order` sets `PENDING` and enqueues `ACCEPT`; `advance_order_dispatch_status` follows `_LEGAL_DISPATCH_TRANSITIONS` (`PENDING`→`PREPARING`→`COMPLETE`→`DISPATCHED`).
+
+### Cart
+
+- `Cart.items` = `[{uuid, quantity}]` only; every read re-joins live `Product` (`cart_service._enrich`), unavailable lines get `available: false`.
+- Identity: `X-Client-Token` account first, else the `charly_cart_token` httpOnly cookie (`app/core/cookies.py`, path `/v1/cart`, `SameSite=None; Secure` in production, `Lax` in development). `client_account_id` nullable + unique.
+- `GET` never creates; `PUT`/`PATCH /items` silently mint an anonymous cart; `POST /cart/merge` (Authorization) 404s on a bad token. `Cart.coupon_code` is a preview only.
+
+### Wishlist
+
+Account-only. `WishlistCollection` (one `is_default` "Favoritos" per client, partial unique index, created lazily on first `PUT /wishlist/favorites/{uuid}`) and `WishlistItem` (unique per collection+product). Add/remove are idempotent; deleted/inactive products stay with `available: false`.
+
+### Coupons (`coupon_service.py`)
+
+- `discount_type` `PERCENTAGE` (optional cap) / `FIXED_AMOUNT`; `scope_type` `ORDER` / `CATEGORY` (descendant-inclusive) / `PRODUCT`; limits `max_total_uses`, `max_uses_per_client`, `first_purchase_only`, `coupon_assigned_clients`; window and `min_order_amount`.
+- Authoritative only in `POST /orders`: `lock_and_validate_coupon` takes `SELECT ... FOR UPDATE` on the coupon, counts `PENDING`+`CONFIRMED` redemptions, then `create_redemption`.
+- `CouponRedemption`: `PENDING` → `CONFIRMED` (on `TO_PAY`→`PAID`) or `RELEASED` (on cancel while pending). A `CONFIRMED` redemption is never released, even on refund (anti-abuse).
+
+### Reviews
+
+`product_reviews` (one per client per product, admin hide/reply) and `product_review_helpful_votes`. `Product.average_rating`/`reviews_count` are recomputed fully (`review_service.recompute_product_rating`) after any change to the visible set. `isVerifiedPurchase` is computed once at creation.
+
+### Admin (`/v1/admin/*`)
+
+- Auth: `AdminUser` JWT (`ADMIN_JWT_SECRET`, 12 h) from `POST /admin/auth/login`, via `get_current_admin` on every admin router (no `x-api-key`). Roles `super_admin` / `staff`; `require_super_admin` (403) guards admin management, audit log, refunds, and `DELETE` of categories/vehicles/coupons/synonyms. Admins are deactivated, never deleted. First admin: `railway run python create_admin_user.py --email ... --name ... --password ...`.
+- Audit: `audit_service.log_action` inline in the mutation's transaction, for the high-value mutations only (accept/cancel/refund, admins, coupons, deletes, reviews, brands, sales, synonyms).
+- Refunds: `POST /admin/orders/{uuid}/refund` (partial or full, `PAID` with an MP id, amount ≤ total − prior refunds). `Refund` rows are the single source of truth for refunded amounts (customer/admin full refunds insert one too). A refund never changes `Order.status` or stock.
+- System events (chargebacks, sync failures, stock drift) use `logger.critical` + admin webhooks, not the audit log.
+- **envia.com shipping** (`shipping_service.py`; only `DELIVERYMAN` orders in `COMPLETE`):
+  - `state` must be 2-3 chars: `_normalize_mx_state` converts names to ISO 3166-2:MX codes.
+  - `/ship/rate/` returning the same `meta:"error"` for every carrier → `502` with that message instead of empty options.
+  - `/ship/generate/` needs `shipment.{carrier,service,type}` nested plus `settings` (`printFormat: "PDF"`, `printSize: "STOCK_4X6"`); `meta:"error"` with HTTP 200 → `502`.
+  - Options with `dropOff != 0` (branch pickup/dropoff) are filtered out; branch codes are unsupported.
+  - Generate persists `Order.shipping_label` (incl. `shipmentId`, exposed to customers) and sets `DISPATCHED` immediately; no outbox. Cancel clears it and reverts to `COMPLETE`.
+- Dashboard stats aggregate only `PAID`, non-deleted orders; top products/categories unpack `Order.items` with `jsonb_array_elements`.
+
+### Auth summary
+
+Every non-admin route needs `x-api-key` (`validate_api_key`), except `POST /payments/webhook`. Admin routes use the admin JWT only. `X-Client-Token` must stay in CORS `allow_headers`.
+
+## Error tracking, tests, logging
+
+- `app/core/error_tracking.py`: `capture_exception`/`capture_message` always log; also report to Sentry if `init_error_tracking(service)` found `SENTRY_DSN`. Catch-all exception handler in `main.py`.
+- Tests: `tests/` (pytest + pytest-asyncio). `conftest.py` runs `alembic upgrade head` once per session and wraps each test in a rolled-back transaction. External services are monkeypatched at the service-function boundary. CI: `.github/workflows/tests.yml` with Postgres 16 and a Typesense service container. If the DB connection fails with `connection was closed in the middle of operation`, check the Postgres server log (usually wrong credentials).
+- Logs: API → `app.log`; worker → `sync.log` (`RotatingFileHandler`, 10 MB × 5). Separate logger configs.
