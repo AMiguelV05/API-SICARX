@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -89,6 +90,18 @@ class Settings(BaseSettings):
     # Opcional (envia.com no lo exige) - referencia de ubicacion para el origen, p. ej.
     # "Local 3, junto a la ferreteria". None si no se configura.
     ENVIA_ORIGIN_REFERENCE: Optional[str] = None
+
+    # Cotizacion y cobro de envio en el checkout (ver shipping_quote_service.py). Todas
+    # opcionales: el worker arranca sin ellas.
+    # Apagada = POST /orders se comporta como antes (envio sin costo, no exige cotizacion),
+    # aunque POST /shipping/quotes ya responda. Encenderla cuando el frontend mande `shipping`.
+    SHIPPING_CHECKOUT_ENABLED: bool = False
+    # Precio cobrado = tarifa de envia.com * (1 + %/100) + fijo, redondeado a centavos.
+    SHIPPING_MARGIN_PERCENT: Decimal = Decimal("0")
+    SHIPPING_MARGIN_FIXED_MXN: Decimal = Decimal("0")
+    # Paqueterias a consultar en el checkout, separadas por coma (nombres de envia.com, p. ej.
+    # "fedex,dhl,estafeta"). Vacio = todas las del catalogo (~24 llamadas por cotizacion).
+    SHIPPING_QUOTE_CARRIERS: str = ""
 
     model_config = SettingsConfigDict(env_file=".env")
 

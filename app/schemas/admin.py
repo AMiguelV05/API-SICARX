@@ -61,6 +61,10 @@ class AdminOrderPublic(CamelModel):
     delivery_assigned_at: Optional[datetime] = None
     # Foto fija tomada al crear la orden (None para PICKUP) - ver Order.delivery_address_snapshot.
     delivery_address: Optional[ClientAddressPublic] = None
+    # Costo de envio cobrado (incluido en total) y la opcion elegida en el checkout, completa
+    # (tarifa base de envia.com y cajas incluidas) - ver Order.shipping_quote.
+    delivery_cost: Optional[float] = None
+    shipping_quote: Optional[dict[str, Any]] = None
     # None hasta que POST .../shipping/generate tenga exito una vez - ver Order.shipping_label.
     shipping_label: Optional[ShippingLabelInfo] = None
     cancellation_reason: Optional[str] = None
@@ -137,11 +141,13 @@ class ShippingOriginOverride(CamelModel):
     reference: Optional[str] = None
 
 class ShippingDimensionsRequest(CamelModel):
-    """Dimensiones/peso del paquete, compartido por /shipping/quote y /shipping/generate; validado > 0 via Pydantic (422, no 400)."""
-    weight: float = Field(gt=0, description="Kilogramos")
-    length: float = Field(gt=0, description="Centimetros")
-    width: float = Field(gt=0, description="Centimetros")
-    height: float = Field(gt=0, description="Centimetros")
+    """Peso/medidas de UNA caja, compartido por /shipping/quote y /shipping/generate; validado
+    > 0 via Pydantic (422). Las cuatro o ninguna: omitidas, se usan las cajas que se cotizaron
+    en el checkout (Order.shipping_quote.packages)."""
+    weight: Optional[float] = Field(default=None, gt=0, description="Kilogramos")
+    length: Optional[float] = Field(default=None, gt=0, description="Centimetros")
+    width: Optional[float] = Field(default=None, gt=0, description="Centimetros")
+    height: Optional[float] = Field(default=None, gt=0, description="Centimetros")
     origin: Optional[ShippingOriginOverride] = Field(default=None, description="Override opcional del origen - ver ShippingOriginOverride")
 
 class ShippingQuoteRequest(ShippingDimensionsRequest):
@@ -159,8 +165,9 @@ class ShippingQuoteResponse(CamelModel):
     options: List[ShippingQuoteOption]
 
 class ShippingGenerateRequest(ShippingDimensionsRequest):
-    carrier: str = Field(min_length=1)
-    service: str = Field(min_length=1)
+    """carrier/service omitidos = los de la opcion que el cliente eligio (y pago) en el checkout."""
+    carrier: Optional[str] = Field(default=None, min_length=1)
+    service: Optional[str] = Field(default=None, min_length=1)
 
 class ShippingGenerateResponse(CamelModel):
     order_uuid: str

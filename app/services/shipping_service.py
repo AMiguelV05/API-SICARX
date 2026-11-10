@@ -131,11 +131,20 @@ def _origin_address(overrides: dict | None = None) -> dict:
 
 def _destination_address(order: Order) -> dict:
     """Campos de direccion vienen de `order.delivery_address_snapshot`; `name`/`phone`/`email`
-    de `order.delivery_info["contactInfo"]` (contacto real del checkout), no del address book.
+    de `order.delivery_info["contactInfo"]` (contacto real del checkout), no del address book."""
+    return destination_from(order.delivery_address_snapshot, (order.delivery_info or {}).get("contactInfo"))
+
+
+def destination_from(snapshot: dict | None, contact_info: dict | None) -> dict:
+    """`snapshot` en la forma ClientAddressPublic (camelCase, ver Order.delivery_address_snapshot).
     `company` siempre None (cliente final, a diferencia de _origin_address). `state` pasa por
-    `_normalize_mx_state` antes de mandarse a envia.com."""
-    snapshot = order.delivery_address_snapshot or {}
-    contact_info = (order.delivery_info or {}).get("contactInfo") or {}
+    `_normalize_mx_state` antes de mandarse a envia.com. Sin `contact_info` (cotizacion del
+    checkout, antes de que exista el pedido) se usa un contacto de relleno: la tarifa no
+    depende de el."""
+    snapshot = snapshot or {}
+    contact_info = contact_info or {
+        "name": "Cliente", "phone": settings.ENVIA_ORIGIN_PHONE, "email": settings.ENVIA_ORIGIN_EMAIL,
+    }
     return {
         "name": contact_info.get("name") or snapshot.get("label") or "Cliente",
         "company": None,
@@ -153,22 +162,23 @@ def _destination_address(order: Order) -> dict:
     }
 
 
-def _build_packages(weight: float, length: float, width: float, height: float) -> list[dict]:
-    """envia.com exige las medidas anidadas bajo un objeto `dimensions`, no como campos
-    planos del paquete."""
+def build_packages_payload(boxes: list[dict]) -> list[dict]:
+    """`boxes` = [{weight, length, width, height}] (kg/cm). envia.com exige las medidas
+    anidadas bajo un objeto `dimensions`, no como campos planos del paquete; una entrada por
+    caja (la tarifa se calcula sobre todas juntas)."""
     return [{
         "content": "Ferreteria",
         "amount": 1,
         "type": "box",
-        "weight": weight,
+        "weight": float(box["weight"]),
         "weightUnit": "KG",
         "dimensions": {
-            "length": length,
-            "width": width,
-            "height": height,
+            "length": float(box["length"]),
+            "width": float(box["width"]),
+            "height": float(box["height"]),
             "unit": "CM",
         },
-    }]
+    } for box in boxes]
 
 
 def missing_address_fields(snapshot: dict | None) -> list[str]:
@@ -210,10 +220,19 @@ async def _fetch_available_carriers() -> list[str]:
         return names
 
 
-async def get_shipping_quote(order: Order, weight: float, length: float, width: float, height: float, origin_overrides: dict | None = None) -> list[dict]:
-    """Cotiza opciones de envio con envia.com para `order`. No persiste nada, se puede
-    llamar repetidamente mientras el admin ajusta peso/medidas. Solo devuelve opciones
-    puerta a puerta (`dropOff: 0`) - ver el filtro en `_quote_one`.
+async def get_shipping_quote(order: Order, boxes: list[dict], origin_overrides: dict | None = None) -> list[dict]:
+    """Cotiza opciones de envio con envia.com para `order` (admin). No persiste nada, se
+    puede llamar repetidamente mientras el admin ajusta peso/medidas. Ver fetch_rates."""
+    return await fetch_rates(
+        _origin_address(origin_overrides), _destination_address(order), build_packages_payload(boxes),
+        context=f"orden {order.uuid}",
+    )
+
+
+async def fetch_rates(origin: dict, destination: dict, packages: list[dict], *, context: str, carriers: list[str] | None = None) -> list[dict]:
+    """Opciones de envio de envia.com, ordenadas por precio. Solo devuelve opciones puerta a
+    puerta (`dropOff: 0`) - ver el filtro en `_quote_one`. `carriers` limita las paqueterias
+    consultadas (nombres del catalogo de envia.com); None = todas.
 
     POST /ship/rate/ exige un `carrier` especifico (no hay comodin "all"/"*") - se llama
     una vez por carrier en paralelo (tope MAX_CONCURRENT_RATE_REQUESTS, ~24 carriers
@@ -222,10 +241,11 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     Si ningun carrier produjo opcion Y todos los `meta:error` comparten el mismo mensaje,
     se asume un problema estructural de la peticion (no falta de cobertura) y se levanta
     un 502 en vez de `200 {"options": []}` silencioso."""
-    origin = _origin_address(origin_overrides)
-    destination = _destination_address(order)
-    packages = _build_packages(weight, length, width, height)
-    carriers = await _fetch_available_carriers()
+    available = await _fetch_available_carriers()
+    if carriers:
+        wanted = {c.strip().lower() for c in carriers if c.strip()}
+        available = [c for c in available if c.lower() in wanted]
+    carriers = available
 
     options: list[dict] = []
     last_error_response = None
@@ -241,13 +261,13 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
                 return await client.post(RATE_URL, json=payload, headers=_envia_headers())
 
         try:
-            response = await request_with_backoff(attempt, max_attempts=2, context=f"envia.com rate {carrier} orden {order.uuid}")
+            response = await request_with_backoff(attempt, max_attempts=2, context=f"envia.com rate {carrier} {context}")
         except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as e:
             # Un carrier individual con falla de transporte se trata igual que un
             # meta:error de ese carrier (se omite, no tumba la cotizacion completa) - antes
             # esta excepcion se propagaba fuera de asyncio.gather y cancelaba las llamadas
             # a los demas ~24 carriers en curso.
-            logger.warning(f"envia.com: carrier '{carrier}' fallo por error de red para la orden {order.uuid}: {type(e).__name__}: {e}")
+            logger.warning(f"envia.com: carrier '{carrier}' fallo por error de red para la {context}: {type(e).__name__}: {e}")
             return []
 
         if response.status_code not in (200, 201):
@@ -260,7 +280,7 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
         if response_meta == "error":
             message = (body.get("error") or {}).get("message")
             logger.warning(
-                f"envia.com: carrier '{carrier}' no disponible para la orden {order.uuid}: {message}"
+                f"envia.com: carrier '{carrier}' no disponible para la {context}: {message}"
             )
             if isinstance(message, str) and message:
                 meta_error_messages.append(message)
@@ -270,7 +290,7 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
             # "generate" en generate_shipping_label) - no se levanta como fallo para no
             # arriesgar rechazar una respuesta valida por adivinar mal el valor esperado,
             # pero se deja visible en logs por si envia.com empieza a mandar algo distinto.
-            logger.warning(f"envia.com: carrier '{carrier}' devolvio un meta inesperado ('{response_meta}') cotizando la orden {order.uuid} - tratado como exito de todos modos, revisar si esto se repite.")
+            logger.warning(f"envia.com: carrier '{carrier}' devolvio un meta inesperado ('{response_meta}') cotizando la {context} - tratado como exito de todos modos, revisar si esto se repite.")
 
         raw_options = body.get("data") if isinstance(body, dict) else body
         if isinstance(raw_options, dict):
@@ -302,7 +322,7 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
         options.extend(parsed)
 
     logger.info(
-        f"envia.com: cotizacion para la orden {order.uuid} - {len(carriers)} carriers "
+        f"envia.com: cotizacion para la {context} - {len(carriers)} carriers "
         f"consultados, {len(options)} opciones obtenidas, {len(meta_error_messages)} "
         f"rechazados por carrier (meta:error), {'1 falla de transporte/auth' if last_error_response is not None else '0 fallas de transporte/auth'}"
     )
@@ -310,7 +330,7 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     if not options and last_error_response is not None:
         raise_upstream_error(
             last_error_response,
-            f"envia.com rechazo la cotizacion de envio para la orden {order.uuid}",
+            f"envia.com rechazo la cotizacion de envio para la {context}",
             "No se pudo cotizar el envío con envia.com.",
         )
 
@@ -319,7 +339,7 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
         shared_message = meta_error_messages[0]
         logger.error(
             f"envia.com: TODOS los carriers ({len(meta_error_messages)}) rechazaron la "
-            f"cotizacion de la orden {order.uuid} con el mismo mensaje - probable problema "
+            f"cotizacion de la {context} con el mismo mensaje - probable problema "
             f"estructural de la peticion, no de cobertura: {shared_message}"
         )
         raise HTTPException(
@@ -331,7 +351,7 @@ async def get_shipping_quote(order: Order, weight: float, length: float, width: 
     return options
 
 
-async def generate_shipping_label(order: Order, weight: float, length: float, width: float, height: float, carrier: str, service: str, origin_overrides: dict | None = None) -> dict:
+async def generate_shipping_label(order: Order, boxes: list[dict], carrier: str, service: str, origin_overrides: dict | None = None) -> dict:
     """Genera una guia real (con costo) para `order` via envia.com; re-resuelve
     origin/destination igual que get_shipping_quote. El llamador (admin_service) persiste
     el resultado y avanza dispatch_status - esta funcion solo habla con envia.com.
@@ -348,7 +368,7 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
     payload = {
         "origin": _origin_address(origin_overrides),
         "destination": _destination_address(order),
-        "packages": _build_packages(weight, length, width, height),
+        "packages": build_packages_payload(boxes),
         "shipment": {"carrier": carrier, "service": service, "type": 1},
         "settings": {"printFormat": "PDF", "printSize": "STOCK_4X6"},
     }
@@ -399,10 +419,12 @@ async def generate_shipping_label(order: Order, weight: float, length: float, wi
         "labelUrl": data.get("label") or data.get("labelUrl") or data.get("label_url"),
         "totalPrice": float(data.get("totalPrice") or data.get("total_price") or data.get("total") or 0),
         "currency": data.get("currency") or "MXN",
-        "weight": weight,
-        "length": length,
-        "width": width,
-        "height": height,
+        # Primera caja en los campos planos (contrato de ShippingLabelInfo); todas en `packages`.
+        "weight": float(boxes[0]["weight"]),
+        "length": float(boxes[0]["length"]),
+        "width": float(boxes[0]["width"]),
+        "height": float(boxes[0]["height"]),
+        "packages": [{k: float(box[k]) for k in ("weight", "length", "width", "height")} for box in boxes],
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -9,16 +9,16 @@ from app.core.security import validate_api_key, OptionalClientHeaderDep
 from app.core.rate_limit import limiter
 from app.models.order import Order
 from app.models.refund import Refund
-from app.services.order_service import validate_cart_items, build_order_payload, compute_subtotal, _to_decimal
+from app.services.order_service import validate_cart_items, build_order_payload, compute_subtotal, merge_requested_quantities, _to_decimal
 from app.services.product_stock_service import apply_reserved_deltas
 from app.services.order_history_service import create_local_order, get_order_for_action, finalize_order_payment, prepare_local_cancellation, lock_order_for_payment
 from app.services.order_cancellation_notification_service import notify_order_cancelled
 from app.services.order_idempotency_service import claim_idempotency_key, is_claim_abandoned, discard_claim
-from app.services.address_service import get_owned_address
+from app.services.delivery_service import ACCOUNT_INLINE_ADDRESS_ERROR, GUEST_ADDRESS_UUID_ERROR, resolve_delivery_address
+from app.services import shipping_quote_service
 from app.services import payment_service
 from app.services import coupon_service
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse, OrderPublic
-from app.schemas.client import ClientAddressPublic
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -59,20 +59,19 @@ async def create_order(
     `POST /orders/{id}/pay` (tarjeta/OXXO).
 
     `deliveryInfo.deliveryType`: `PICKUP` o `DELIVERYMAN` (requiere `addressUuid` de una
-    dirección ya guardada del cliente, o `address` inline si es invitado). No se calcula ni
-    cobra costo de envío en esta llamada.
+    dirección ya guardada del cliente, o `address` inline si es invitado).
+
+    Envío (con `SHIPPING_CHECKOUT_ENABLED`): para `DELIVERYMAN`, `shipping` lleva el
+    `quoteUuid`/`optionId` de `POST /shipping/quotes`; el precio de esa opción se suma a
+    `total` (`deliveryCost`). Si algún producto no tiene peso/medidas no se exige y el envío no
+    se cobra. `409` si la cotización expiró o no corresponde a este carrito/dirección: volver a
+    cotizar. Con la bandera apagada, el envío no se cobra (comportamiento anterior).
     """
     branch_id = order_payload.branchId or 151456
     price_list_uuid = order_payload.priceListUuid or settings.SICAR_PRICE_LIST_ID
     content_id = order_payload.contentId or str(uuid4())
 
-    # Suma en Decimal, no float: sumar floats directamente (p. ej. 0.1 + 0.2 en un producto
-    # a granel) puede arrastrar ruido de representacion binaria hacia build_order_payload.
-    requested_quantities = {}
-    for p in order_payload.products:
-        if p.uuid:
-            current = Decimal(str(requested_quantities.get(p.uuid, 0)))
-            requested_quantities[p.uuid] = float(current + Decimal(str(p.quantity)))
+    requested_quantities = merge_requested_quantities(order_payload.products)
     uuids = list(requested_quantities.keys())
 
     if not uuids:
@@ -88,11 +87,13 @@ async def create_order(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El correo es obligatorio para completar un pedido sin cuenta.")
         guest_email = contact_email.lower()
         if order_payload.deliveryInfo.addressUuid:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Un pedido sin cuenta no puede usar una dirección guardada; envía 'address' en su lugar.")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=GUEST_ADDRESS_UUID_ERROR)
         if order_payload.couponCode:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Los cupones de descuento requieren una cuenta. Inicia sesión o crea una cuenta para usar un cupón.")
     elif order_payload.deliveryInfo.address:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Una cuenta autenticada debe usar 'addressUuid' de una dirección guardada, no una dirección inline.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=ACCOUNT_INLINE_ADDRESS_ERROR)
+    if order_payload.shipping is not None and order_payload.deliveryInfo.deliveryType != "DELIVERYMAN":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'shipping' solo aplica a entrega a domicilio (DELIVERYMAN).")
 
     # Reclamo de idempotencia en su propia mini-transaccion, independiente del commit de
     # mas abajo. Sin el header, este bloque entero es un no-op.
@@ -121,6 +122,7 @@ async def create_order(
                         orderUuid=cached_order.uuid,
                         amount=float(cached_order.total),
                         discountAmount=float(cached_order.discount_amount) if cached_order.discount_amount is not None else 0.0,
+                        deliveryCost=float(cached_order.delivery_cost) if cached_order.delivery_cost is not None else None,
                     )
             if not is_claim_abandoned(claim):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya hay una solicitud en proceso con esta clave de idempotencia. Espera unos segundos e intenta de nuevo.")
@@ -148,75 +150,19 @@ async def create_order(
             discount_amount = coupon_service.compute_discount_amount(coupon, scoped_subtotal)
 
         delivery_address_snapshot = None
+        shipping = shipping_quote_service.OrderShipping(amount=None, snapshot=None)
         if order_payload.deliveryInfo.deliveryType == "DELIVERYMAN":
-            if client is not None:
-                address = await get_owned_address(db, client, order_payload.deliveryInfo.addressUuid)
-
-                missing = [field for field, value in [
-                    ("street", address.street),
-                    ("city", address.city),
-                    ("county", address.county),
-                    ("state", address.state),
-                    ("zipCode", address.zip_code),
-                    ("extNumber", address.ext_number),
-                    ("neighborhood", address.neighborhood),
-                ] if not value]
-                if missing:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"La dirección seleccionada está incompleta para entrega a domicilio (faltan: {', '.join(missing)})."
-                    )
-
-                delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True, exclude={"addressUuid", "address"})
-                delivery_info_dict["contactInfo"]["address"] = {
-                    "street": address.street,
-                    "extNumber": address.ext_number,
-                    "intNumber": address.int_number,
-                    "district": address.neighborhood,
-                    "city": address.city,
-                    "county": address.county,
-                    "state": address.state,
-                    "zipCode": address.zip_code,
-                    "country": "MEX",
-                    "reference": address.references,
-                }
-                # Foto fija del address book en la forma ClientAddressPublic, distinta del
-                # dict de arriba (el formato que exige Sicar X) - ver Order.delivery_address_snapshot.
-                delivery_address_snapshot = ClientAddressPublic.model_validate(address).model_dump(mode="json", by_alias=True)
-            else:
-                # Invitado: la direccion viene inline en el body (ya validada como completa
-                # a nivel de schema, ver GuestDeliveryAddress), no de un address book.
-                guest_address = order_payload.deliveryInfo.address
-
-                delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True, exclude={"addressUuid", "address"})
-                delivery_info_dict["contactInfo"]["address"] = {
-                    "street": guest_address.street,
-                    "extNumber": guest_address.ext_number,
-                    "intNumber": guest_address.int_number,
-                    "district": guest_address.neighborhood,
-                    "city": guest_address.city,
-                    "county": guest_address.county,
-                    "state": guest_address.state,
-                    "zipCode": guest_address.zip_code,
-                    "country": "MEX",
-                    "reference": guest_address.references,
-                }
-                # Mismo shape que la foto fija del camino de cuenta (ClientAddressPublic),
-                # pero sin fila real de address book - uuid queda None a proposito.
-                delivery_address_snapshot = ClientAddressPublic(
-                    uuid=None,
-                    street=guest_address.street,
-                    ext_number=guest_address.ext_number,
-                    int_number=guest_address.int_number,
-                    neighborhood=guest_address.neighborhood,
-                    city=guest_address.city,
-                    county=guest_address.county,
-                    state=guest_address.state,
-                    zip_code=guest_address.zip_code,
-                    references=guest_address.references,
-                    latitude=guest_address.latitude,
-                    longitude=guest_address.longitude,
-                ).model_dump(mode="json", by_alias=True)
+            contact_address, delivery_address_snapshot = await resolve_delivery_address(
+                db, client, order_payload.deliveryInfo.addressUuid, order_payload.deliveryInfo.address,
+            )
+            delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True, exclude={"addressUuid", "address"})
+            delivery_info_dict["contactInfo"]["address"] = contact_address
+            # Solo lecturas (la cotizacion ya se hizo en POST /shipping/quotes): seguro dentro
+            # de esta transaccion con los productos bloqueados.
+            shipping = await shipping_quote_service.resolve_for_order(
+                db, client_account_id=client.id if client else None, products=local_products,
+                quantities=requested_quantities, snapshot=delivery_address_snapshot, selection=order_payload.shipping,
+            )
         else:
             delivery_info_dict = order_payload.deliveryInfo.model_dump(exclude_none=True)
 
@@ -229,6 +175,7 @@ async def create_order(
             content_id=content_id,
             wholesale_prices=order_payload.wholesalePrices,
             discount_amount=discount_amount,
+            shipping_amount=shipping.amount or Decimal("0"),
         )
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
 
@@ -249,6 +196,8 @@ async def create_order(
             guest_email=guest_email,
             terms_accepted_at=order_payload.termsAcceptedAt,
             terms_accepted_version=order_payload.termsAcceptedVersion,
+            delivery_cost=shipping.amount,
+            shipping_quote=shipping.snapshot,
         )
 
         # Debe ir DESPUES de create_local_order (necesita local_order.id) y DENTRO de la
@@ -277,6 +226,7 @@ async def create_order(
             orderUuid=local_order.uuid,
             amount=total_amount,
             discountAmount=float(discount_amount),
+            deliveryCost=float(shipping.amount) if shipping.amount is not None else None,
         )
 
     except HTTPException:

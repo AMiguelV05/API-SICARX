@@ -27,6 +27,7 @@ from app.worker.webhook_outbox_worker import scheduled_webhook_outbox_job
 from app.worker.stock_alert_worker import scheduled_stock_alert_job
 from app.worker.wishlist_price_drop_worker import scheduled_price_drop_job
 from app.worker.abandoned_cart_worker import scheduled_abandoned_cart_job
+from app.worker.shipping_quote_worker import scheduled_shipping_quote_prune_job
 from app.worker.search_index_worker import (
     ensure_index_on_startup,
     scheduled_drain_job,
@@ -470,6 +471,8 @@ async def main():
     # favoritos cada hora (tope de uno por cliente al dia) y carritos abandonados cada 30 min.
     scheduler.add_job(scheduled_price_drop_job, 'interval', hours=1, max_instances=1, coalesce=True)
     scheduler.add_job(scheduled_abandoned_cart_job, 'interval', minutes=30, max_instances=1, coalesce=True)
+    # Cotizaciones de envio del checkout con mas de 30 dias.
+    scheduler.add_job(scheduled_shipping_quote_prune_job, 'interval', hours=24, max_instances=1, coalesce=True)
 
     # Indice de busqueda en Typesense (no-op sin TYPESENSE_URL/TYPESENSE_API_KEY) - ver
     # search_index_worker.py. El arranque reconstruye si falta el indice; un Typesense caido

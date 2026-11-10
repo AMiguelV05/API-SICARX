@@ -74,6 +74,17 @@ def _format_quantity(value) -> str:
     qty = float(value)
     return str(int(qty)) if qty == int(qty) else str(qty)
 
+def merge_requested_quantities(items) -> dict[str, float]:
+    """`[{uuid, quantity}]` -> {uuid: cantidad}, sumando uuids repetidos en Decimal (sumar
+    floats directo arrastra ruido binario, p. ej. 0.1 + 0.2 en un producto a granel).
+    Compartido por POST /orders y POST /shipping/quotes: ambos deben ver el mismo carrito."""
+    merged: dict[str, float] = {}
+    for item in items:
+        if item.uuid:
+            current = Decimal(str(merged.get(item.uuid, 0)))
+            merged[item.uuid] = float(current + Decimal(str(item.quantity)))
+    return merged
+
 def compute_subtotal(local_products: dict, quantities: dict, *, strict: bool = True) -> Decimal:
     """Suma price*quantity sobre `quantities` - misma acumulacion que hace el loop de
     build_order_payload, extraida para reutilizarse donde no hace falta construir tambien
@@ -103,6 +114,7 @@ def build_order_payload(
     content_id: str,
     wholesale_prices: bool = False,
     discount_amount: Decimal = Decimal("0"),
+    shipping_amount: Decimal = Decimal("0"),
 ) -> dict:
     """Ya NO se envia a Sicar X (solo ERP de inventario, ver CLAUDE.md) - construye el snapshot local de precios/totales/lineas. Conserva el calculo de impuestos original (amountTax = total de linea, no precio unitario) porque sigue siendo la fuente de verdad de como cobrar correctamente.
 
@@ -110,7 +122,11 @@ def build_order_payload(
     coupon_service) se resta del subtotal acumulado UNA sola vez, despues de construir las
     lineas, nunca redistribuida entre ellas - `amountTax` de cada linea sigue siendo el
     total de esa linea SIN descuento, el descuento vive solo a nivel de orden
-    (`ecOrderDto.total`/`discountAmount`)."""
+    (`ecOrderDto.total`/`discountAmount`).
+
+    `shipping_amount` (opcional, ya resuelto por shipping_quote_service.resolve_for_order) se
+    suma al total DESPUES del descuento: el cupon solo aplica a productos. `subtotal` sigue
+    siendo solo productos."""
     order_lines = []
     total = Decimal("0")
 
@@ -145,6 +161,7 @@ def build_order_payload(
     total = subtotal - discount_amount
     if total < 0:
         total = Decimal("0")
+    total += shipping_amount
     total_str = _format_amount(total)
     subtotal_str = _format_amount(subtotal)
 
@@ -167,6 +184,7 @@ def build_order_payload(
             "total": total_str,
             "subtotal": subtotal_str,
             "discountAmount": _format_amount(discount_amount),
+            "shippingAmount": _format_amount(shipping_amount),
             "products": order_lines,
             "ecOrderType": "REMOTE",
             "deliveryInfo": delivery_info,

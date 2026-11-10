@@ -454,12 +454,31 @@ async def _get_order_ready_for_shipping(db: AsyncSession, order_uuid: str) -> Or
     return order
 
 
+def _shipping_boxes(order: Order, data) -> list[dict]:
+    """Cajas para envia.com: las que capturo el admin (una), o si no mando ninguna medida,
+    las que se empacaron al cotizar en el checkout. 422 si faltan unas medidas y otras no,
+    o si no hay ni medidas ni cotizacion guardada."""
+    given = [data.weight, data.length, data.width, data.height]
+    if all(v is not None for v in given):
+        return [{"weight": data.weight, "length": data.length, "width": data.width, "height": data.height}]
+    if any(v is not None for v in given):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Manda las cuatro medidas (weight, length, width, height) o ninguna.")
+    packages = (order.shipping_quote or {}).get("packages") or []
+    if not packages:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Esta orden no tiene cajas cotizadas en el checkout: captura weight, length, width y height.",
+        )
+    return [{"weight": p["weightKg"], "length": p["lengthCm"], "width": p["widthCm"], "height": p["heightCm"]} for p in packages]
+
+
 async def quote_shipping(db: AsyncSession, order_uuid: str, data: ShippingQuoteRequest) -> list[ShippingQuoteOption]:
     """No persiste - se puede llamar repetidamente mientras el admin ajusta peso/medidas.
-    `data.origin` (opcional) overridea campos del origen - ver ShippingOriginOverride."""
+    `data.origin` (opcional) overridea campos del origen - ver ShippingOriginOverride. Sin
+    medidas usa las cajas cotizadas en el checkout (ver _shipping_boxes)."""
     order = await _get_order_ready_for_shipping(db, order_uuid)
     origin_overrides = data.origin.model_dump(exclude_none=True) if data.origin else None
-    options = await shipping_service.get_shipping_quote(order, data.weight, data.length, data.width, data.height, origin_overrides)
+    options = await shipping_service.get_shipping_quote(order, _shipping_boxes(order, data), origin_overrides)
     return [ShippingQuoteOption(**opt) for opt in options]
 
 
@@ -471,16 +490,31 @@ async def generate_shipping_label(db: AsyncSession, order_uuid: str, data: Shipp
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta orden ya tiene una guía de envío generada.")
 
     origin_overrides = data.origin.model_dump(exclude_none=True) if data.origin else None
-    label = await shipping_service.generate_shipping_label(
-        order, data.weight, data.length, data.width, data.height, data.carrier, data.service, origin_overrides,
-    )
+    boxes = _shipping_boxes(order, data)
+    chosen = order.shipping_quote if (order.shipping_quote or {}).get("status") == "QUOTED" else {}
+    carrier = data.carrier or chosen.get("carrier")
+    service = data.service or chosen.get("service")
+    if not carrier or not service:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Esta orden no tiene una opción de envío elegida en el checkout: manda carrier y service.",
+        )
+    label = await shipping_service.generate_shipping_label(order, boxes, carrier, service, origin_overrides)
+
+    if chosen.get("carrierPrice") is not None:
+        # La tarifa real puede diferir de la cotizada (medidas reales, cambio de tarifa): la
+        # diferencia la absorbe la tienda; se deja en el log para dar seguimiento.
+        quoted = float(chosen["carrierPrice"])
+        actual = float(label.get("totalPrice") or 0)
+        if abs(actual - quoted) >= 0.01:
+            logger.warning(f"Orden {order.uuid}: la guia costo {actual:.2f} y se cotizo en {quoted:.2f} en el checkout (diferencia {actual - quoted:+.2f}).")
 
     order.shipping_label = label
     order.dispatch_status = "DISPATCHED"
 
     await db.commit()
     await db.refresh(order)
-    logger.info(f"Guía de envío generada para la orden {order.uuid} (carrier={data.carrier}, service={data.service}) via /admin.")
+    logger.info(f"Guía de envío generada para la orden {order.uuid} (carrier={carrier}, service={service}) via /admin.")
 
     try:
         await order_status_notification_service.notify_order_dispatched(order)

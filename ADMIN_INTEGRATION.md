@@ -300,6 +300,16 @@ con su valor final. Todos son texto libre (`\n` para listas). `brand` se recorta
 `null`. `description` también aparece en los listados del storefront; los otros cuatro solo en el
 detalle. `404` si el producto no existe.
 
+### Envío cobrado en el checkout
+
+Cuando el cliente pagó el envío, el pedido trae `deliveryCost` (ya incluido en `total`) y `shippingQuote`:
+`{ quoteUuid, status: "QUOTED" | "MANUAL", reason, optionId, carrier, service, serviceDescription, deliveryEstimate, carrierPrice, price, currency, packages }`.
+- `QUOTED`: el cliente eligió y pagó esa paquetería/servicio. `carrierPrice` es la tarifa de envia.com; `price` lo cobrado (con margen). `packages`: las cajas estimadas (`weightKg`, `lengthCm`, `widthCm`, `heightCm`, `pieces`).
+- `MANUAL`: el envío no se cobró (`reason`: `MISSING_DIMENSIONS`, `NO_RATES`, `UPSTREAM_ERROR`); se cotiza a mano como antes.
+- `null`: recoger en tienda o pedido anterior.
+
+En `POST .../shipping/quote` y `.../shipping/generate`, `weight/length/width/height` ahora son opcionales (las cuatro o ninguna, `422` si vienen incompletas): omitidas, se usan las cajas de `shippingQuote.packages`. En `generate`, `carrier`/`service` omitidos toman los que eligió el cliente (`422` si el pedido no tiene opción elegida). Si la guía real cuesta distinto de `carrierPrice`, la diferencia la absorbe la tienda (queda en el log). `shippingLabel.packages` lista todas las cajas cuando hubo más de una.
+
 ### Peso y medidas de empaque
 
 Para cotizar envíos con datos reales del producto. Son las del **empaque de una pieza** (unidad de venta).

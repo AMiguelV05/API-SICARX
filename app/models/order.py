@@ -56,8 +56,14 @@ class Order(Base):
     # redondear silenciosamente la cantidad de una linea a granel (p. ej. 1.005 kg).
     total_quantity = Column(Numeric(12, 3), nullable=False)
 
-    # Placeholder sin usar hoy: no se calcula ni se suma a Mercado Pago ni a Sicar X.
+    # Costo de envio cobrado al cliente (ya con margen), incluido en `total` y por lo tanto en
+    # el cobro de Mercado Pago. NULL = sin costo: PICKUP, pedidos anteriores, o envio que el
+    # admin cotiza a mano (ver shipping_quote["status"] == "MANUAL"). Sicar X no lo conoce.
     delivery_cost = Column(Numeric(10, 2), nullable=True)
+    # Foto de la opcion de envio elegida en el checkout (shipping_quote_service.resolve_for_order):
+    # {quoteUuid, status: QUOTED|MANUAL, reason, optionId, carrier, service, serviceDescription,
+    # deliveryEstimate, carrierPrice, price, currency, packages}. NULL en PICKUP y pedidos previos.
+    shipping_quote = Column(JSONB, nullable=True)
 
     # Snapshot al crear la orden (mismo shape de build_order_payload); items agrega imageUrl por linea, no enviado a Sicar X.
     delivery_info = Column(JSON, nullable=False)

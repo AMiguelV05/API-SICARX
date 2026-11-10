@@ -39,7 +39,8 @@ historial de consentimiento).
 ```
 1. (opcional) POST /v1/auth/register | /login | /google   → token de cliente
 2. POST /v1/products, POST /v1/search, GET /v1/products/{uuid}
-3. POST /v1/orders                     → reserva el pedido (TO_PAY), devuelve id/orderUuid/total
+2b. (solo DELIVERYMAN) POST /v1/shipping/quotes → opciones de envío con precio; el cliente elige una
+3. POST /v1/orders                     → reserva el pedido (TO_PAY), devuelve id/orderUuid/total (con envío)
 4. Payment Brick con initialization.amount = total
 5. POST /v1/orders/{id}/pay            → cobra (tarjeta/OXXO) desde el onSubmit del Brick
 6. (si aplica) POST /v1/orders/{id}/cancel
@@ -348,7 +349,8 @@ Content-Type: application/json
     "deliveryType": "DELIVERYMAN",
     "addressUuid": "51cbf02f-..."
   },
-  "couponCode": "WELCOME10"
+  "couponCode": "WELCOME10",
+  "shipping": { "quoteUuid": "9b2e...", "optionId": "2" }
 }
 ```
 
@@ -358,7 +360,7 @@ Content-Type: application/json
 - `contactInfo.email`: opcional para cuentas, **obligatorio para invitados** (`400`). `""` cuenta como ausente.
 - `couponCode` (solo cuentas): aquí es donde el cupón se valida y bloquea de verdad.
 - Campos opcionales que casi nunca hacen falta: `contentId`, `branchId`, `priceListUuid`, `wholesalePrices`.
-- El monto no incluye costo de envío.
+- `shipping` (solo `DELIVERYMAN`; con `PICKUP` → `400`): la opción elegida en `POST /v1/shipping/quotes` (ver abajo). Su precio se suma a `total`. Es obligatorio cuando la cotización salió `QUOTED`; con `NOT_QUOTABLE` manda solo `quoteUuid`. Si algún producto no tiene peso/medidas no hace falta.
 
 Respuesta `201`:
 
@@ -367,13 +369,14 @@ Respuesta `201`:
   "id": "d65b89dc-9690-40b3-8dfb-aa2cdde18cc0",
   "orderUuid": "f1a2b3c4-d5e6-47f8-a9b0-c1d2e3f4a5b6",
   "status": "TO_PAY",
-  "total": 129.99, "amount": 129.99, "discountAmount": 13.0,
+  "total": 299.99, "amount": 299.99, "discountAmount": 13.0, "deliveryCost": 170.0,
   "serieFolio": null, "date": null
 }
 ```
 
 - `id` (UUID v4) es el `{order_id}` de `/pay`, `/cancel` y `DELETE`. `orderUuid` sirve para `GET /v1/auth/me/orders/{orderUuid}`. Guarda ambos.
-- `total` (alias `amount`) ya trae el descuento restado: úsalo tal cual en el Brick.
+- `total` (alias `amount`) ya trae el descuento restado y el envío sumado: úsalo tal cual en el Brick. El cupón solo descuenta productos, nunca el envío.
+- `deliveryCost`: envío cobrado; `null` si no se cobró (recoger en tienda, o envío que la tienda cotiza aparte).
 - `serieFolio` y `date` siempre son `null`.
 - **Idempotency-Key**: reenvía el mismo valor en los reintentos automáticos. Si el pedido ya existe, responde `200` con el mismo body; si sigue en proceso, `409` (reintenta en unos segundos).
 
@@ -381,7 +384,39 @@ Errores:
 - `401`: `X-Client-Token` inválido.
 - `400`: carrito vacío; dirección guardada incompleta; invitado sin email, con `addressUuid` o con `couponCode`.
 - `404`: `addressUuid` que no existe o es de otra cuenta; cupón inexistente.
-- `409`: un producto sin disponibilidad; cupón que ya no aplica.
+- `409`: un producto sin disponibilidad; cupón que ya no aplica; falta `shipping` en un carrito cotizable, o la cotización expiró / el carrito o la dirección cambiaron / el `optionId` no existe (el `detail` lo dice: vuelve a cotizar).
+
+### Envío a domicilio: `POST /v1/shipping/quotes`
+
+Cotiza con envia.com el carrito a la dirección de entrega. Llámalo cuando el cliente elige `DELIVERYMAN` y tiene dirección, y otra vez si cambia el carrito o la dirección. Tarda unos segundos (consulta ~20 paqueterías): muestra un indicador de carga. Límite: 20 por minuto.
+
+```http
+POST /v1/shipping/quotes
+x-api-key: <api-key>
+X-Client-Token: <opcional>
+```
+```json
+{ "products": [ { "uuid": "3Cny4...", "quantity": 2 } ], "addressUuid": "51cbf02f-..." }
+```
+
+Mismo carrito que mandarás a `POST /v1/orders`. Cuenta → `addressUuid`; invitado → `address` (mismo objeto que en `deliveryInfo.address`). Respuesta `201`:
+
+```json
+{
+  "quoteUuid": "9b2e...", "status": "QUOTED", "reason": null,
+  "expiresAt": "2026-11-10T21:30:00Z",
+  "options": [
+    { "optionId": "1", "carrier": "dhl", "serviceDescription": "DHL Ground", "deliveryEstimate": "2-3 días", "price": 115.0, "currency": "MXN" },
+    { "optionId": "2", "carrier": "fedex", "serviceDescription": "FedEx Express", "deliveryEstimate": "Día siguiente", "price": 170.0, "currency": "MXN" }
+  ],
+  "missingDimensions": []
+}
+```
+
+- `status: "QUOTED"`: muestra las opciones (máx. 5, la más barata de cada paquetería, ya con IVA) y manda la elegida en `POST /v1/orders` como `shipping: { quoteUuid, optionId }`.
+- `status: "NOT_QUOTABLE"`: el envío **no se cobra en línea**; la tienda lo cotiza y te contacta. Muestra algo como "Envío por confirmar" y manda `shipping: { quoteUuid }` sin `optionId`. `reason`: `MISSING_DIMENSIONS` (algún producto sin peso/medidas, ver `missingDimensions`), `NO_RATES` (ninguna paquetería cubre ese envío, p. ej. artículos muy pesados) o `UPSTREAM_ERROR` (envia.com no respondió).
+- La cotización vence en 30 min (`expiresAt`). Cotizar dos veces el mismo carrito y dirección en 10 min devuelve la misma cotización.
+- Errores: `400`/`404`/`422` de dirección (mismas reglas que `deliveryInfo`), `409` si un producto ya no está disponible.
 
 ### Checkout de invitado
 
@@ -430,7 +465,8 @@ Lista paginada (`limit`/`offset` en la query, más recientes primero): `{ total,
 
 - `status` (pago): `TO_PAY` | `PAID` | `CANCELLED`. `dispatchStatus` (cumplimiento, lo controla el admin): `PENDING_ACCEPTANCE` → `PENDING` → `PREPARING` → `COMPLETE` → `DISPATCHED`. Son dos cosas distintas.
 - `id` y `sicarOrderId` son el mismo valor; usa `id`.
-- `couponCode`, `subtotal` y `discountAmount` son `null` si no hubo cupón. Si hubo, `total = subtotal - discountAmount`.
+- `couponCode`, `subtotal` y `discountAmount` son `null` si no hubo cupón. Si hubo, `total = subtotal - discountAmount + deliveryCost`.
+- `deliveryCost`: envío cobrado (`null` si no se cobró). `shippingQuote` (solo `DELIVERYMAN`, pedidos nuevos): `{ status: "QUOTED" | "MANUAL", reason, carrier, serviceDescription, deliveryEstimate, price, currency }`; `MANUAL` = envío por confirmar con la tienda. También vienen en los webhooks de pedido.
 - `items[].quantity` es string. `unitPrice` y `lineTotal` llevan IVA y son **antes del cupón**; para GA4, el descuento va a nivel evento (`coupon`/`discount`). `imageUrl` puede faltar en pedidos viejos.
 - `cancellationReason`: texto solo si canceló un admin.
 - `shippingLabel` (solo `DELIVERYMAN` con guía real de envia.com): `{ carrier, service, shipmentId, serviceDescription, trackingNumber, trackUrl, labelUrl, totalPrice, currency, weight, length, width, height, generatedAt }`. Usa `trackUrl` como enlace de "sigue tu paquete". No hay rastreo en vivo.

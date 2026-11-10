@@ -4,7 +4,7 @@ from typing import Any, List, Literal, Optional
 from datetime import datetime
 from app.core.config import settings
 from app.schemas.base import CamelModel
-from app.schemas.shipping import ShippingLabelInfo
+from app.schemas.shipping import OrderShippingQuotePublic, OrderShippingSelection, ShippingLabelInfo
 
 COUPON_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
@@ -119,6 +119,7 @@ class OrderCreate(CamelModel):
     couponCode: Optional[str] = Field(default=None, description="Código de cupón a aplicar. Se revalida y bloquea aquí (no en el carrito) - nunca se confía en el descuento ya mostrado por GET /cart.")
     termsAcceptedAt: Optional[datetime] = Field(default=None, description="Momento (ISO 8601) en que el comprador aceptó los Términos y Condiciones - principalmente para checkout de invitado, que no tiene ClientAccount donde guardarlo. Opcional, no rompe compatibilidad si se omite.")
     termsAcceptedVersion: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada (texto libre, lo decide el frontend).")
+    shipping: Optional[OrderShippingSelection] = Field(default=None, description="Opción de envío elegida (POST /shipping/quotes). Solo DELIVERYMAN; obligatoria cuando todos los productos tienen peso y medidas y el cobro de envío está activo. Con PICKUP es 400.")
 
     @field_validator("couponCode")
     @classmethod
@@ -140,8 +141,9 @@ class OrderResponse(CamelModel):
     # contra esta API ve la desaprobacion en la propia especificacion, no solo si lee el
     # texto libre de la descripcion - mismo criterio para cada [DEPRECATED] de este archivo.
     amount: float = Field(deprecated=True, description="[DEPRECATED, usar `total`] Alias historico de `total` - mismo valor, se conserva por compatibilidad. Nuevas integraciones deben leer `total`.")
-    total: float = Field(validation_alias="amount", serialization_alias="total", description="[Recomendado] Total autoritativo de la orden (YA con el descuento del cupón aplicado, si hubo uno) - mismo valor que `amount` y que OrderPublic.total. Usar en initialization.amount del Payment Brick.")
+    total: float = Field(validation_alias="amount", serialization_alias="total", description="[Recomendado] Total autoritativo de la orden (YA con el descuento del cupón aplicado y el envío sumado, si hubo) - mismo valor que `amount` y que OrderPublic.total. Usar en initialization.amount del Payment Brick.")
     discountAmount: float = Field(default=0.0, description="Monto descontado por el cupón aplicado, ya restado de `total`/`amount`. 0 si no se usó cupón.")
+    deliveryCost: Optional[float] = Field(default=None, description="Costo de envío cobrado, ya sumado a `total`. Null si no se cobró envío (recoger en tienda, o envío que la tienda cotiza aparte).")
 
 class OrderCancelResponse(CamelModel):
     documentUuid: str = Field(deprecated=True, description="[DEPRECATED, usar `orderId`] Alias historico - el nombre viene de cuando esto era un UUID de documento real de Sicar X; hoy simplemente hace eco del `order_id` (id o orderUuid) que recibió esta llamada. Se conserva por compatibilidad.")
@@ -191,6 +193,8 @@ class OrderPublic(CamelModel):
     coupon_code: Optional[str] = Field(default=None, description="Código del cupón aplicado, si hubo uno.")
     discount_amount: Optional[float] = Field(default=None, description="Monto descontado por el cupón. Null si no se usó cupón.")
     subtotal: Optional[float] = Field(default=None, description="Total antes del descuento del cupón. Null en órdenes anteriores a esta funcionalidad - tratar como igual a `total` en ese caso.")
+    delivery_cost: Optional[float] = Field(default=None, description="Costo de envío cobrado, incluido en `total`. Null si no se cobró envío.")
+    shipping_quote: Optional[OrderShippingQuotePublic] = Field(default=None, description="Opción de envío elegida en el checkout. Null en PICKUP y en pedidos anteriores a esta funcionalidad.")
     shipping_label: Optional[ShippingLabelInfo] = Field(default=None, description="Guía de envío real (envia.com) si un admin ya la generó - incluye trackUrl para que el cliente siga su paquete. Null hasta entonces; solo aplica a pedidos DELIVERYMAN.")
     terms_accepted_at: Optional[datetime] = Field(default=None, description="Momento en que se aceptaron los Términos y Condiciones al hacer checkout como invitado. Null si no se mandó o si la orden es de una cuenta (ver ClientPublic.termsAcceptedAt en ese caso).")
     terms_accepted_version: Optional[str] = Field(default=None, description="Versión de los Términos y Condiciones aceptada al hacer checkout como invitado.")
