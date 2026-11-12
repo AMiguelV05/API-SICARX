@@ -10,7 +10,7 @@ API SICARX is a FastAPI middleware between the Ferretería Charly e-commerce fro
 - Deps: `pip install -r requirements.txt`
 - Tests: `pytest` (needs local Postgres; uses `TEST_DATABASE_URL`, or `DATABASE_URL` with the db renamed to `sicarx_test` — never the dev/prod db). Typesense integration tests need `TYPESENSE_URL=http://localhost:8108 TYPESENSE_API_KEY=dev-key` and `docker compose up -d typesense`; skipped otherwise.
 - Search relevance check (Postgres vs Typesense, exit 1 on failure): `python search_eval.py` with the Typesense vars set.
-- Standalone one-off scripts at repo root (not imported by the app): `secret.py`, `create_admin_user.py`, `create_backup_role.py`, `prune_r2_backups.py`, `import_gonher_vehicles.py`, `import_package_dimensions.py`, `search_eval.py`, `urrea_probe.py` (read-only probe of the URREA webservice; `OUT_DIR` must be outside the repo, responses include our cost price).
+- Standalone one-off scripts at repo root (not imported by the app): `secret.py`, `create_admin_user.py`, `create_backup_role.py`, `prune_r2_backups.py`, `import_gonher_vehicles.py`, `import_package_dimensions.py`, `search_eval.py`, `urrea_probe.py` (read-only probe of the URREA webservice; `OUT_DIR` must be outside the repo, responses include distributor prices).
 
 ### Docker Compose
 
@@ -73,7 +73,7 @@ Two processes share one Postgres:
    - catalog sync, every 5 min;
    - `sicar_sync_worker` (drains `sicar_sync_outbox`), every 1 min;
    - `search_index_worker`: `drain_dirty` every 30 s, `reconcile_synonyms` every 5 min, `ensure_index_on_startup`;
-   - `webhook_outbox_worker` every 1 min, `stock_alert_worker` every 5 min, `wishlist_price_drop_worker` hourly, `abandoned_cart_worker` every 30 min, `shipping_quote_worker` daily (prunes `shipping_quotes` > 30 days).
+   - `webhook_outbox_worker` every 1 min, `stock_alert_worker` every 5 min, `wishlist_price_drop_worker` hourly, `abandoned_cart_worker` every 30 min, `shipping_quote_worker` daily (prunes `shipping_quotes` > 30 days), `urrea_sync_worker` (checks every minute, runs every 3 h or when an admin requests it).
 
 Conventions: log messages and docstrings are in Spanish. Money is `Decimal` (`Decimal(str(x))`, never from float), quantized with `ROUND_HALF_UP`. Status vocabularies are plain strings constrained in the app layer, not DB enums. Externally referenced rows use a `uuid`, not `id`; a resource not owned by the caller is `404`, not `403`. External HTTP calls use plain `httpx` (no SDKs); blocking work (bcrypt, `PyJWKClient`) goes through `asyncio.to_thread`. Never use `Depends(XxxDep)` on an `Annotated` dep alias (causes `422 args/kwargs`).
 
@@ -141,6 +141,21 @@ No live SICAR X call anywhere in checkout.
 - **Taxonomy**: self-referencing `categories` (`parent_uuid`), admin-managed, not synced. `get_descendant_uuids` is a recursive CTE. `product_categories` (N:M) is the PIM tagging used by the `taxonomyUuid` filter; `Product.department_uuid`/`category_uuid` are SICAR's raw classification.
 - **Vehicles**: flat `vehicles` table (`vehicle_type` `AUTOMOTIVE`/`MOTORCYCLE`, `year_end` null = current), `product_vehicles` N:M, `vehicleUuid` filter. Public cascade `GET /vehicles/makes|years|models|engines` (order: type → make → year → model → engine) and `GET /vehicles`. Seeded once from Gonher's public reference (`import_gonher_vehicles.py`, heuristic parsing). **asyncpg gotcha**: `(:p IS NULL OR col = :p)` with `None` raises `AmbiguousParameterError`; use `CAST(:p AS VARCHAR)`.
 - **Bulk import** (`POST /admin/bulk-import/products`, `bulk_import_service.py`): sheets `Categorias` (comma/semicolon-separated slugs), `Vehiculos`, `Atributos`, `Variantes`, `InfoProducto`, `Medidas`. Products resolved by `sku` (case-insensitive) with `additional_skus` fallback. Additive (`ON CONFLICT DO NOTHING`), partial success with per-row errors; batch-resolves in a constant number of queries. `GET /admin/bulk-import/template` shares the same column constants.
+
+### URREA supplier integration (`urrea_client.py`, `urrea_sync_worker.py`)
+
+Distributor webservice, one `POST` endpoint, credentials **in the JSON body** (never log request bodies). Backend-only; the frontend never calls URREA. Real behavior (probe 2026-11-12, differs from URREA's PDF):
+- Errors come as **HTTP 200** + `{"status":"ERROR","mensaje"}`; always check `status`.
+- `opcion 2`, one code + qty: `disponibilidad` = `Suficiente` | `Insuficiente` | `-` (unknown code). `fechaDisponibilidad` is always today, so it's useless. 1.3–2 s.
+- `opcion 4` (bulk): ~17k rows, 22 MB, ~85 s. Streamed to a temp file and parsed with `ijson`; never `json.loads` it in the worker. `EstatusInventario` (`Disponible`/`Con reservas`/`No disponible`) is only a hint and disagrees with `opcion 2`. `fotografia` is a list; empties are `""` or `"0"`; `video` `.../embed/0` is a placeholder; `caracteristica` is always empty.
+- `opcion 1` returns the same data and price as the bulk, so it isn't used.
+- Matching (`urrea_matching.match_codes`, shared with `import_package_dimensions.py`): `sku = URREA_SKU_PREFIX + codigo`, then barcode against `sku`/`additional_skus`.
+- `supplier_products`: one row per matched code. `list_price` is URREA's list price **without** our distributor discount (not our cost, so no margin is computed until dropship pricing is settled); admin-only. Rows whose code leaves the bulk are kept with `availability_status = NULL`. `supplier_sync_status` holds the job row (`requested_at` set by `POST /admin/suppliers/urrea/sync`).
+- `products.supplier_available` / `fallback_image_url`: local columns, written by the worker only when changed, never in the SICAR sync.
+- PIM (`urrea_pim_service`): the **first** application per product (`pim_fields_applied IS NULL`) **replaces** `description`, `brand`, `bullet_points` and `contents` where URREA has data. Package dims are fill-only even then (the distributor template is more precise: 3-decimal weights vs the API's 2). After that it only fills empty, never-applied fields. `technical_specs` is never touched.
+- Dry run before enabling in a new environment: `python -m app.worker.urrea_sync_worker --dry-run --report x.csv [--file masiva.json]`.
+- Admin: `GET /admin/suppliers/urrea/status`, `POST /admin/suppliers/urrea/sync` (super_admin, 202), `GET /admin/products/{uuid}/supplier` (list price, availability, media, full info).
+- Tests: `tests/test_urrea_client.py`, `tests/test_urrea_sync.py`.
 
 ### Search with Typesense (`/search`, `/search/suggest`)
 

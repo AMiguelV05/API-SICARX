@@ -115,18 +115,17 @@ async def match_and_write(rows: list[SourceRow], prefix: str, report: list[dict]
 
 async def _match_and_write(rows: list[SourceRow], prefix: str, report: list[dict], commit: bool) -> None:
     from app.core.database import AsyncSessionLocal
-    from app.services.bulk_import_service import _apply_package_dimensions_updates, _resolve_products
+    from app.services.bulk_import_service import _apply_package_dimensions_updates
+    from app.services.urrea_matching import match_codes
 
     valid = [r for r in rows if r.dims]
     async with AsyncSessionLocal() as db:
-        by_sku = await _resolve_products(db, {f"{prefix}{r.code}" for r in valid})
-        unresolved = [r for r in valid if f"{prefix}{r.code}".upper() not in by_sku]
-        by_ean = await _resolve_products(db, {r.ean for r in unresolved if r.ean})
+        matches = await match_codes(db, [(r.code, r.ean) for r in valid], prefix)
 
         updates: dict[int, PackageDimensions] = {}
         source_of: dict[int, SourceRow] = {}
         for r in valid:
-            product_id = by_sku.get(f"{prefix}{r.code}".upper()) or (by_ean.get(r.ean.upper()) if r.ean else None)
+            product_id = matches[r.code][0] if r.code in matches else None
             if product_id is None:
                 report.append({"fila": r.excel_row, "codigo": r.code, "motivo": "SIN_PRODUCTO", "detalle": f"Ni {prefix}{r.code} ni el EAN {r.ean} existen en el catalogo."})
                 continue

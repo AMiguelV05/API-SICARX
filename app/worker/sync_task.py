@@ -28,6 +28,7 @@ from app.worker.stock_alert_worker import scheduled_stock_alert_job
 from app.worker.wishlist_price_drop_worker import scheduled_price_drop_job
 from app.worker.abandoned_cart_worker import scheduled_abandoned_cart_job
 from app.worker.shipping_quote_worker import scheduled_shipping_quote_prune_job
+from app.worker.urrea_sync_worker import scheduled_urrea_sync_job
 from app.worker.search_index_worker import (
     ensure_index_on_startup,
     scheduled_drain_job,
@@ -473,6 +474,9 @@ async def main():
     scheduler.add_job(scheduled_abandoned_cart_job, 'interval', minutes=30, max_instances=1, coalesce=True)
     # Cotizaciones de envio del checkout con mas de 30 dias.
     scheduler.add_job(scheduled_shipping_quote_prune_job, 'interval', hours=24, max_instances=1, coalesce=True)
+    # Catalogo y disponibilidad masiva de URREA (no-op sin URREA_USER/URREA_PASSWORD). Revisa
+    # cada minuto si toca (cada 3 h, o antes si un admin lo pidio) - ver urrea_sync_worker.py.
+    scheduler.add_job(scheduled_urrea_sync_job, 'interval', minutes=1, max_instances=1, coalesce=True)
 
     # Indice de busqueda en Typesense (no-op sin TYPESENSE_URL/TYPESENSE_API_KEY) - ver
     # search_index_worker.py. El arranque reconstruye si falta el indice; un Typesense caido

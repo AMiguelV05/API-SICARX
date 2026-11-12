@@ -183,6 +183,15 @@ class Product(Base):
     # sales_count/reserved.
     search_dirty_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Integracion con proveedores (URREA, ver supplier_product.py). Locales, nunca en el
+    # upsert de sync_task.py. Desnormalizadas desde supplier_products por el worker para que
+    # listados y busqueda no necesiten join; solo se escriben cuando cambian.
+    # supplier_available: la disponibilidad masiva del proveedor dice que lo tiene (pista para
+    # el badge "sobre pedido"; la venta real se confirma con la consulta por cantidad).
+    supplier_available = Column(Boolean, nullable=False, default=False, server_default="false")
+    # Foto del proveedor, usada solo cuando Sicar X no tiene image_url.
+    fallback_image_url = Column(String, nullable=True)
+
 
 class SyncStatus(Base):
     """Fila unica (id=1) con el estado de la corrida mas reciente de sync_task.py - antes

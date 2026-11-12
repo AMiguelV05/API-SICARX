@@ -10,7 +10,7 @@ emparejamiento "U"+codigo / codigo de barras contra el catalogo local.
     python urrea_probe.py OUT_DIR --skip-bulk
     python urrea_probe.py OUT_DIR --match          # cobertura contra DATABASE_URL (solo lectura)
 
-OUT_DIR debe quedar FUERA del repo: las respuestas incluyen nuestro precio de costo. El body
+OUT_DIR debe quedar FUERA del repo: las respuestas incluyen precios de distribuidor. El body
 de las peticiones (lleva la contrasena) nunca se guarda ni se imprime.
 """
 import argparse
@@ -147,7 +147,7 @@ def main() -> None:
     if not (settings.URREA_USER and settings.URREA_PASSWORD):
         sys.exit("Faltan URREA_USER / URREA_PASSWORD en el .env.")
     if os.path.abspath(args.out_dir).startswith(os.path.abspath(os.path.dirname(__file__))):
-        sys.exit("OUT_DIR debe quedar fuera del repo (las respuestas traen precios de costo).")
+        sys.exit("OUT_DIR debe quedar fuera del repo (las respuestas traen precios de distribuidor).")
     os.makedirs(args.out_dir, exist_ok=True)
 
     auth = {"usuario": settings.URREA_USER, "password": settings.URREA_PASSWORD}

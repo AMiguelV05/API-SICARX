@@ -30,6 +30,7 @@ from app.models.webhook_outbox import WebhookOutbox
 from app.models.stock_alert import StockAlert
 from app.models.marketing_consent import MarketingConsentEvent
 from app.models.shipping_quote import ShippingQuote
+from app.models.supplier_product import SupplierProduct, SupplierSyncStatus
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
