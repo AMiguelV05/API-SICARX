@@ -57,7 +57,7 @@ async def create_local_order(
     for line in eco_order.get("products") or []:
         item = dict(line)
         product = local_products.get(item.get("uuid"))
-        item["imageUrl"] = product.image_url if product else None
+        item["imageUrl"] = product.effective_image_url if product else None
         items.append(item)
 
     order = Order(

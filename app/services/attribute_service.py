@@ -758,7 +758,7 @@ async def get_variant_group_detail(db: AsyncSession, product: Product) -> dict |
                 "uuid": s.sicar_uuid,
                 "sku": s.sku,
                 "name": s.name,
-                "image_url": s.image_url,
+                "image_url": s.effective_image_url,
                 "price": s.price,
                 "stock": s.available_stock,
                 "value": _value_for(s),

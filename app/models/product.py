@@ -192,6 +192,17 @@ class Product(Base):
     # Foto del proveedor, usada solo cuando Sicar X no tiene image_url.
     fallback_image_url = Column(String, nullable=True)
 
+    @hybrid_property
+    def effective_image_url(self):
+        """La foto que se muestra: la de Sicar X, o la del proveedor si Sicar X no tiene. Unica
+        definicion de "tiene foto" en todo lo cara al cliente (tarjetas, detalle, carrito,
+        lineas de orden, orden "con foto primero", has_image de Typesense y su trigger)."""
+        return self.image_url or self.fallback_image_url
+
+    @effective_image_url.expression
+    def effective_image_url(cls):
+        return func.coalesce(func.nullif(cls.image_url, ""), cls.fallback_image_url)
+
 
 class SyncStatus(Base):
     """Fila unica (id=1) con el estado de la corrida mas reciente de sync_task.py - antes

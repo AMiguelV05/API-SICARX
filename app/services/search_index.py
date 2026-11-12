@@ -180,7 +180,7 @@ def to_document(row: Mapping[str, Any]) -> dict[str, Any]:
         "category_uuids": sorted(row["category_uuids"] or []),
         "vehicle_uuids": sorted(row["vehicle_uuids"] or []),
         "in_stock": in_stock,
-        "has_image": bool(row.get("image_url")),  # mismo criterio que catalog_service: no nulo ni ""
+        "has_image": bool(row.get("image_url")),  # Product.effective_image_url, mismo criterio que catalog_service
         "price": float(row["price"] or 0),
         "name_sort": strip_accents(name).lower(),
         "sales_count": int(row["sales_count"] or 0),
@@ -203,7 +203,8 @@ def sale_until(compare_at_price, price, sale_ends_at) -> int:
 # Una sola consulta por lote (sin N+1): los ids de categorias/vehiculos se agregan con
 # subconsultas correlacionadas, cubiertas por los indices de product_id de cada tabla.
 _DOC_SELECT = """
-    SELECT p.id, p.sicar_uuid, p.sku, p.additional_skus, p.name, p.brand, p.description, p.image_url,
+    SELECT p.id, p.sicar_uuid, p.sku, p.additional_skus, p.name, p.brand, p.description,
+           COALESCE(NULLIF(p.image_url, ''), p.fallback_image_url) AS image_url,
            p.department_uuid, p.category_uuid, p.price, p.stock, p.reserved, p.sales_count,
            p.compare_at_price, p.sale_ends_at,
            (SELECT array_agg(pc.category_uuid) FROM product_categories pc WHERE pc.product_id = p.id) AS category_uuids,

@@ -31,7 +31,7 @@ def build_payload(alert: StockAlert, product: Product, client_name: str | None) 
             "sicarUuid": product.sicar_uuid,
             "sku": product.sku,
             "name": product.name,
-            "imageUrl": product.image_url,
+            "imageUrl": product.effective_image_url,
             "price": float(product.price),
             "stock": float(product.available_stock),
         },

@@ -24,7 +24,7 @@ def _row(code: str, **overrides) -> dict:
         "EstatusInventario": "Disponible", "anexo20SAT": "27111713", "claveUnidadSAT": "EA",
         "bullets": "-Pulido espejo -Cromo-Vanadio", "esJuego": "No", "piezasJuego": "0", "contenidoJuego": "",
         "accesorios": "Llave combinada.", "garantia": "1 año", "empaque": "Granel", "keywords": "llave",
-        "fotografia": [f"https://blob.test/{code}.jpg"], "video": "https://www.youtube.com/embed/abc",
+        "fotografia": [f"https://blob.test/{code}.jpg"], "video": "https://www.youtube.com/embed/aSYB_sNFd_U",
         "fichaTecnica": "https://blob.test/ficha.pdf", "manual": "", "alto": "1", "fondo": "2.7", "ancho": "18", "peso": "0.1",
         "caracteristica": "",
     }
@@ -89,7 +89,7 @@ async def test_first_application_replaces_pim_and_sets_supplier_state(db, tmp_pa
     assert s.list_price == Decimal("57.0000")
     assert s.sale_multiple == 6
     assert s.availability_status == "AVAILABLE"
-    assert s.video_url == "https://www.youtube.com/embed/abc"
+    assert s.video_url == "https://www.youtube.com/embed/aSYB_sNFd_U"
     assert s.datasheet_url == "https://blob.test/ficha.pdf"
     assert sorted(s.pim_fields_applied) == ["brand", "bullet_points", "contents", "description", "package_dimensions"]
 

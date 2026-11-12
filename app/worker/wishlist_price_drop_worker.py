@@ -85,7 +85,7 @@ async def process_price_drops(session: AsyncSession) -> int:
         client = entry["client"]
         items = [
             {
-                "product": {"sicarUuid": p.sicar_uuid, "sku": p.sku, "name": p.name, "imageUrl": p.image_url},
+                "product": {"sicarUuid": p.sicar_uuid, "sku": p.sku, "name": p.name, "imageUrl": p.effective_image_url},
                 "oldPrice": float(baseline),
                 "newPrice": float(p.price),
             }

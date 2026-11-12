@@ -10,7 +10,7 @@ from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
 from app.schemas.products import package_dimensions_public, LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse, RelatedProductsResponse
 from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products, get_distinct_brands
-from app.services import attribute_service, related_service
+from app.services import attribute_service, related_service, supplier_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/products", tags=["Products Catalog and Details"], dependencies=[Depends(validate_api_key)])
@@ -53,7 +53,7 @@ async def get_available_now(
 ):
     """
     Productos con stock disponible (Product.available_stock > 0) y con imagen
-    (Product.image_url no nulo/vacio), pensado para la seccion "Disponible Ahora" de la
+    (Product.effective_image_url: la de Sicar X o la del proveedor), pensado para la seccion "Disponible Ahora" de la
     pagina principal. Sin paginacion - es un feed acotado de top-N, no un browse.
     """
     docs = await get_available_now_products(
@@ -144,6 +144,7 @@ async def get_product_details(uuid: str, db: DbDep):
     # producto no tiene nada guardado - nunca un error.
     attribute_docs = await attribute_service.get_attributes_for_product(db, product)
     variant_group = await attribute_service.get_variant_group_detail(db, product)
+    supplier_media = await supplier_service.get_supplier_media(db, product.id)
 
     # No se usa ProductDetail.model_validate(product) directo: Product.attributes (JSONB
     # crudo, {"slug": valor}) y ProductDetail.attributes (List[AttributeValuePublic])
@@ -157,7 +158,7 @@ async def get_product_details(uuid: str, db: DbDep):
         additional_skus=product.additional_skus,
         name=product.name,
         description=product.description,
-        image_url=product.image_url,
+        image_url=product.effective_image_url,
         tags=product.tags,
         additional_images=product.additional_images,
         sales_unit_uuid=product.sales_unit_uuid,
@@ -181,6 +182,7 @@ async def get_product_details(uuid: str, db: DbDep):
         technical_specs=product.technical_specs,
         contents=product.contents,
         package_dimensions=package_dimensions_public(product),
+        supplier_media=supplier_media,
     )
     return detail
 

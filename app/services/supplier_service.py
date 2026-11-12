@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.product import Product
 from app.models.supplier_product import SupplierProduct, SupplierSyncStatus
+from app.schemas.products import SupplierMedia
 from app.schemas.suppliers import ProductSupplierInfo, SupplierSyncStatusResponse
 from app.services import urrea_client
 from app.services.urrea_client import BULK_JOB as JOB, SUPPLIER
@@ -37,6 +38,18 @@ async def request_urrea_sync(db: AsyncSession) -> datetime:
     stmt = stmt.on_conflict_do_update(constraint="uq_supplier_sync_status_job", set_={"requested_at": now})
     await db.execute(stmt)
     return now
+
+
+async def get_supplier_media(db: AsyncSession, product_id: int) -> SupplierMedia | None:
+    """Video y PDFs del proveedor para el detalle de producto (cara al cliente: nunca precios).
+    None si el producto no esta ligado o el proveedor no tiene ningun medio."""
+    row = (await db.execute(
+        select(SupplierProduct.video_url, SupplierProduct.datasheet_url, SupplierProduct.manual_url)
+        .where(SupplierProduct.product_id == product_id, SupplierProduct.supplier == SUPPLIER)
+    )).first()
+    if row is None or not any(row):
+        return None
+    return SupplierMedia(video_url=row.video_url, datasheet_url=row.datasheet_url, manual_url=row.manual_url)
 
 
 async def get_product_supplier_info(db: AsyncSession, product_uuid: str) -> ProductSupplierInfo:

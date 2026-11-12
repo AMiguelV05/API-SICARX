@@ -33,7 +33,7 @@ class ProductSuggestion(CamelModel):
     sicar_uuid: str
     sku: str
     name: str
-    image_url: Optional[str] = None
+    image_url: Optional[str] = Field(default=None, validation_alias="effective_image_url", serialization_alias="imageUrl", description="Foto de Sicar X, o la del proveedor si Sicar X no tiene.")
     price: float
     compare_at_price: Optional[float] = Field(
         default=None, validation_alias="effective_compare_at_price", serialization_alias="compareAtPrice",

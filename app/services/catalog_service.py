@@ -53,7 +53,7 @@ async def _apply_search_filters(db: AsyncSession, stmt, department_uuid, categor
 # devolver los empates en distinto orden entre dos consultas, repitiendo o saltando
 # productos entre paginas consecutivas.
 _IN_STOCK_FIRST = (Product.available_stock > 0).desc()
-_WITH_IMAGE_FIRST = and_(Product.image_url.isnot(None), Product.image_url != "").desc()
+_WITH_IMAGE_FIRST = Product.effective_image_url.isnot(None).desc()
 
 
 def _apply_price_range(stmt, min_price, max_price):
@@ -332,8 +332,7 @@ async def get_available_now_products(db: AsyncSession, limit: int, department_uu
         Product.is_deleted == False,
         Product.is_active == True,
         Product.available_stock > 0,
-        Product.image_url.isnot(None),
-        Product.image_url != "",
+        Product.effective_image_url.isnot(None),
     )
 
     if department_uuid:

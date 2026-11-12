@@ -79,7 +79,7 @@ class ProductBasic(CamelModel):
     name: str
     description: Optional[str]
     brand: Optional[str] = None
-    image_url: Optional[str]
+    image_url: Optional[str] = Field(default=None, validation_alias="effective_image_url", serialization_alias="imageUrl", description="Foto de Sicar X, o la del proveedor si Sicar X no tiene.")
     price: float
     # Fuente real es Product.available_stock (stock - reserved), no Product.stock crudo -
     # ver CLAUDE.md, "stock sync y ordenes". El alias mantiene el wire format ("stock") sin
@@ -150,6 +150,14 @@ def package_dimensions_public(product) -> Optional[PackageDimensions]:
     )
 
 
+class SupplierMedia(CamelModel):
+    """Medios que publica el proveedor (hoy URREA) para el producto. Cada campo es null si el
+    proveedor no lo tiene; el objeto completo es null si no hay ninguno."""
+    video_url: Optional[str] = Field(default=None, description="URL de embed de YouTube (https://www.youtube.com/embed/<id>), lista para un iframe.")
+    datasheet_url: Optional[str] = Field(default=None, description="PDF de la ficha tecnica.")
+    manual_url: Optional[str] = Field(default=None, description="PDF del manual de uso.")
+
+
 class ProductDetail(CamelModel):
     id: int
     sicar_uuid: str
@@ -185,6 +193,7 @@ class ProductDetail(CamelModel):
     technical_specs: Optional[str] = None
     contents: Optional[str] = None
     package_dimensions: Optional[PackageDimensions] = Field(default=None, description="Peso y medidas del empaque de una pieza; null si el producto todavia no las tiene capturadas.")
+    supplier_media: Optional[SupplierMedia] = Field(default=None, description="Video y PDFs del proveedor; null si no hay ninguno.")
 
 
 class ProductInfoUpdateRequest(CamelModel):

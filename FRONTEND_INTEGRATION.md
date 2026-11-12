@@ -160,6 +160,7 @@ Objeto `ProductBasic` (listados, búsqueda, feeds y favoritos):
 }
 ```
 
+- `imageUrl`: la foto de Sicar X; si no hay, la del proveedor (URREA). Lo mismo en carrito, pedidos, sugerencias y webhooks. Las de URREA vienen de `uhpproductosdev.blob.core.windows.net`: agrégalo a `images.remotePatterns` de Next.
 - `salesCount`: unidades vendidas en pedidos pagados. Es numérico y puede tener decimales.
 - `averageRating`: `null` si no hay reseñas (no es 0 estrellas).
 - `compareAtPrice`/`saleEndsAt`: precio anterior (tachado, con IVA) y fin de la oferta. Son `null` sin oferta vigente; cuando hay, `compareAtPrice > price`. La oferta se apaga sola. Porcentaje: `round((1 - price/compareAtPrice) * 100)`. Siempre se cobra `price`.
@@ -237,6 +238,7 @@ Autocompletado (llámalo con debounce de ~200 ms). `q` de 1 a 100 caracteres; `l
   "technicalSpecs": "-Capacidad: 26 - 65\"\n-Color: Negro",
   "contents": "Manual de usuario",
   "packageDimensions": { "weightKg": 2.06, "lengthCm": 16.0, "widthCm": 66.0, "heightCm": 4.0 },
+  "supplierMedia": { "videoUrl": "https://www.youtube.com/embed/aSYB_sNFd_U", "datasheetUrl": "https://...pdf", "manualUrl": null },
   "attributes": [
     { "attributeUuid": "...", "name": "Voltaje", "slug": "voltaje", "dataType": "NUMBER", "unit": "V", "value": 12.5 }
   ],
@@ -253,7 +255,8 @@ Autocompletado (llámalo con debounce de ~200 ms). `q` de 1 a 100 caracteres; `l
 - `attributes` es `[]` si no hay. El tipo de `value` depende de `dataType` (`TEXT`/`ENUM` → string, `NUMBER` → number, `BOOLEAN` → boolean).
 - `variantGroup` es `null` si el producto no pertenece a un grupo. `siblings` excluye al producto actual. `value` es el valor de `variantAttributeSlug` de cada sibling, para armar el selector de variantes; si `variantAttributeSlug` es `null`, usa `name`/`sku`.
 - `packageDimensions`: peso (kg) y medidas (cm) del empaque de una pieza; `null` si el producto no las tiene. Sirve para mostrarlas en la ficha y, a futuro, para cotizar el envío.
-- `attributes`, `variantGroup`, `bulletPoints`, `technicalSpecs`, `contents` y `packageDimensions` **solo** vienen en esta ruta.
+- `supplierMedia`: video y PDFs del proveedor; `null` si no hay ninguno, y cada campo puede ser `null`. `videoUrl` ya es una URL de embed de YouTube (va directo en un `<iframe>`). `datasheetUrl` (ficha técnica) y `manualUrl` son PDFs, en `uhpproductosdev.blob.core.windows.net` o `medios.urrea.com`: ábrelos en otra pestaña.
+- `attributes`, `variantGroup`, `bulletPoints`, `technicalSpecs`, `contents`, `packageDimensions` y `supplierMedia` **solo** vienen en esta ruta.
 
 ### Feeds de portada (GET, sin paginar, sin `total`)
 

@@ -59,8 +59,9 @@ _BULK_STATUS = {
     "no disponible": UNAVAILABLE,
 }
 
-# Placeholder de URREA para "sin video".
-_EMPTY_VIDEO = re.compile(r"^https?://(www\.)?youtube\.com/embed/0?/?$", re.IGNORECASE)
+# Solo embeds de YouTube con un id real (11 caracteres): la tienda los mete en un iframe. La
+# masiva trae el placeholder ".../embed/0" en ~1,200 filas y basura como ".../embed/ 4000 PSI".
+_YOUTUBE_EMBED = re.compile(r"^https://(www\.)?youtube(-nocookie)?\.com/embed/[A-Za-z0-9_-]{11}(\?[^\s]*)?$")
 
 _down_until: float = 0.0
 # Solo para pruebas: un httpx.MockTransport en lugar de la red real.
@@ -233,7 +234,7 @@ def parse_catalog_row(raw: dict) -> UrreaCatalogRow | None:
     if not code:
         return None
     video = _url(r.get("video"))
-    if video and _EMPTY_VIDEO.match(video):
+    if video and not _YOUTUBE_EMBED.match(video):
         video = None
     status_text = (_text(r.get("estatusinventario")) or "").lower()
     return UrreaCatalogRow(

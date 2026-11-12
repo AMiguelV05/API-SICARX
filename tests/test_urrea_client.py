@@ -77,6 +77,18 @@ def test_parse_catalog_row_normalizes_values():
     assert row.is_set is False
 
 
+@pytest.mark.parametrize("video, expected", [
+    ("https://www.youtube.com/embed/aSYB_sNFd_U", "https://www.youtube.com/embed/aSYB_sNFd_U"),
+    ("http://www.youtube.com/embed/aSYB_sNFd_U", "https://www.youtube.com/embed/aSYB_sNFd_U"),
+    ("https://www.youtube.com/embed/0", None),
+    ("https://www.youtube.com/embed/ 4000 PSI", None),
+    ("https://www.youtube.com/embed/te", None),
+    ("https://evil.test/embed/aSYB_sNFd_U", None),
+])
+def test_parse_catalog_row_keeps_only_real_youtube_embeds(video, expected):
+    assert urrea_client.parse_catalog_row({**BULK_ROW, "video": video}).video_url == expected
+
+
 def test_parse_catalog_row_is_case_insensitive_and_maps_statuses():
     lowered = {k.lower(): v for k, v in BULK_ROW.items()}
     for raw, expected in (("Disponible", AVAILABLE), ("No disponible", UNAVAILABLE), ("raro", None)):

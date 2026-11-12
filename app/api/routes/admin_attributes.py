@@ -80,7 +80,7 @@ async def admin_list_attribute_products(
             sku=p.sku,
             name=p.name,
             description=p.description,
-            image_url=p.image_url,
+            image_url=p.effective_image_url,
             price=p.price,
             stock=p.stock,
             available_stock=p.available_stock,

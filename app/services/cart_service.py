@@ -39,7 +39,7 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
                 productUuid=product_uuid,
                 sku=product.sku,
                 name=product.name,
-                imageUrl=product.image_url,
+                imageUrl=product.effective_image_url,
                 price=float(product.price),
                 compareAtPrice=float(product.effective_compare_at_price) if product.effective_compare_at_price is not None else None,
                 saleEndsAt=product.effective_sale_ends_at,
