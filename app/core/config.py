@@ -59,6 +59,19 @@ class Settings(BaseSettings):
     TYPESENSE_URL: Optional[str] = None  # p. ej. http://typesense.railway.internal:8108
     TYPESENSE_API_KEY: Optional[str] = None
 
+    # Webservice B2B de Grupo URREA (disponibilidad e informacion de producto, ver
+    # urrea_client.py). Opcionales, mismo trato que TYPESENSE_*: sin usuario/password la
+    # integracion no hace nada (ni el worker ni la API llaman a URREA). Las credenciales
+    # viajan en el body JSON de cada peticion - nunca loggear ese body.
+    URREA_WS_URL: str = "https://www.urreanet.com/urreanetnuevo/wsInformacionProducto.php"
+    URREA_USER: Optional[str] = None
+    URREA_PASSWORD: Optional[str] = None
+    # Prefijo del sku en Sicar X para productos de URREA (sku = prefijo + codigo de URREA).
+    URREA_SKU_PREFIX: str = "U"
+    # Venta sobre pedido cuando el stock local no alcanza y URREA reporta "Disponible".
+    URREA_BACKORDER_ENABLED: bool = False
+    URREA_BACKORDER_LEAD_DAYS: int = 5
+
     # Firma los JWT de sesion de AdminUser (login admin, ver security.py::get_current_admin).
     # Dominio de firma separado de CLIENT_JWT_SECRET a proposito - distinto radio de
     # impacto si alguno de los dos se filtra. Reemplaza al antiguo ADMIN_API_KEY
