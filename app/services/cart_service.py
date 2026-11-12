@@ -9,7 +9,7 @@ from app.models.client import ClientAccount
 from app.models.product import Product
 from app.schemas.cart import CartItemPublic, CartResponse
 from app.schemas.orders import ProductItem
-from app.services import coupon_service
+from app.services import backorder_service, coupon_service
 from app.services.order_service import _to_decimal
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,9 @@ async def _enrich(db: AsyncSession, raw_items: list) -> tuple[list[CartItemPubli
                 quantity=quantity,
                 lineTotal=float(line_total_decimal),
                 available=True,
+                availability=product.availability,
+                backorderQuantity=float(backorder_service.shortfall(product, quantity)) if product.backorder_allowed else 0,
+                backorderLeadDays=product.backorder_lead_days,
             ))
         else:
             enriched.append(CartItemPublic(

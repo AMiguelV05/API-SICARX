@@ -27,6 +27,26 @@ class SupplierSyncRequestResponse(CamelModel):
     detail: str
 
 
+class PendingPurchase(CamelModel):
+    """Un producto que hay que pedirle a URREA para surtir ordenes pagadas sobre pedido."""
+    product_uuid: str
+    sku: Optional[str] = None
+    name: str
+    supplier_code: Optional[str] = Field(None, description="Codigo de URREA; null si el producto ya no esta ligado")
+    sale_multiple: Optional[int] = Field(None, description="Multiplo en que URREA vende")
+    list_price: Optional[Decimal] = Field(None, description="Precio de lista de URREA (no es nuestro costo)")
+    backorder_quantity: Decimal = Field(description="Piezas sobre pedido en ordenes pagadas y no aceptadas")
+    suggested_purchase_quantity: Decimal = Field(description="backorderQuantity redondeado hacia arriba al multiplo de URREA")
+    orders_count: int
+    oldest_order_at: datetime
+    stock: Decimal = Field(description="Stock actual en Sicar X: si ya llego la mercancia, sube aqui")
+    reserved: Decimal = Field(description="Reservado por ordenes abiertas (incluye lo sobre pedido)")
+
+
+class PendingPurchasesResponse(CamelModel):
+    docs: list[PendingPurchase]
+
+
 class ProductSupplierInfo(CamelModel):
     """Solo admin: incluye el precio de lista del proveedor."""
     supplier: str

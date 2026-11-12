@@ -12,6 +12,7 @@ from app.services.package_dimensions_service import MAX_DIMENSION_CM, MAX_WEIGHT
 # import circular con ProductDetail (que a su vez necesita los tipos de attribute.py).
 
 DataType = Literal["TEXT", "NUMBER", "BOOLEAN", "ENUM"]
+Availability = Literal["IN_STOCK", "BACKORDER", "OUT_OF_STOCK"]
 AttributeValue = Union[str, float, bool, None]
 
 class AttributeValuePublic(CamelModel):
@@ -99,10 +100,21 @@ class ProductBasic(CamelModel):
         default=None, validation_alias="effective_sale_ends_at", serialization_alias="saleEndsAt",
         description="Fin de la oferta (ISO-8601). Null si la oferta no tiene fecha de fin o si no hay oferta vigente.",
     )
+    availability: Availability = Field(default="OUT_OF_STOCK", description="IN_STOCK: hay existencia. BACKORDER: sin existencia, pero se puede pedir al proveedor (tarda `backorderLeadDays`). OUT_OF_STOCK: no se puede comprar.")
+    backorder_lead_days: Optional[int] = Field(default=None, description="Dias habiles estimados si se pide mas de la existencia (venta sobre pedido). Null si no se puede pedir mas de `stock`.")
     sales_count: float
     # Cacheados en Product, mantenidos por review_service - ver ReviewListResponse. None/0 si el producto no tiene reseñas todavia.
     average_rating: Optional[float] = None
     reviews_count: int = 0
+
+class ProductAvailabilityResponse(CamelModel):
+    """GET /products/{uuid}/availability: ¿se pueden comprar `quantity` piezas ahora?"""
+    quantity: float
+    stock: float = Field(description="Existencia disponible ahora (igual que ProductBasic.stock).")
+    backorder_quantity: float = Field(description="Piezas que irian sobre pedido (quantity - stock), 0 si alcanza la existencia o si no se puede pedir.")
+    available: Optional[bool] = Field(description="true: se puede comprar esa cantidad. false: no. null: no se pudo confirmar con el proveedor ahora; reintentar.")
+    lead_days: Optional[int] = Field(default=None, description="Dias habiles estimados si hay piezas sobre pedido.")
+
 
 class ProductAdminBasic(ProductBasic):
     """ProductBasic pero para vistas admin/PIM (productos por categoria/vehiculo/grupo de
@@ -179,6 +191,8 @@ class ProductDetail(CamelModel):
     is_bulk: bool
     is_active: bool
     is_deleted: bool
+    availability: Availability = Field(default="OUT_OF_STOCK", description="IN_STOCK: hay existencia. BACKORDER: sin existencia, pero se puede pedir al proveedor (tarda `backorderLeadDays`). OUT_OF_STOCK: no se puede comprar.")
+    backorder_lead_days: Optional[int] = Field(default=None, description="Dias habiles estimados si se pide mas de la existencia (venta sobre pedido). Null si no se puede pedir mas de `stock`.")
     last_sync_id: Optional[str]
     details_updated_at: Optional[datetime]
     deleted_at: Optional[datetime]

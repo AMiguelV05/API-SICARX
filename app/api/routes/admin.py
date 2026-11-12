@@ -82,6 +82,7 @@ async def admin_list_orders(
     client_email: Optional[str] = Query(default=None, alias="clientEmail"),
     client_uuid: Optional[str] = Query(default=None, alias="clientUuid"),
     include_deleted: bool = Query(default=False, alias="includeDeleted"),
+    has_backorder: Optional[bool] = Query(default=None, alias="hasBackorder", description="true: solo ordenes con lineas sobre pedido; false: solo sin ellas."),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
@@ -97,6 +98,7 @@ async def admin_list_orders(
         include_deleted=include_deleted,
         limit=limit,
         offset=offset,
+        has_backorder=has_backorder,
     )
     return AdminOrderListResponse(total=total, docs=orders)
 

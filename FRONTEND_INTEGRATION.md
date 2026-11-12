@@ -156,12 +156,14 @@ Objeto `ProductBasic` (listados, búsqueda, feeds y favoritos):
   "imageUrl": null, "price": 10.0,
   "compareAtPrice": null, "saleEndsAt": null,
   "stock": 2.0, "salesCount": 0.0,
+  "availability": "IN_STOCK", "backorderLeadDays": null,
   "averageRating": null, "reviewsCount": 0
 }
 ```
 
 - `imageUrl`: la foto de Sicar X; si no hay, la del proveedor (URREA). Lo mismo en carrito, pedidos, sugerencias y webhooks. Las de URREA vienen de `uhpproductosdev.blob.core.windows.net`: agrégalo a `images.remotePatterns` de Next.
 - `salesCount`: unidades vendidas en pedidos pagados. Es numérico y puede tener decimales.
+- **Venta sobre pedido**: `availability` es `IN_STOCK` (hay existencia), `BACKORDER` (no hay, pero se puede pedir al proveedor) u `OUT_OF_STOCK` (no se puede comprar). `backorderLeadDays` no nulo significa que el cliente puede pedir **más** de `stock` (también con `IN_STOCK`) y que lo que exceda tarda unos N días hábiles extra. Badge sugerido para `BACKORDER`: "Sobre pedido · entrega en ~N días". `stock` sigue siendo la existencia real; el filtro `inStock` no incluye productos sobre pedido. Cuando la venta sobre pedido está apagada, `backorderLeadDays` es `null` y no hay `BACKORDER`.
 - `averageRating`: `null` si no hay reseñas (no es 0 estrellas).
 - `compareAtPrice`/`saleEndsAt`: precio anterior (tachado, con IVA) y fin de la oferta. Son `null` sin oferta vigente; cuando hay, `compareAtPrice > price`. La oferta se apaga sola. Porcentaje: `round((1 - price/compareAtPrice) * 100)`. Siempre se cobra `price`.
 
@@ -255,8 +257,21 @@ Autocompletado (llámalo con debounce de ~200 ms). `q` de 1 a 100 caracteres; `l
 - `attributes` es `[]` si no hay. El tipo de `value` depende de `dataType` (`TEXT`/`ENUM` → string, `NUMBER` → number, `BOOLEAN` → boolean).
 - `variantGroup` es `null` si el producto no pertenece a un grupo. `siblings` excluye al producto actual. `value` es el valor de `variantAttributeSlug` de cada sibling, para armar el selector de variantes; si `variantAttributeSlug` es `null`, usa `name`/`sku`.
 - `packageDimensions`: peso (kg) y medidas (cm) del empaque de una pieza; `null` si el producto no las tiene. Sirve para mostrarlas en la ficha y, a futuro, para cotizar el envío.
+- `availability`/`backorderLeadDays` como en `ProductBasic`.
 - `supplierMedia`: video y PDFs del proveedor; `null` si no hay ninguno, y cada campo puede ser `null`. `videoUrl` ya es una URL de embed de YouTube (va directo en un `<iframe>`). `datasheetUrl` (ficha técnica) y `manualUrl` son PDFs, en `uhpproductosdev.blob.core.windows.net` o `medios.urrea.com`: ábrelos en otra pestaña.
 - `attributes`, `variantGroup`, `bulletPoints`, `technicalSpecs`, `contents`, `packageDimensions` y `supplierMedia` **solo** vienen en esta ruta.
+
+### `GET /v1/products/{uuid}/availability?quantity=N`: ¿se puede comprar esa cantidad?
+
+Para el selector de cantidad cuando el cliente pide más de `stock` y `backorderLeadDays` no es nulo. Llámalo **desde el navegador** después de pintar la página (no en SSR): si hace falta, consulta al proveedor (hasta ~2 s; la respuesta se reutiliza 10 min). Límite: 30 por minuto. `404` si el producto no existe o no está a la venta.
+
+```json
+{ "quantity": 5, "stock": 2, "backorderQuantity": 3, "available": true, "leadDays": 5 }
+```
+
+- `available: true`: se puede; `backorderQuantity` piezas irán sobre pedido y tardan `leadDays` días hábiles extra. Si `quantity <= stock`, responde `true` sin consultar al proveedor.
+- `available: false`: no se puede esa cantidad (`backorderQuantity: 0`). Limita el selector a `stock`.
+- `available: null`: no se pudo confirmar con el proveedor ahora. Permite seguir; `POST /v1/orders` vuelve a confirmar.
 
 ### Feeds de portada (GET, sin paginar, sin `total`)
 
@@ -315,6 +330,7 @@ Respuesta (`GET`, `PUT`, `PATCH /items`, `merge` y cupón):
 }
 ```
 
+- `availability`, `backorderQuantity` y `backorderLeadDays` por línea: `backorderQuantity` son las piezas que exceden `stock` y van sobre pedido (`0` si alcanza o si el producto no acepta pedido). Es una estimación: el proveedor se confirma al hacer el pedido.
 - Una línea `available: false` (producto eliminado o inactivo) trae `sku`, `name`, `price`, `stock` y `lineTotal` en `null`. Muéstrala como "ya no disponible". No cuenta en `subtotal`, pero sí en `totalQuantity`.
 - `total = subtotal - discountAmount` (nunca negativo). Es lo que se muestra como "a pagar".
 - `cartToken` solo viene en carritos anónimos. Guárdalo **en memoria** para mandarlo como `cartToken` en login, registro o merge (la cookie no viaja a `/v1/auth/*`).
@@ -363,6 +379,7 @@ Content-Type: application/json
 - `contactInfo.email`: opcional para cuentas, **obligatorio para invitados** (`400`). `""` cuenta como ausente.
 - `couponCode` (solo cuentas): aquí es donde el cupón se valida y bloquea de verdad.
 - Campos opcionales que casi nunca hacen falta: `contentId`, `branchId`, `priceListUuid`, `wholesalePrices`.
+- **Sobre pedido**: una línea puede pedir más que `stock` si el producto tiene `backorderLeadDays`. El backend confirma el faltante con el proveedor antes de crear el pedido (puede tardar ~2 s más). El pedido guarda por línea `fulfillment: "BACKORDER"` y `backorderQuantity`.
 - `shipping` (solo `DELIVERYMAN`; con `PICKUP` → `400`): la opción elegida en `POST /v1/shipping/quotes` (ver abajo). Su precio se suma a `total`. Es obligatorio cuando la cotización salió `QUOTED`; con `NOT_QUOTABLE` manda solo `quoteUuid`. Si algún producto no tiene peso/medidas no hace falta.
 
 Respuesta `201`:
@@ -387,7 +404,8 @@ Errores:
 - `401`: `X-Client-Token` inválido.
 - `400`: carrito vacío; dirección guardada incompleta; invitado sin email, con `addressUuid` o con `couponCode`.
 - `404`: `addressUuid` que no existe o es de otra cuenta; cupón inexistente.
-- `409`: un producto sin disponibilidad; cupón que ya no aplica; falta `shipping` en un carrito cotizable, o la cotización expiró / el carrito o la dirección cambiaron / el `optionId` no existe (el `detail` lo dice: vuelve a cotizar).
+- `503`: no se pudo confirmar con el proveedor una línea sobre pedido. Pide reintentar en unos minutos o bajar la cantidad a `stock`.
+- `409`: un producto sin disponibilidad (incluye una línea sobre pedido que el proveedor ya no puede surtir); cupón que ya no aplica; falta `shipping` en un carrito cotizable, o la cotización expiró / el carrito o la dirección cambiaron / el `optionId` no existe (el `detail` lo dice: vuelve a cotizar).
 
 ### Envío a domicilio: `POST /v1/shipping/quotes`
 
@@ -470,6 +488,7 @@ Lista paginada (`limit`/`offset` en la query, más recientes primero): `{ total,
 - `id` y `sicarOrderId` son el mismo valor; usa `id`.
 - `couponCode`, `subtotal` y `discountAmount` son `null` si no hubo cupón. Si hubo, `total = subtotal - discountAmount + deliveryCost`.
 - `deliveryCost`: envío cobrado (`null` si no se cobró). `shippingQuote` (solo `DELIVERYMAN`, pedidos nuevos): `{ status: "QUOTED" | "MANUAL", reason, carrier, serviceDescription, deliveryEstimate, price, currency }`; `MANUAL` = envío por confirmar con la tienda. También vienen en los webhooks de pedido.
+- `hasBackorder`/`backorderLeadDays`: si alguna línea va sobre pedido y los días hábiles estimados (el mayor). Por línea: `fulfillment` (`STOCK` | `BACKORDER`; los pedidos viejos traen `STOCK`) y `backorderQuantity` (número, piezas sobre pedido de esa línea). Muéstralo en la confirmación y en el correo de `order-confirmed`, que también trae estos campos.
 - `items[].quantity` es string. `unitPrice` y `lineTotal` llevan IVA y son **antes del cupón**; para GA4, el descuento va a nivel evento (`coupon`/`discount`). `imageUrl` puede faltar en pedidos viejos.
 - `cancellationReason`: texto solo si canceló un admin.
 - `shippingLabel` (solo `DELIVERYMAN` con guía real de envia.com): `{ carrier, service, shipmentId, serviceDescription, trackingNumber, trackUrl, labelUrl, totalPrice, currency, weight, length, width, height, generatedAt }`. Usa `trackUrl` como enlace de "sigue tu paquete". No hay rastreo en vivo.

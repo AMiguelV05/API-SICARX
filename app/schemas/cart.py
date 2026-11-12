@@ -53,6 +53,12 @@ class CartItemPublic(CamelModel):
     quantity: float
     lineTotal: Optional[float] = None
     available: bool
+    # Venta sobre pedido (ver ProductBasic.availability). backorderQuantity: piezas de esta
+    # linea que exceden la existencia y irian sobre pedido; solo es una estimacion, POST /orders
+    # la confirma con el proveedor.
+    availability: Optional[str] = None
+    backorderQuantity: float = 0
+    backorderLeadDays: Optional[int] = None
 
 class CartResponse(CamelModel):
     items: List[CartItemPublic]

@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     URREA_BACKORDER_ENABLED: bool = False
     URREA_BACKORDER_LEAD_DAYS: int = 5
 
+    @property
+    def urrea_backorder_active(self) -> bool:
+        """Venta sobre pedido encendida y con credenciales de URREA para confirmarla."""
+        return bool(self.URREA_BACKORDER_ENABLED and self.URREA_USER and self.URREA_PASSWORD)
+
     # Firma los JWT de sesion de AdminUser (login admin, ver security.py::get_current_admin).
     # Dominio de firma separado de CLIENT_JWT_SECRET a proposito - distinto radio de
     # impacto si alguno de los dos se filtra. Reemplaza al antiguo ADMIN_API_KEY

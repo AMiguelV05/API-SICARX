@@ -3,6 +3,7 @@ from decimal import Decimal
 from sqlalchemy import CheckConstraint, Column, Integer, String, Numeric, Boolean, Text, JSON, DateTime, ForeignKey, Index, and_, or_, text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.hybrid import hybrid_property
+from app.core.config import settings
 from app.core.database import Base
 
 class Product(Base):
@@ -202,6 +203,24 @@ class Product(Base):
     @effective_image_url.expression
     def effective_image_url(cls):
         return func.coalesce(func.nullif(cls.image_url, ""), cls.fallback_image_url)
+
+    @property
+    def backorder_allowed(self) -> bool:
+        """Se puede pedir mas de lo que hay en existencia: venta sobre pedido encendida, la
+        masiva de URREA lo marca disponible y no es a granel. Es solo la oferta; cada compra
+        se confirma con URREA por cantidad (backorder_service)."""
+        return settings.urrea_backorder_active and bool(self.supplier_available) and not self.is_bulk
+
+    @property
+    def availability(self) -> str:
+        """IN_STOCK | BACKORDER | OUT_OF_STOCK, para el badge de la tienda."""
+        if self.available_stock > 0:
+            return "IN_STOCK"
+        return "BACKORDER" if self.backorder_allowed else "OUT_OF_STOCK"
+
+    @property
+    def backorder_lead_days(self) -> int | None:
+        return settings.URREA_BACKORDER_LEAD_DAYS if self.backorder_allowed else None
 
 
 class SyncStatus(Base):

@@ -8,7 +8,9 @@ from app.models.product import Product
 
 logger = logging.getLogger(__name__)
 
-async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantities: dict) -> dict[str, Product]:
+async def validate_cart_items(
+    db: AsyncSession, uuids: list, requested_quantities: dict, backorder_confirmed: dict[str, Decimal] | None = None,
+) -> dict[str, Product]:
     """Valida stock/disponibilidad/precio contra Postgres local, sin llamada a Sicar X.
     `price <= 0` se trata como no disponible - evita que un producto sincronizado con precio
     0.00 se compre gratis.
@@ -27,7 +29,13 @@ async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantitie
     sorted(set(...)) + ORDER BY: un pedido puede tener varios productos - ordenar
     consistentemente el conjunto de uuids antes de bloquear evita deadlock entre dos
     checkouts concurrentes que comparten productos pero en orden de carrito distinto (mismo
-    criterio que coupon_service.replace_coupon_categories/replace_coupon_products)."""
+    criterio que coupon_service.replace_coupon_categories/replace_coupon_products).
+
+    `backorder_confirmed` ({uuid: faltante que URREA confirmo}, backorder_service.confirm_backorders,
+    corrido antes y fuera del lock): una linea puede exceder la existencia si el faltante con la
+    fila ya bloqueada no supera lo confirmado. Si crecio (otro checkout se llevo piezas entre el
+    pre-check y el lock), 409."""
+    backorder_confirmed = backorder_confirmed or {}
     sorted_uuids = sorted(set(uuids))
     result = await db.execute(
         select(Product)
@@ -46,9 +54,10 @@ async def validate_cart_items(db: AsyncSession, uuids: list, requested_quantitie
         requested_qty = requested_quantities.get(product_uuid, 0)
         product = products_by_uuid.get(product_uuid)
 
+        missing = Decimal(str(requested_qty)) - product.available_stock if product is not None else Decimal("0")
         if (
             product is None
-            or Decimal(str(requested_qty)) > product.available_stock
+            or (missing > 0 and missing > backorder_confirmed.get(product_uuid, Decimal("0")))
             or product.price is None
             or product.price <= 0
         ):
@@ -115,6 +124,8 @@ def build_order_payload(
     wholesale_prices: bool = False,
     discount_amount: Decimal = Decimal("0"),
     shipping_amount: Decimal = Decimal("0"),
+    backorder_quantities: dict[str, Decimal] | None = None,
+    backorder_lead_days: int | None = None,
 ) -> dict:
     """Ya NO se envia a Sicar X (solo ERP de inventario, ver CLAUDE.md) - construye el snapshot local de precios/totales/lineas. Conserva el calculo de impuestos original (amountTax = total de linea, no precio unitario) porque sigue siendo la fuente de verdad de como cobrar correctamente.
 
@@ -126,7 +137,12 @@ def build_order_payload(
 
     `shipping_amount` (opcional, ya resuelto por shipping_quote_service.resolve_for_order) se
     suma al total DESPUES del descuento: el cupon solo aplica a productos. `subtotal` sigue
-    siendo solo productos."""
+    siendo solo productos.
+
+    `backorder_quantities` ({uuid: piezas sobre pedido}): cada linea guarda `fulfillment`
+    (STOCK | BACKORDER; a futuro SUPPLIER_DIRECT para el envio directo del proveedor) y
+    `backorderQuantity`; las de BACKORDER tambien `backorderLeadDays`."""
+    backorder_quantities = backorder_quantities or {}
     order_lines = []
     total = Decimal("0")
 
@@ -143,7 +159,7 @@ def build_order_payload(
         line_total_decimal = net_price_decimal * quantity_decimal
         total += line_total_decimal
 
-        order_lines.append({
+        line = {
             "uuid": product_uuid,
             "sku": local_product.sku or "",
             "description": local_product.name or "",
@@ -152,7 +168,15 @@ def build_order_payload(
             "priceBaseTax": _format_amount(net_price_decimal),
             "priceTax": _format_amount(net_price_decimal),
             "amountTax": _format_amount(line_total_decimal),
-        })
+            "fulfillment": "STOCK",
+            "backorderQuantity": "0",
+        }
+        backorder = backorder_quantities.get(product_uuid, Decimal("0"))
+        if backorder > 0:
+            line["fulfillment"] = "BACKORDER"
+            line["backorderQuantity"] = _format_quantity(backorder)
+            line["backorderLeadDays"] = backorder_lead_days
+        order_lines.append(line)
 
     subtotal = total
     # compute_discount_amount (coupon_service) ya garantiza discount_amount <= subtotal

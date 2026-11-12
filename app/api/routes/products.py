@@ -1,6 +1,8 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Body, Query, status
+from decimal import Decimal
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, Request, status
+from app.core.rate_limit import limiter
 from sqlalchemy.future import select
 from datetime import datetime, timedelta, timezone
 from app.core.database import DbDep
@@ -8,9 +10,9 @@ from app.core.security import validate_api_key
 
 from app.models.product import Product
 from app.services.product_service import fetch_full_details_from_sicar
-from app.schemas.products import package_dimensions_public, LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse, RelatedProductsResponse
+from app.schemas.products import package_dimensions_public, LocalCatalogFilter, LocalCatalogResponse, ProductDetail, AttributeValuePublic, VariantGroupDetail, BestSellersResponse, AvailableNowResponse, ProductBrandsResponse, RelatedProductsResponse, ProductAvailabilityResponse
 from app.services.catalog_service import get_local_catalog, get_best_selling_products, get_available_now_products, get_distinct_brands
-from app.services import attribute_service, related_service, supplier_service
+from app.services import attribute_service, backorder_service, related_service, supplier_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/products", tags=["Products Catalog and Details"], dependencies=[Depends(validate_api_key)])
@@ -99,6 +101,31 @@ async def get_brands(
     docs = await get_distinct_brands(db, taxonomy_uuid=taxonomy_uuid)
     return ProductBrandsResponse(docs=docs)
 
+@router.get("/{uuid}/availability", response_model=ProductAvailabilityResponse, summary="¿Se puede comprar esta cantidad?")
+@limiter.limit("30/minute")
+async def get_product_availability(
+    request: Request,
+    uuid: str,
+    db: DbDep,
+    quantity: Decimal = Query(gt=0, le=100000, description="Piezas que el cliente quiere comprar"),
+):
+    """Para el selector de cantidad del detalle, llamado desde el navegador despues de pintar
+    (no en SSR). Si la existencia alcanza responde sin mas. Si no y el producto acepta venta
+    sobre pedido (`backorderLeadDays` no nulo), confirma el faltante con el proveedor (hasta
+    ~2 s; las respuestas se reutilizan 10 min). `available: null` = no se pudo confirmar
+    ahora. POST /orders vuelve a confirmar. 404 si no existe o no esta a la venta."""
+    product = await db.scalar(
+        select(Product).where(Product.sicar_uuid == uuid, Product.is_deleted == False, Product.is_active == True)  # noqa: E712
+    )
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Producto no encontrado.")
+    check = await backorder_service.check_quantity(db, product, quantity)
+    return ProductAvailabilityResponse(
+        quantity=float(check.quantity), stock=float(check.stock), backorder_quantity=float(check.backorder_quantity),
+        available=check.available, lead_days=check.lead_days,
+    )
+
+
 @router.get("/{uuid}", response_model=ProductDetail, summary="Obtener detalle de producto")
 async def get_product_details(uuid: str, db: DbDep):
     """
@@ -172,6 +199,8 @@ async def get_product_details(uuid: str, db: DbDep):
         is_bulk=product.is_bulk,
         is_active=product.is_active,
         is_deleted=product.is_deleted,
+        availability=product.availability,
+        backorder_lead_days=product.backorder_lead_days,
         last_sync_id=product.last_sync_id,
         details_updated_at=product.details_updated_at,
         deleted_at=product.deleted_at,

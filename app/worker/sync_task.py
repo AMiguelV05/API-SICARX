@@ -4,13 +4,14 @@ import json
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from logging.handlers import RotatingFileHandler
-from sqlalchemy import select, and_, not_, text
+from sqlalchemy import select, and_, not_, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from uuid import uuid4
 from app.core.database import AsyncSessionLocal
 from app.models.product import Product, SyncStatus
 from app.services import admin_notification_service
+from app.services.backorder_service import open_backorder_quantities_subquery
 # Necesario para que SQLAlchemy resuelva el ForeignKey de Product.variant_group_uuid -
 # sin este import falla con "could not find table 'variant_groups'".
 from app.models.attribute import VariantGroup  # noqa: F401
@@ -375,11 +376,15 @@ async def sync_sicar_catalog(db: AsyncSession, offset: int = 0, refresh_hidden: 
         # admin_notification_service.notify_admin_stock_drift. Se excluye el caso
         # stock < 0 y reserved <= 0: ahi no hay ninguna reserva local en juego, es un
         # stock negativo que ya viene asi de Sicar X, no una deriva causada por reservas.
+        # Lo reservado sobre pedido (backorder_service) no cuenta: esas piezas todavia no
+        # llegan a Sicar X por diseno.
         try:
+            open_backorders = open_backorder_quantities_subquery()
             drift_result = await db.execute(
                 select(Product.sicar_uuid, Product.sku, Product.name, Product.stock, Product.reserved)
+                .outerjoin(open_backorders, open_backorders.c.product_uuid == Product.sicar_uuid)
                 .where(
-                    Product.reserved > Product.stock,
+                    Product.reserved - func.coalesce(open_backorders.c.qty, 0) > Product.stock,
                     Product.is_deleted == False,
                     Product.is_active == True,
                     not_(and_(Product.stock < 0, Product.reserved <= 0)),

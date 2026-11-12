@@ -1,5 +1,5 @@
 import re
-from pydantic import EmailStr, Field, field_validator, model_validator
+from pydantic import EmailStr, Field, computed_field, field_validator, model_validator
 from typing import Any, List, Literal, Optional
 from datetime import datetime
 from app.core.config import settings
@@ -26,8 +26,36 @@ def enrich_order_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         line.setdefault("productUuid", item.get("uuid"))
         line.setdefault("unitPrice", _to_float(item.get("priceTax")))
         line.setdefault("lineTotal", _to_float(item.get("amountTax")))
+        # Venta sobre pedido: las ordenes anteriores no traen estos campos (todo era existencia).
+        line["fulfillment"] = item.get("fulfillment") or "STOCK"
+        line["backorderQuantity"] = _to_float(item.get("backorderQuantity")) or 0.0
         enriched.append(line)
     return enriched
+
+
+def order_has_backorder(items: list[dict[str, Any]]) -> bool:
+    return any((item or {}).get("fulfillment") == "BACKORDER" for item in items or [])
+
+
+def order_backorder_lead_days(items: list[dict[str, Any]]) -> Optional[int]:
+    days = [item.get("backorderLeadDays") for item in items or [] if (item or {}).get("fulfillment") == "BACKORDER"]
+    days = [d for d in days if isinstance(d, int)]
+    return max(days) if days else None
+
+
+class BackorderSummaryMixin(CamelModel):
+    """hasBackorder/backorderLeadDays derivados de items (OrderPublic, AdminOrderPublic y el
+    webhook order-confirmed, que serializa OrderPublic)."""
+
+    @computed_field(alias="hasBackorder", description="True si alguna linea va sobre pedido (se surte cuando llegue del proveedor).")
+    @property
+    def has_backorder(self) -> bool:
+        return order_has_backorder(self.items)
+
+    @computed_field(alias="backorderLeadDays", description="Dias habiles estimados para surtir las lineas sobre pedido; null si no hay.")
+    @property
+    def backorder_lead_days(self) -> Optional[int]:
+        return order_backorder_lead_days(self.items)
 
 def _to_float(v: Any) -> Optional[float]:
     try:
@@ -177,7 +205,7 @@ class OrderPayResponse(CamelModel):
     mpStatusDetail: Optional[str] = Field(default=None, description="Detalle del estado, p. ej. motivo de rechazo. En cobros por la Orders API usa sus códigos (rejected_by_issuer, bad_filled_card_data, ...).")
     ticketUrl: Optional[str] = Field(default=None, description="Liga a la ficha/barcode de pago (OXXO y similares) si aplica")
 
-class OrderPublic(CamelModel):
+class OrderPublic(BackorderSummaryMixin):
     uuid: str
     sicar_order_id: str = Field(deprecated=True, description="[DEPRECATED, usar `id`] Alias historico - el nombre viene de cuando este id provenia de Sicar X (ya no es el caso, ver CLAUDE.md). Se conserva por compatibilidad.")
     id: str = Field(validation_alias="sicar_order_id", serialization_alias="id", description="[Recomendado] Mismo valor que `sicarOrderId`, bajo el mismo nombre que OrderResponse.id - usar con POST /orders/{id}/pay y /cancel.")

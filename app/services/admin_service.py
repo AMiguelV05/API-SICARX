@@ -128,6 +128,7 @@ async def list_orders_admin(
     include_deleted: bool,
     limit: int,
     offset: int,
+    has_backorder: bool | None = None,
 ) -> tuple[int, list[AdminOrderPublic]]:
     """A diferencia del resto de order_history_service.py, no esta acotado a un cliente -
     busqueda admin sobre todas las cuentas."""
@@ -146,6 +147,12 @@ async def list_orders_admin(
     if dispatch_status:
         query = query.where(Order.dispatch_status == dispatch_status)
         count_query = count_query.where(Order.dispatch_status == dispatch_status)
+    if has_backorder is not None:
+        # items @> '[{"fulfillment": "BACKORDER"}]': alguna linea va sobre pedido.
+        backorder = Order.items.contains([{"fulfillment": "BACKORDER"}])
+        condition = backorder if has_backorder else ~backorder
+        query = query.where(condition)
+        count_query = count_query.where(condition)
     if client_uuid:
         query = query.join(ClientAccount, Order.client_account_id == ClientAccount.id).where(ClientAccount.uuid == client_uuid)
         count_query = count_query.join(ClientAccount, Order.client_account_id == ClientAccount.id).where(ClientAccount.uuid == client_uuid)

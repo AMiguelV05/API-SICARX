@@ -92,6 +92,7 @@ Busca en **todas** las cuentas, ordenado por `createdAt` desc (sin `sortBy`). Fi
 - `clientEmail` (exacto, sin distinguir mayúsculas);
 - `clientUuid`;
 - `includeDeleted` (default `false`; solo para auditar pedidos que el cliente "borró");
+- `hasBackorder` (`true`: solo pedidos con líneas sobre pedido; `false`: solo sin ellas);
 - `limit` (default 50) y `offset`.
 
 `clientEmail` y `clientUuid` **no** encuentran pedidos de invitado: búscalos sin esos filtros y revisa `isGuest` y `guestEmail`.
@@ -117,6 +118,7 @@ Busca en **todas** las cuentas, ordenado por `createdAt` desc (sin `sortBy`). Fi
 - `clientEmail` y `clientName` también vienen en pedidos de invitado (salen del contacto). `clientUuid` es `null` para invitados.
 - `deliveryAddress` (solo `DELIVERYMAN`) es una **foto fija** tomada al crear el pedido: es el destino del envío, aunque el cliente edite su libreta después.
 - `disputedAt` se llena la primera vez que hay una disputa y nunca se borra.
+- `hasBackorder`/`backorderLeadDays` y, por línea, `fulfillment` (`STOCK` | `BACKORDER`) y `backorderQuantity`: ver "Proveedor URREA" abajo.
 - `404` si el pedido no existe, o si está borrado y no mandaste `includeDeleted=true`.
 
 ### Acciones sobre un pedido
@@ -318,6 +320,24 @@ Para cotizar envíos con datos reales del producto. Son las del **empaque de una
 - `DELETE /v1/admin/products/{productUuid}/package-dimensions` → `204`, idempotente.
 - Para leerlas: `packageDimensions` en `GET /v1/products/{uuid}` (`null` si no tiene).
 - Carga masiva: hoja `Medidas` de la importación por Excel (abajo).
+
+### Proveedor URREA
+
+Un worker baja cada 3 h el catálogo de URREA, liga cada código con nuestro producto (`sku` = `"U"` + código) y llena la ficha (la primera vez reemplaza descripción, marca, viñetas y contenido; después solo llena vacíos; las medidas solo se llenan si faltan). También guarda la foto de respaldo, video y PDFs.
+
+| Ruta | Notas |
+|---|---|
+| `GET /v1/admin/suppliers/urrea/status` | `{ enabled, requestedAt, lastRunStartedAt, lastRunFinishedAt, lastSuccessAt, rowsReceived, rowsMatched, rowsChanged, pimFieldsWritten, lastError, linkedProducts, supplierAvailableProducts }` |
+| `POST /v1/admin/suppliers/urrea/sync` | **super_admin**. `202` `{ requestedAt, detail }`: el worker corre el sync en su siguiente minuto (~1.5 min). `409` si URREA no está configurado |
+| `GET /v1/admin/products/{productUuid}/supplier` | `{ supplier, supplierCode, matchMethod, barcode, listPrice, currency, saleMultiple, price, availabilityStatus, photoUrls, videoUrl, datasheetUrl, manualUrl, setContentsUrl, info, pimFieldsApplied, updatedAt }`. `listPrice` es el precio de lista de URREA **sin** nuestro descuento de distribuidor: no es el costo, no hay margen todavía. `availabilityStatus`: `AVAILABLE` / `LIMITED` ("con reservas") / `UNAVAILABLE` según la lista masiva; `null` si el código ya no viene. `404` si el producto no está ligado |
+| `GET /v1/admin/suppliers/urrea/pending-purchases` | "Por pedir a URREA": `{ docs: [{ productUuid, sku, name, supplierCode, saleMultiple, listPrice, backorderQuantity, suggestedPurchaseQuantity, ordersCount, oldestOrderAt, stock, reserved }] }`, la orden más antigua primero. Suma las piezas sobre pedido de pedidos **pagados y no aceptados**; `suggestedPurchaseQuantity` redondea hacia arriba al múltiplo de URREA |
+
+**Venta sobre pedido** (si está activa): el cliente puede pedir más de la existencia de un producto de URREA; el backend confirma el faltante con URREA al crear el pedido. Esas líneas traen `fulfillment: "BACKORDER"` y `backorderQuantity`, y el pedido `hasBackorder: true`. Proceso:
+1. Revisa "Por pedir a URREA" y haz el pedido a URREA.
+2. Cuando llegue la mercancía, dale entrada en Sicar X.
+3. **Después** acepta el pedido (`/accept`). Aceptar antes también funciona, pero deja el stock de Sicar X en negativo hasta la entrada.
+
+El pedido reserva la cantidad completa (también lo que va sobre pedido), así que la mercancía que entra no queda libre para otro cliente. Cancelar funciona igual que siempre.
 
 ### Marcas
 

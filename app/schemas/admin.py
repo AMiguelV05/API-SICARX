@@ -3,7 +3,7 @@ from datetime import datetime
 from pydantic import Field, field_validator
 from app.schemas.base import CamelModel
 from app.schemas.client import ClientAddressPublic
-from app.schemas.orders import enrich_order_items
+from app.schemas.orders import BackorderSummaryMixin, enrich_order_items
 from app.schemas.shipping import ShippingLabelInfo
 
 class AdminHealthResponse(CamelModel):
@@ -34,7 +34,7 @@ class OutboxListResponse(CamelModel):
     total: int
     docs: List[OutboxRowPublic]
 
-class AdminOrderPublic(CamelModel):
+class AdminOrderPublic(BackorderSummaryMixin):
     """Superconjunto de OrderPublic para uso admin: agrega clientEmail/clientName, deletedAt (admins ven soft-deleted) y campos de aceptacion/mensajeria."""
     uuid: str
     sicar_order_id: str

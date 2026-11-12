@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.database import DbDep
 from app.core.security import SuperAdminDep, get_current_admin
-from app.schemas.suppliers import ProductSupplierInfo, SupplierSyncRequestResponse, SupplierSyncStatusResponse
+from app.schemas.suppliers import PendingPurchasesResponse, ProductSupplierInfo, SupplierSyncRequestResponse, SupplierSyncStatusResponse
 from app.services import supplier_service, urrea_client
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,14 @@ async def admin_request_urrea_sync(db: DbDep, current: SuperAdminDep):
     await db.commit()
     logger.info(f"Sync de URREA solicitado por el admin {current.email}.")
     return SupplierSyncRequestResponse(requested_at=requested_at, detail="Sync solicitado; el worker lo correra en el siguiente minuto.")
+
+
+@router.get("/suppliers/urrea/pending-purchases", response_model=PendingPurchasesResponse, summary="Por pedir a URREA")
+async def admin_urrea_pending_purchases(db: DbDep):
+    """Productos con piezas sobre pedido en ordenes pagadas y no aceptadas, con el codigo de
+    URREA y la cantidad sugerida redondeada al multiplo de venta. La orden mas antigua primero.
+    Una orden sale de aqui al aceptarla (despues de dar de entrada la mercancia en Sicar X)."""
+    return PendingPurchasesResponse(docs=await supplier_service.list_pending_purchases(db))
 
 
 @router.get("/products/{product_uuid}/supplier", response_model=ProductSupplierInfo, summary="Ficha de proveedor de un producto")

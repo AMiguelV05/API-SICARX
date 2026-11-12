@@ -18,6 +18,7 @@ from app.services.delivery_service import ACCOUNT_INLINE_ADDRESS_ERROR, GUEST_AD
 from app.services import shipping_quote_service
 from app.services import payment_service
 from app.services import coupon_service
+from app.services import backorder_service
 from app.schemas.orders import OrderCancelResponse, OrderCreate, OrderCancel, OrderResponse, PaymentSubmit, OrderPayResponse, OrderPublic
 from app.core.config import settings
 
@@ -66,6 +67,11 @@ async def create_order(
     `total` (`deliveryCost`). Si algún producto no tiene peso/medidas no se exige y el envío no
     se cobra. `409` si la cotización expiró o no corresponde a este carrito/dirección: volver a
     cotizar. Con la bandera apagada, el envío no se cobra (comportamiento anterior).
+
+    Venta sobre pedido (con `URREA_BACKORDER_ENABLED`): una línea puede exceder la existencia
+    si el producto acepta pedido (`backorderLeadDays` no nulo); el faltante se confirma con el
+    proveedor antes de crear el pedido. `409` si el proveedor no lo tiene; `503` si no se pudo
+    confirmar. La línea queda con `fulfillment: "BACKORDER"` y `backorderQuantity`.
     """
     branch_id = order_payload.branchId or 151456
     price_list_uuid = order_payload.priceListUuid or settings.SICAR_PRICE_LIST_ID
@@ -136,7 +142,12 @@ async def create_order(
         claim_pending = True
 
     try:
-        local_products = await validate_cart_items(db, uuids, requested_quantities)
+        # Venta sobre pedido: las lineas que exceden la existencia se confirman con URREA aqui,
+        # ANTES del FOR UPDATE de validate_cart_items (nunca se sostiene un lock durante la
+        # llamada externa). Con la bandera apagada no hace nada.
+        backorder_confirmed = await backorder_service.confirm_backorders(db, requested_quantities)
+        local_products = await validate_cart_items(db, uuids, requested_quantities, backorder_confirmed)
+        backorder_quantities = backorder_service.backorder_quantities(local_products, requested_quantities)
 
         # Cupon: se re-valida y bloquea AQUI, nunca se confia el descuento que GET /cart ya
         # mostro como preview - mismo principio que precio/stock, nunca confiar en el cliente.
@@ -176,12 +187,15 @@ async def create_order(
             wholesale_prices=order_payload.wholesalePrices,
             discount_amount=discount_amount,
             shipping_amount=shipping.amount or Decimal("0"),
+            backorder_quantities=backorder_quantities,
+            backorder_lead_days=settings.URREA_BACKORDER_LEAD_DAYS,
         )
         total_amount = float(order_payload_dict["ecOrderDto"]["total"])
 
         # Reserva local de inventario en un solo lote (Product.reserved, no Product.stock -
         # ver CLAUDE.md, "stock sync y ordenes"). Sicar X no se entera de esta orden hasta
         # que un admin la acepte (admin_service.accept_order); stock real se descuenta ahi.
+        # Las lineas sobre pedido tambien reservan la cantidad completa (ver backorder_service).
         deltas = [(item.get("uuid"), _to_decimal(item.get("quantity", 0))) for item in order_payload_dict["ecOrderDto"]["products"]]
         await apply_reserved_deltas(db, deltas)
 
