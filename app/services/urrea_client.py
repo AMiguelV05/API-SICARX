@@ -43,8 +43,8 @@ BULK_JOB = "bulk_catalog"
 
 # Consulta por cantidad (API, en linea): la opcion 2 tarda 1.3-2 s.
 QUERY_TIMEOUT = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
-# Masiva (worker): ~85 s observados.
-BULK_TIMEOUT = httpx.Timeout(connect=10.0, read=240.0, write=10.0, pool=10.0)
+# read = espera entre bytes; URREA arma todo el JSON antes de enviar (77-192 s observados).
+BULK_TIMEOUT = httpx.Timeout(connect=10.0, read=420.0, write=10.0, pool=10.0)
 BULK_ATTEMPTS = 2
 BREAKER_SECONDS = 60
 
