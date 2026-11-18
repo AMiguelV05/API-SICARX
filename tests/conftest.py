@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Las pruebas simulan fallas a proposito (Typesense caido, webhooks agotados, asserts en
+# monkeypatches); con el SENTRY_DSN del .env local, importar app.main/sync_task inicializaba
+# Sentry y cada corrida de pytest mandaba esos errores como issues reales. Una variable de
+# entorno vacia le gana al .env en pydantic-settings -> init_error_tracking es no-op.
+os.environ["SENTRY_DSN"] = ""
+
 _test_db_url = os.environ.get("TEST_DATABASE_URL")
 if not _test_db_url:
     _base_url = os.environ.get("DATABASE_URL", "")

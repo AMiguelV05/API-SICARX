@@ -15,7 +15,7 @@ from app.models.product import Product
 from app.models.taxonomy import Category, product_categories
 from app.models.vehicle import Vehicle, product_vehicles
 from app.models.attribute import Attribute, VariantGroup
-from app.services.attribute_service import coerce_and_validate_value
+from app.services.attribute_service import coerce_and_validate_value, stored_attributes
 from app.services.package_dimensions_service import PackageDimensions, validate_dimensions
 
 logger = logging.getLogger(__name__)
@@ -438,7 +438,7 @@ async def _apply_attribute_updates(db: AsyncSession, updates: dict[int, dict[str
         return 0
     product_ids = list(updates.keys())
     result = await db.execute(select(Product.id, Product.attributes).where(Product.id.in_(product_ids)))
-    current = {row.id: (row.attributes or {}) for row in result.all()}
+    current = {row.id: stored_attributes(row.attributes) for row in result.all()}
 
     rows_to_update = []
     written = 0

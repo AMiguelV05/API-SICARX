@@ -4,7 +4,7 @@ import unicodedata
 import uuid as uuid_lib
 from datetime import datetime, timezone
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, delete, update
+from sqlalchemy import select, func, delete, update, case
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.attribute import Attribute, AttributePreset, attribute_preset_items, VariantGroup
@@ -12,6 +12,29 @@ from app.services.brand_service import normalize_brand
 from app.models.product import Product
 
 logger = logging.getLogger(__name__)
+
+
+def stored_attributes(value) -> dict:
+    """Lee `Product.attributes` de forma defensiva: devuelve `{}` si el JSONB guardado no es
+    un objeto. Hubo filas corrompidas como LISTA (`["<json como texto>", {}]`) por el bug
+    de doble serializacion de apply_preset_to_products (ver el comentario ahi) y
+    `GET /products/{uuid}` reventaba en `.keys()` (Sentry FERRETERIA-CHARLY-5). Un valor
+    corrupto se trata como "sin atributos"; el siguiente guardado lo reemplaza por un dict."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        logger.warning(f"Product.attributes con tipo inesperado ({type(value).__name__}); se ignora.")
+        return {}
+    return value
+
+
+def _attributes_object_or_empty():
+    """Expresion SQL: `Product.attributes` si es un objeto JSONB, si no `'{}'` - para que
+    `nuevas || esto` no vuelva a producir un arreglo al topar con una fila corrupta."""
+    return case(
+        (func.jsonb_typeof(Product.attributes) == "object", Product.attributes),
+        else_=func.cast({}, JSONB),
+    )
 
 
 # --- Slugs: mismo slugify que taxonomy_service, generalizado para Attribute/AttributePreset -----
@@ -204,12 +227,12 @@ async def replace_attribute_products(db: AsyncSession, attribute_uuid: str, valu
     # atributo a un objeto nuevo, mismo criterio que replace_product_attributes).
     for sicar_uuid, product in current_products.items():
         if sicar_uuid not in target_products:
-            new_attrs = dict(product.attributes or {})
+            new_attrs = dict(stored_attributes(product.attributes))
             new_attrs.pop(attribute.slug, None)
             product.attributes = new_attrs or None
 
     for sicar_uuid, product in target_products.items():
-        new_attrs = dict(product.attributes or {})
+        new_attrs = dict(stored_attributes(product.attributes))
         new_attrs[attribute.slug] = value_by_uuid[sicar_uuid]
         product.attributes = new_attrs
 
@@ -252,7 +275,7 @@ async def patch_attribute_products(db: AsyncSession, attribute_uuid: str, upsert
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(errors))
 
     for sicar_uuid, product in upsert_products.items():
-        new_attrs = dict(product.attributes or {})
+        new_attrs = dict(stored_attributes(product.attributes))
         new_attrs[attribute.slug] = value_by_uuid[sicar_uuid]
         product.attributes = new_attrs
 
@@ -267,7 +290,7 @@ async def patch_attribute_products(db: AsyncSession, attribute_uuid: str, upsert
             )
         )
         for product in current_result.scalars().all():
-            new_attrs = dict(product.attributes or {})
+            new_attrs = dict(stored_attributes(product.attributes))
             new_attrs.pop(attribute.slug, None)
             product.attributes = new_attrs or None
             removed_uuids.append(product.sicar_uuid)
@@ -421,7 +444,7 @@ async def apply_preset_to_products(db: AsyncSession, preset_uuid: str, product_u
     scaffolded_count = 0
     product_ids: list[int] = []
     for row in found.values():
-        existing_keys = set((row.attributes or {}).keys())
+        existing_keys = set(stored_attributes(row.attributes).keys())
         scaffolded_count += len(preset_slugs - existing_keys)
         product_ids.append(row.id)
 
@@ -443,7 +466,7 @@ async def apply_preset_to_products(db: AsyncSession, preset_uuid: str, product_u
         await db.execute(
             update(Product)
             .where(Product.id.in_(product_ids))
-            .values(attributes=func.cast(new_keys, JSONB).op("||")(func.coalesce(Product.attributes, func.cast({}, JSONB))))
+            .values(attributes=func.cast(new_keys, JSONB).op("||")(_attributes_object_or_empty()))
         )
     await db.commit()
     logger.info(f"Preset {preset_uuid} aplicado via /admin a {len(unique_uuids)} producto(s), {scaffolded_count} clave(s) nueva(s).")
@@ -484,7 +507,7 @@ async def get_attributes_for_product(db: AsyncSession, product: Product) -> list
     segunda consulta redundante. Las claves siempre resuelven contra `attributes` porque
     delete_attribute bloquea el borrado mientras siga en uso - se ignoran en silencio solo
     como salvaguarda defensiva, no un caso esperado."""
-    stored = product.attributes or {}
+    stored = stored_attributes(product.attributes)
     if not stored:
         return []
 
@@ -747,7 +770,7 @@ async def get_variant_group_detail(db: AsyncSession, product: Product) -> dict |
     def _value_for(p: Product):
         if not group.variant_attribute_slug:
             return None
-        return (p.attributes or {}).get(group.variant_attribute_slug)
+        return stored_attributes(p.attributes).get(group.variant_attribute_slug)
 
     return {
         "uuid": group.uuid,

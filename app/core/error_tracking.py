@@ -1,4 +1,5 @@
 import logging
+import os
 
 import sentry_sdk
 
@@ -17,6 +18,10 @@ def init_error_tracking(service_name: str) -> None:
     sentry_sdk.init(
         dsn=settings.SENTRY_DSN,
         environment=settings.ENVIRONMENT,
+        # Railway expone el commit desplegado en RAILWAY_GIT_COMMIT_SHA (deploys desde GitHub;
+        # un `railway up` manual no lo trae). None deja que sentry_sdk lo detecte solo (git
+        # local en desarrollo).
+        release=os.environ.get("RAILWAY_GIT_COMMIT_SHA") or None,
         default_integrations=False,
         integrations=[],
     )
